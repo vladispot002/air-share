@@ -18,7 +18,7 @@ SRCS = $(wildcard $(SRC_DIR)/core/*.cpp) \
 OBJS = $(patsubst $(SRC_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(SRCS))
 TARGET = $(BIN_DIR)/lan_drop
 
-.PHONY: all clean run gui mobile-test web
+.PHONY: all clean run gui mobile-test web desktop
 
 all: $(TARGET)
 
@@ -41,6 +41,13 @@ mobile-test: $(TARGET)
 
 web:
 	@cd "Design LAN-Drop macOS UI" && npm run dev -- --host 0.0.0.0 --port 5173
+
+desktop:
+	@cp -f resources/lan-drop.desktop ~/Стільниця/lan-drop.desktop
+	@cp -f resources/lan-drop.desktop ~/.local/share/applications/lan-drop.desktop
+	@chmod +x ~/Стільниця/lan-drop.desktop ~/.local/share/applications/lan-drop.desktop
+	@gio set ~/Стільниця/lan-drop.desktop metadata::trusted true 2>/dev/null || true
+	@update-desktop-database ~/.local/share/applications 2>/dev/null || true
 
 clean:
 	rm -rf $(OBJ_DIR) $(BIN_DIR)
