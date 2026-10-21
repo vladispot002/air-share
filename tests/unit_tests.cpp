@@ -346,6 +346,36 @@ static bool testPresenters() {
     return true;
 }
 
+static bool testReceiverSecurityValidation() {
+    TEST_ASSERT(!isSafeFileName("../../escaped.txt"), "Rejects parent relative traversal");
+    TEST_ASSERT(!isSafeFileName("../escaped.txt"), "Rejects single parent traversal");
+    TEST_ASSERT(!isSafeFileName("sub/../../escaped.txt"), "Rejects nested traversal");
+    TEST_ASSERT(!isSafeFileName("/tmp/escaped.txt"), "Rejects root-based absolute path");
+    TEST_ASSERT(!isSafeFileName("/etc/passwd"), "Rejects system absolute path");
+    TEST_ASSERT(!isSafeFileName("C:\\Windows\\system32"), "Rejects backslash paths");
+    TEST_ASSERT(!isSafeFileName(""), "Rejects empty filename");
+    TEST_ASSERT(!isSafeFileName("."), "Rejects dot");
+    TEST_ASSERT(!isSafeFileName(".."), "Rejects double dot");
+    TEST_ASSERT(!isSafeFileName(std::string("file\0evil.sh", 12)), "Rejects null byte");
+    TEST_ASSERT(!isSafeFileName(std::string(256, 'a')), "Rejects name length > 255");
+    TEST_ASSERT(isSafeFileName("valid_report.pdf"), "Accepts valid filename");
+    TEST_ASSERT(isSafeFileName("my-image.tar.gz"), "Accepts multi-dot extension");
+    TEST_ASSERT(isSafeFileName("document (final).docx"), "Accepts filename with spaces and parentheses");
+
+    constexpr uint32_t kMaxChunk = 4 * 1024 * 1024;
+    uint64_t fileSize = 1000;
+    uint64_t totalReceived = 0;
+
+    TEST_ASSERT(!isValidChunkSize(0, fileSize, totalReceived, kMaxChunk), "Rejects 0 chunk size");
+    TEST_ASSERT(!isValidChunkSize(0xFFFFFFFF, fileSize, totalReceived, kMaxChunk), "Rejects uint32_max chunk");
+    TEST_ASSERT(!isValidChunkSize(8 * 1024 * 1024, fileSize, totalReceived, kMaxChunk), "Rejects >4MB chunk");
+    TEST_ASSERT(!isValidChunkSize(1500, fileSize, totalReceived, kMaxChunk), "Rejects chunk exceeding remaining file size");
+    TEST_ASSERT(isValidChunkSize(500, fileSize, totalReceived, kMaxChunk), "Accepts valid 500B chunk within bounds");
+    TEST_ASSERT(isValidChunkSize(500, fileSize, 500, kMaxChunk), "Accepts exact remainder chunk");
+    TEST_ASSERT(!isValidChunkSize(501, fileSize, 500, kMaxChunk), "Rejects chunk exceeding exact remainder");
+    return true;
+}
+
 int main() {
     std::cout << "==========================================\n";
     std::cout << "  LAN-Drop: Comprehensive Unit Test Suite \n";
@@ -369,7 +399,8 @@ int main() {
         {"NfcPairingSession NDEF Protocol", testNfcPairingSession},
         {"AirDropProtocolBridge Protocol", testAirDropBridge},
         {"LandropMobileBridge C-ABI FFI", testMobileFfiBridge},
-        {"MVP Presenters & View Integration", testPresenters}
+        {"MVP Presenters & View Integration", testPresenters},
+        {"Receiver Security & Boundary Validation", testReceiverSecurityValidation}
     };
 
     size_t passedCases = 0;
