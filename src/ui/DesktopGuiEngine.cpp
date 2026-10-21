@@ -2,12 +2,76 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <cstring>
+#include <cstdio>
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
-#include <cstring>
+#include <X11/keysym.h>
 
 namespace landrop::ui {
+
+struct ApplePalette {
+    unsigned long bg;
+    unsigned long headerBg;
+    unsigned long cardBg;
+    unsigned long cardBorder;
+    unsigned long textPrimary;
+    unsigned long textSecondary;
+    unsigned long accent;
+    unsigned long accentText;
+    unsigned long trafficRed;
+    unsigned long trafficYellow;
+    unsigned long trafficGreen;
+    unsigned long progressTrack;
+    unsigned long progressFill;
+    unsigned long buttonBg;
+    unsigned long buttonBorder;
+    unsigned long buttonText;
+    unsigned long successGreen;
+};
+
+static ApplePalette getPalette(ThemeMode mode) {
+    ApplePalette p;
+    if (mode == ThemeMode::Dark) {
+        p.bg = 0x1E1E1E;
+        p.headerBg = 0x252528;
+        p.cardBg = 0x2C2C2E;
+        p.cardBorder = 0x3A3A3C;
+        p.textPrimary = 0xF5F5F7;
+        p.textSecondary = 0x98989D;
+        p.accent = 0x0A84FF;
+        p.accentText = 0xFFFFFF;
+        p.trafficRed = 0xFF5F56;
+        p.trafficYellow = 0xFFBD2E;
+        p.trafficGreen = 0x27C93F;
+        p.progressTrack = 0x3A3A3C;
+        p.progressFill = 0x0A84FF;
+        p.buttonBg = 0x3A3A3C;
+        p.buttonBorder = 0x48484A;
+        p.buttonText = 0xF5F5F7;
+        p.successGreen = 0x30D158;
+    } else {
+        p.bg = 0xF5F5F7;
+        p.headerBg = 0xECECEE;
+        p.cardBg = 0xFFFFFF;
+        p.cardBorder = 0xD2D2D7;
+        p.textPrimary = 0x1D1D1F;
+        p.textSecondary = 0x86868B;
+        p.accent = 0x007AFF;
+        p.accentText = 0xFFFFFF;
+        p.trafficRed = 0xFF5F56;
+        p.trafficYellow = 0xFFBD2E;
+        p.trafficGreen = 0x27C93F;
+        p.progressTrack = 0xE5E5EA;
+        p.progressFill = 0x007AFF;
+        p.buttonBg = 0xE5E5EA;
+        p.buttonBorder = 0xD1D1D6;
+        p.buttonText = 0x1D1D1F;
+        p.successGreen = 0x34C759;
+    }
+    return p;
+}
 
 DesktopGuiEngine::DesktopGuiEngine()
     : m_discoveryPresenter(this),
@@ -29,7 +93,7 @@ bool DesktopGuiEngine::initialize(int width, int height, const std::string& titl
     m_storagePresenter.initialize();
     m_settingsPresenter.initialize();
 
-    m_lastNotification = "LAN-Drop Desktop Ready.";
+    m_lastNotification = "LAN-Drop Desktop Ready (macOS HIG Theme)";
 
     return initX11();
 }
@@ -43,14 +107,13 @@ bool DesktopGuiEngine::initX11() {
     int screen = DefaultScreen(display);
     Window root = RootWindow(display, screen);
 
-    unsigned long black = BlackPixel(display, screen);
-    unsigned long white = WhitePixel(display, screen);
+    ApplePalette pal = getPalette(m_theme);
 
     Window win = XCreateSimpleWindow(
         display, root, 50, 50,
         static_cast<unsigned int>(m_width),
         static_cast<unsigned int>(m_height),
-        1, black, white
+        1, pal.cardBorder, pal.bg
     );
 
     XStoreName(display, win, m_title.c_str());
@@ -58,7 +121,7 @@ bool DesktopGuiEngine::initX11() {
     XMapWindow(display, win);
 
     GC gc = XCreateGC(display, win, 0, nullptr);
-    XSetForeground(display, gc, black);
+    XSetForeground(display, gc, pal.textPrimary);
 
     m_displayPtr = display;
     m_windowId = win;
@@ -80,6 +143,17 @@ void DesktopGuiEngine::closeX11() {
         }
         XCloseDisplay(display);
         m_displayPtr = nullptr;
+    }
+}
+
+void DesktopGuiEngine::toggleTheme() {
+    m_theme = (m_theme == ThemeMode::Dark) ? ThemeMode::Light : ThemeMode::Dark;
+    if (m_displayPtr) {
+        ApplePalette pal = getPalette(m_theme);
+        Display* display = static_cast<Display*>(m_displayPtr);
+        XSetWindowBackground(display, m_windowId, pal.bg);
+        XClearWindow(display, m_windowId);
+        renderScreen();
     }
 }
 
@@ -124,6 +198,8 @@ void DesktopGuiEngine::handleX11Events() {
                 switchScreen(GuiScreen::Storage);
             } else if (key == XK_4) {
                 switchScreen(GuiScreen::Settings);
+            } else if (key == XK_t || key == XK_T) {
+                toggleTheme();
             } else if (key == XK_r) {
                 triggerAction(1);
             } else if (key == XK_n) {
@@ -131,6 +207,8 @@ void DesktopGuiEngine::handleX11Events() {
             } else if (key == XK_p) {
                 triggerAction(3);
             } else if (key == XK_c) {
+                triggerAction(4);
+            } else if (key == XK_x) {
                 triggerAction(5);
             } else if (key == XK_q || key == XK_Escape) {
                 m_isRunning = false;
@@ -139,26 +217,36 @@ void DesktopGuiEngine::handleX11Events() {
             int x = ev.xbutton.x;
             int y = ev.xbutton.y;
 
-            if (y >= 10 && y <= 45) {
-                if (x >= 20 && x <= 160) {
+            if (y >= 14 && y <= 32 && x >= 18 && x <= 36) {
+                m_isRunning = false;
+                return;
+            }
+
+            if (x >= 810 && x <= 940 && y >= 12 && y <= 38) {
+                toggleTheme();
+                return;
+            }
+
+            if (y >= 54 && y <= 84) {
+                if (x >= 150 && x <= 290) {
                     switchScreen(GuiScreen::Discovery);
-                } else if (x >= 170 && x <= 310) {
+                } else if (x >= 300 && x <= 440) {
                     switchScreen(GuiScreen::Transfers);
-                } else if (x >= 320 && x <= 460) {
+                } else if (x >= 450 && x <= 590) {
                     switchScreen(GuiScreen::Storage);
-                } else if (x >= 470 && x <= 610) {
+                } else if (x >= 600 && x <= 740) {
                     switchScreen(GuiScreen::Settings);
                 }
-            } else if (y >= 540 && y <= 580) {
-                if (x >= 20 && x <= 140) {
+            } else if (y >= 545 && y <= 585) {
+                if (x >= 30 && x <= 150) {
                     triggerAction(1);
-                } else if (x >= 150 && x <= 290) {
+                } else if (x >= 160 && x <= 300) {
                     triggerAction(2);
-                } else if (x >= 300 && x <= 420) {
+                } else if (x >= 310 && x <= 430) {
                     triggerAction(3);
-                } else if (x >= 430 && x <= 550) {
+                } else if (x >= 440 && x <= 560) {
                     triggerAction(4);
-                } else if (x >= 560 && x <= 680) {
+                } else if (x >= 570 && x <= 690) {
                     triggerAction(5);
                 }
             }
@@ -175,133 +263,265 @@ void DesktopGuiEngine::renderScreen() {
     Window win = m_windowId;
     GC gc = static_cast<GC>(m_gcPtr);
 
-    XClearWindow(display, win);
+    ApplePalette pal = getPalette(m_theme);
 
-    XDrawRectangle(display, win, gc, 10, 10, m_width - 20, m_height - 20);
+    XSetForeground(display, gc, pal.bg);
+    XFillRectangle(display, win, gc, 0, 0, static_cast<unsigned int>(m_width), static_cast<unsigned int>(m_height));
 
-    XDrawRectangle(display, win, gc, 20, 15, 140, 30);
-    XDrawString(display, win, gc, 30, 35, "[1] Discovery", 13);
+    XSetForeground(display, gc, pal.headerBg);
+    XFillRectangle(display, win, gc, 0, 0, static_cast<unsigned int>(m_width), 46);
 
-    XDrawRectangle(display, win, gc, 170, 15, 140, 30);
-    XDrawString(display, win, gc, 180, 35, "[2] Transfers", 13);
+    XSetForeground(display, gc, pal.trafficRed);
+    XFillArc(display, win, gc, 20, 16, 12, 12, 0, 360 * 64);
 
-    XDrawRectangle(display, win, gc, 320, 15, 140, 30);
-    XDrawString(display, win, gc, 335, 35, "[3] Storage", 11);
+    XSetForeground(display, gc, pal.trafficYellow);
+    XFillArc(display, win, gc, 38, 16, 12, 12, 0, 360 * 64);
 
-    XDrawRectangle(display, win, gc, 470, 15, 140, 30);
-    XDrawString(display, win, gc, 485, 35, "[4] Settings", 12);
+    XSetForeground(display, gc, pal.trafficGreen);
+    XFillArc(display, win, gc, 56, 16, 12, 12, 0, 360 * 64);
 
-    XDrawLine(display, win, gc, 10, 55, m_width - 10, 55);
+    XSetForeground(display, gc, pal.textPrimary);
+    const char* title = "LAN-Drop — AirShare";
+    XDrawString(display, win, gc, m_width / 2 - 60, 26, title, static_cast<int>(strlen(title)));
+
+    XSetForeground(display, gc, pal.buttonBg);
+    XFillRectangle(display, win, gc, 810, 12, 130, 24);
+    XSetForeground(display, gc, pal.buttonBorder);
+    XDrawRectangle(display, win, gc, 810, 12, 130, 24);
+
+    XSetForeground(display, gc, pal.buttonText);
+    const char* themeLabel = (m_theme == ThemeMode::Dark) ? "[T] Theme: Dark" : "[T] Theme: Light";
+    XDrawString(display, win, gc, 825, 28, themeLabel, static_cast<int>(strlen(themeLabel)));
+
+    XSetForeground(display, gc, pal.cardBorder);
+    XDrawLine(display, win, gc, 0, 46, m_width, 46);
+
+    const char* tabNames[4] = {"Radar / Discover", "Transfers", "Shared Storage", "Settings"};
+    GuiScreen tabScreens[4] = {GuiScreen::Discovery, GuiScreen::Transfers, GuiScreen::Storage, GuiScreen::Settings};
+    int startX = 170;
+    int tabW = 150;
+
+    for (int i = 0; i < 4; ++i) {
+        int tx = startX + i * (tabW + 10);
+        bool isActive = (m_currentScreen == tabScreens[i]);
+
+        XSetForeground(display, gc, isActive ? pal.accent : pal.cardBg);
+        XFillRectangle(display, win, gc, tx, 54, static_cast<unsigned int>(tabW), 28);
+
+        XSetForeground(display, gc, pal.cardBorder);
+        XDrawRectangle(display, win, gc, tx, 54, static_cast<unsigned int>(tabW), 28);
+
+        XSetForeground(display, gc, isActive ? pal.accentText : pal.textPrimary);
+        XDrawString(display, win, gc, tx + 16, 72, tabNames[i], static_cast<int>(strlen(tabNames[i])));
+    }
 
     if (m_currentScreen == GuiScreen::Discovery) {
-        XDrawString(display, win, gc, 30, 80, "SCREEN: RADAR / NETWORK DISCOVERY", 33);
-        std::string scanInfo = "Scanner Status: " + std::string(m_isScanning ? "ACTIVE (Listening for LAN Beacons)" : "IDLE");
-        XDrawString(display, win, gc, 30, 105, scanInfo.c_str(), static_cast<int>(scanInfo.size()));
+        XSetForeground(display, gc, pal.cardBg);
+        XFillRectangle(display, win, gc, 30, 95, static_cast<unsigned int>(m_width - 60), 430);
+        XSetForeground(display, gc, pal.cardBorder);
+        XDrawRectangle(display, win, gc, 30, 95, static_cast<unsigned int>(m_width - 60), 430);
 
-        XDrawRectangle(display, win, gc, 30, 120, m_width - 60, 240);
-        XDrawString(display, win, gc, 40, 140, "DEVICE LIST CONTAINER (Discovered Nodes):", 41);
+        XSetForeground(display, gc, pal.successGreen);
+        XFillArc(display, win, gc, 50, 115, 10, 10, 0, 360 * 64);
 
-        int rowY = 170;
-        for (size_t i = 0; i < m_deviceList.size() && i < 6; ++i) {
+        XSetForeground(display, gc, pal.textPrimary);
+        const char* radarHead = "Nearby Devices (LAN Radar & AirDrop Discovery)";
+        XDrawString(display, win, gc, 70, 124, radarHead, static_cast<int>(strlen(radarHead)));
+
+        XSetForeground(display, gc, pal.textSecondary);
+        std::string statusSub = "Scanner Status: " + std::string(m_isScanning ? "Active (Broadcasting UDP Beacons)" : "Idle");
+        XDrawString(display, win, gc, 50, 150, statusSub.c_str(), static_cast<int>(statusSub.size()));
+
+        int cardY = 175;
+        for (size_t i = 0; i < m_deviceList.size() && i < 4; ++i) {
             const auto& dev = m_deviceList[i];
-            std::string line = "[" + std::to_string(i + 1) + "] " + dev.name + " (" + dev.endpoint + ") | Type: " + dev.type +
-                               " | RSSI: " + std::to_string(dev.signalRssi) + "dBm | " + (dev.isOnline ? "Online" : "Offline");
-            XDrawString(display, win, gc, 45, rowY, line.c_str(), static_cast<int>(line.size()));
-            rowY += 28;
+
+            XSetForeground(display, gc, pal.headerBg);
+            XFillRectangle(display, win, gc, 50, cardY, static_cast<unsigned int>(m_width - 100), 52);
+            XSetForeground(display, gc, pal.cardBorder);
+            XDrawRectangle(display, win, gc, 50, cardY, static_cast<unsigned int>(m_width - 100), 52);
+
+            XSetForeground(display, gc, pal.accent);
+            std::string badge = "[" + dev.type + "]";
+            XDrawString(display, win, gc, 65, cardY + 22, badge.c_str(), static_cast<int>(badge.size()));
+
+            XSetForeground(display, gc, pal.textPrimary);
+            XDrawString(display, win, gc, 160, cardY + 22, dev.name.c_str(), static_cast<int>(dev.name.size()));
+
+            XSetForeground(display, gc, pal.textSecondary);
+            std::string meta = dev.endpoint + " | RSSI: " + std::to_string(dev.signalRssi) + "dBm | " + (dev.isOnline ? "Online" : "Offline");
+            XDrawString(display, win, gc, 160, cardY + 40, meta.c_str(), static_cast<int>(meta.size()));
+
+            XSetForeground(display, gc, pal.accent);
+            XFillRectangle(display, win, gc, m_width - 170, cardY + 14, 90, 24);
+            XSetForeground(display, gc, pal.accentText);
+            const char* sendBtn = "Send File";
+            XDrawString(display, win, gc, m_width - 155, cardY + 30, sendBtn, static_cast<int>(strlen(sendBtn)));
+
+            cardY += 62;
         }
 
-        XDrawRectangle(display, win, gc, 30, 380, m_width - 60, 80);
-        XDrawString(display, win, gc, 40, 405, "NFC QUICK-PAIR INTEGRATION:", 27);
-        XDrawString(display, win, gc, 40, 430, "Payload input: LANDROP_BEACON|MobileNfcNode|uuid-nfc-77|8848", 59);
+        XSetForeground(display, gc, pal.headerBg);
+        XFillRectangle(display, win, gc, 50, 440, static_cast<unsigned int>(m_width - 100), 65);
+        XSetForeground(display, gc, pal.cardBorder);
+        XDrawRectangle(display, win, gc, 50, 440, static_cast<unsigned int>(m_width - 100), 65);
+
+        XSetForeground(display, gc, pal.textPrimary);
+        const char* nfcTitle = "NFC Quick-Pair Card";
+        XDrawString(display, win, gc, 65, 465, nfcTitle, static_cast<int>(strlen(nfcTitle)));
+
+        XSetForeground(display, gc, pal.textSecondary);
+        const char* nfcDesc = "Tap an Android or iOS device against the NFC reader for instant 1-touch handshake.";
+        XDrawString(display, win, gc, 65, 488, nfcDesc, static_cast<int>(strlen(nfcDesc)));
 
     } else if (m_currentScreen == GuiScreen::Transfers) {
-        XDrawString(display, win, gc, 30, 80, "SCREEN: TRANSFER MANAGER", 24);
+        XSetForeground(display, gc, pal.cardBg);
+        XFillRectangle(display, win, gc, 30, 95, static_cast<unsigned int>(m_width - 60), 430);
+        XSetForeground(display, gc, pal.cardBorder);
+        XDrawRectangle(display, win, gc, 30, 95, static_cast<unsigned int>(m_width - 60), 430);
 
-        XDrawRectangle(display, win, gc, 30, 100, m_width - 60, 280);
-        XDrawString(display, win, gc, 40, 125, "TRANSFER TABLE CONTAINER:", 25);
-        XDrawString(display, win, gc, 40, 150, "ID       FILENAME                     SIZE        PROGRESS     SPEED       STATE", 76);
-        XDrawLine(display, win, gc, 40, 155, m_width - 40, 155);
+        XSetForeground(display, gc, pal.textPrimary);
+        const char* th1 = "Transfer Queue (P2P Chunked Engine)";
+        XDrawString(display, win, gc, 50, 125, th1, static_cast<int>(strlen(th1)));
 
-        int rowY = 180;
-        for (size_t i = 0; i < m_transferList.size() && i < 6; ++i) {
+        XSetForeground(display, gc, pal.textSecondary);
+        const char* tableHeader = "TASK ID     FILE NAME                    SIZE        PROGRESS          SPEED       STATUS";
+        XDrawString(display, win, gc, 50, 155, tableHeader, static_cast<int>(strlen(tableHeader)));
+        XSetForeground(display, gc, pal.cardBorder);
+        XDrawLine(display, win, gc, 50, 162, m_width - 50, 162);
+
+        int rowY = 185;
+        for (size_t i = 0; i < m_transferList.size() && i < 5; ++i) {
             const auto& t = m_transferList[i];
-            char rowBuf[256];
-            snprintf(rowBuf, sizeof(rowBuf), "%-8s %-28s %-11llu %3d%%        %-11.1f %-10s",
-                     t.taskId.c_str(), t.fileName.c_str(),
-                     static_cast<unsigned long long>(t.fileSize),
+
+            XSetForeground(display, gc, pal.textPrimary);
+            char col1[128];
+            snprintf(col1, sizeof(col1), "%-11s %-28s %-11llu", t.taskId.c_str(), t.fileName.c_str(), static_cast<unsigned long long>(t.fileSize));
+            XDrawString(display, win, gc, 50, rowY, col1, static_cast<int>(strlen(col1)));
+
+            int barX = 420;
+            int barW = 100;
+            int fillW = static_cast<int>((t.progress / 100.0) * barW);
+
+            XSetForeground(display, gc, pal.progressTrack);
+            XFillRectangle(display, win, gc, barX, rowY - 9, static_cast<unsigned int>(barW), 10);
+
+            XSetForeground(display, gc, pal.progressFill);
+            if (fillW > 0) {
+                XFillRectangle(display, win, gc, barX, rowY - 9, static_cast<unsigned int>(fillW), 10);
+            }
+
+            char col2[128];
+            snprintf(col2, sizeof(col2), "%3d%%   %-11.1f %-10s",
                      static_cast<int>(t.progress),
                      t.speedBytesPerSec / 1024.0,
                      t.stateStr.c_str());
-            XDrawString(display, win, gc, 40, rowY, rowBuf, static_cast<int>(strlen(rowBuf)));
-            rowY += 25;
+            XSetForeground(display, gc, pal.textPrimary);
+            XDrawString(display, win, gc, 535, rowY, col2, static_cast<int>(strlen(col2)));
+
+            rowY += 34;
         }
 
-        XDrawRectangle(display, win, gc, 30, 400, m_width - 60, 70);
-        std::string selText = "Selected: " + (m_selectedTransfer.fileName.empty() ? "None" : m_selectedTransfer.fileName + " (" + m_selectedTransfer.stateStr + ")");
-        XDrawString(display, win, gc, 40, 430, selText.c_str(), static_cast<int>(selText.size()));
+        XSetForeground(display, gc, pal.headerBg);
+        XFillRectangle(display, win, gc, 50, 440, static_cast<unsigned int>(m_width - 100), 65);
+        XSetForeground(display, gc, pal.cardBorder);
+        XDrawRectangle(display, win, gc, 50, 440, static_cast<unsigned int>(m_width - 100), 65);
+
+        XSetForeground(display, gc, pal.textPrimary);
+        std::string selText = "Active Selection: " + (m_selectedTransfer.fileName.empty() ? "None" : m_selectedTransfer.fileName + " | State: " + m_selectedTransfer.stateStr);
+        XDrawString(display, win, gc, 65, 475, selText.c_str(), static_cast<int>(selText.size()));
 
     } else if (m_currentScreen == GuiScreen::Storage) {
-        XDrawString(display, win, gc, 30, 80, "SCREEN: SHARED STORAGE REPOSITORY", 33);
-        std::string pathText = "Shared Folder Root: " + m_sharedPath;
-        XDrawString(display, win, gc, 30, 110, pathText.c_str(), static_cast<int>(pathText.size()));
+        XSetForeground(display, gc, pal.cardBg);
+        XFillRectangle(display, win, gc, 30, 95, static_cast<unsigned int>(m_width - 60), 430);
+        XSetForeground(display, gc, pal.cardBorder);
+        XDrawRectangle(display, win, gc, 30, 95, static_cast<unsigned int>(m_width - 60), 430);
 
-        std::string statsText = "Stats: " + std::to_string(m_sharedFileCount) + " files | Total: " +
-                                std::to_string(m_sharedTotalBytes / 1024) + " KB | Password: " +
-                                (m_isPasswordProtected ? "PROTECTED" : "NONE");
-        XDrawString(display, win, gc, 30, 135, statsText.c_str(), static_cast<int>(statsText.size()));
+        XSetForeground(display, gc, pal.textPrimary);
+        std::string sPath = "Shared Public Directory: " + m_sharedPath;
+        XDrawString(display, win, gc, 50, 125, sPath.c_str(), static_cast<int>(sPath.size()));
 
-        XDrawRectangle(display, win, gc, 30, 150, m_width - 60, 240);
-        XDrawString(display, win, gc, 40, 175, "SHARED FILES CATALOG:", 21);
+        XSetForeground(display, gc, pal.textSecondary);
+        std::string sStats = "Capacity: " + std::to_string(m_sharedFileCount) + " items | Total: " +
+                             std::to_string(m_sharedTotalBytes / 1024) + " KB | Security: " +
+                             (m_isPasswordProtected ? "PIN Protected" : "Open Access");
+        XDrawString(display, win, gc, 50, 150, sStats.c_str(), static_cast<int>(sStats.size()));
 
-        int rowY = 205;
+        XSetForeground(display, gc, pal.cardBorder);
+        XDrawLine(display, win, gc, 50, 162, m_width - 50, 162);
+
+        int rowY = 190;
         for (size_t i = 0; i < m_fileList.size() && i < 6; ++i) {
-            const auto& file = m_fileList[i];
-            std::string line = file.fileName + " (" + std::to_string(file.fileSize) + " bytes, " +
-                               std::to_string(file.totalChunks) + " chunks) SHA: " + file.fileSha256.substr(0, 16) + "...";
-            XDrawString(display, win, gc, 40, rowY, line.c_str(), static_cast<int>(line.size()));
-            rowY += 26;
+            const auto& f = m_fileList[i];
+            XSetForeground(display, gc, pal.textPrimary);
+            XDrawString(display, win, gc, 50, rowY, f.fileName.c_str(), static_cast<int>(f.fileName.size()));
+
+            XSetForeground(display, gc, pal.textSecondary);
+            std::string fDetails = std::to_string(f.fileSize) + " bytes | " + std::to_string(f.totalChunks) + " chunks | SHA-256: " + f.fileSha256.substr(0, 20) + "...";
+            XDrawString(display, win, gc, 300, rowY, fDetails.c_str(), static_cast<int>(fDetails.size()));
+            rowY += 30;
         }
 
     } else if (m_currentScreen == GuiScreen::Settings) {
-        XDrawString(display, win, gc, 30, 80, "SCREEN: SETTINGS & DIAGNOSTICS", 30);
-        std::string s1 = "Listen Port: " + std::to_string(m_settingsPort);
-        std::string s2 = "Transfer Speed Limit: " + (m_settingsSpeedLimit == 0 ? "Unlimited" : std::to_string(m_settingsSpeedLimit) + " KB/s");
-        std::string s3 = "Auto-Accept Transfers: " + std::string(m_settingsAutoAccept ? "[X] ENABLED" : "[ ] DISABLED");
-        std::string s4 = "AirDrop Protocol Bridge: " + std::string(m_settingsAirDropEnabled ? "[X] ACTIVE" : "[ ] INACTIVE");
+        XSetForeground(display, gc, pal.cardBg);
+        XFillRectangle(display, win, gc, 30, 95, static_cast<unsigned int>(m_width - 60), 430);
+        XSetForeground(display, gc, pal.cardBorder);
+        XDrawRectangle(display, win, gc, 30, 95, static_cast<unsigned int>(m_width - 60), 430);
 
-        XDrawString(display, win, gc, 30, 115, s1.c_str(), static_cast<int>(s1.size()));
-        XDrawString(display, win, gc, 30, 140, s2.c_str(), static_cast<int>(s2.size()));
-        XDrawString(display, win, gc, 30, 165, s3.c_str(), static_cast<int>(s3.size()));
-        XDrawString(display, win, gc, 30, 190, s4.c_str(), static_cast<int>(s4.size()));
+        XSetForeground(display, gc, pal.textPrimary);
+        const char* sTitle = "Preferences & Protocols";
+        XDrawString(display, win, gc, 50, 125, sTitle, static_cast<int>(strlen(sTitle)));
 
-        XDrawRectangle(display, win, gc, 30, 220, m_width - 60, 200);
-        XDrawString(display, win, gc, 40, 245, "DIAGNOSTIC LOGS CONTAINER:", 26);
-        int logY = 275;
-        for (int i = static_cast<int>(m_diagnosticLogs.size()) - 1; i >= 0 && logY < 400; --i) {
-            XDrawString(display, win, gc, 40, logY, m_diagnosticLogs[static_cast<size_t>(i)].c_str(),
+        std::string set1 = "Listen Port: " + std::to_string(m_settingsPort);
+        std::string set2 = "Transfer Speed Limit: " + (m_settingsSpeedLimit == 0 ? "Unlimited" : std::to_string(m_settingsSpeedLimit) + " KB/s");
+        std::string set3 = "Auto-Accept Transfers: " + std::string(m_settingsAutoAccept ? "[✓] Enabled" : "[ ] Disabled");
+        std::string set4 = "AirDrop Apple Protocol Bridge: " + std::string(m_settingsAirDropEnabled ? "[✓] Active" : "[ ] Inactive");
+
+        XSetForeground(display, gc, pal.textSecondary);
+        XDrawString(display, win, gc, 50, 155, set1.c_str(), static_cast<int>(set1.size()));
+        XDrawString(display, win, gc, 50, 180, set2.c_str(), static_cast<int>(set2.size()));
+        XDrawString(display, win, gc, 50, 205, set3.c_str(), static_cast<int>(set3.size()));
+        XDrawString(display, win, gc, 50, 230, set4.c_str(), static_cast<int>(set4.size()));
+
+        XSetForeground(display, gc, pal.cardBorder);
+        XDrawLine(display, win, gc, 50, 245, m_width - 50, 245);
+
+        XSetForeground(display, gc, pal.textPrimary);
+        const char* logTitle = "System Diagnostics Console:";
+        XDrawString(display, win, gc, 50, 268, logTitle, static_cast<int>(strlen(logTitle)));
+
+        int logY = 295;
+        for (int i = static_cast<int>(m_diagnosticLogs.size()) - 1; i >= 0 && logY < 500; --i) {
+            XSetForeground(display, gc, pal.textSecondary);
+            XDrawString(display, win, gc, 50, logY, m_diagnosticLogs[static_cast<size_t>(i)].c_str(),
                         static_cast<int>(m_diagnosticLogs[static_cast<size_t>(i)].size()));
             logY += 24;
         }
     }
 
-    XDrawRectangle(display, win, gc, 20, 540, 120, 35);
-    XDrawString(display, win, gc, 30, 562, "[R] Refresh", 11);
+    const char* actions[5] = {"[R] Refresh", "[N] NFC Pair", "[P] Pause", "[C] Resume", "[X] Cancel"};
+    int btnX = 30;
+    int btnW = 120;
+    for (int i = 0; i < 5; ++i) {
+        int bx = btnX + i * (btnW + 15);
+        XSetForeground(display, gc, pal.buttonBg);
+        XFillRectangle(display, win, gc, bx, 545, static_cast<unsigned int>(btnW), 32);
 
-    XDrawRectangle(display, win, gc, 150, 540, 140, 35);
-    XDrawString(display, win, gc, 160, 562, "[N] NFC Pair", 12);
+        XSetForeground(display, gc, pal.buttonBorder);
+        XDrawRectangle(display, win, gc, bx, 545, static_cast<unsigned int>(btnW), 32);
 
-    XDrawRectangle(display, win, gc, 300, 540, 120, 35);
-    XDrawString(display, win, gc, 315, 562, "[P] Pause", 9);
+        XSetForeground(display, gc, pal.buttonText);
+        XDrawString(display, win, gc, bx + 16, 565, actions[i], static_cast<int>(strlen(actions[i])));
+    }
 
-    XDrawRectangle(display, win, gc, 430, 540, 120, 35);
-    XDrawString(display, win, gc, 445, 562, "[C] Resume", 10);
+    XSetForeground(display, gc, pal.cardBg);
+    XFillRectangle(display, win, gc, 30, 592, static_cast<unsigned int>(m_width - 60), 30);
+    XSetForeground(display, gc, pal.cardBorder);
+    XDrawRectangle(display, win, gc, 30, 592, static_cast<unsigned int>(m_width - 60), 30);
 
-    XDrawRectangle(display, win, gc, 560, 540, 120, 35);
-    XDrawString(display, win, gc, 575, 562, "[X] Cancel", 10);
-
-    XDrawRectangle(display, win, gc, 20, 585, m_width - 40, 25);
-    std::string notif = "STATUS: " + m_lastNotification;
-    XDrawString(display, win, gc, 30, 602, notif.c_str(), static_cast<int>(notif.size()));
+    XSetForeground(display, gc, pal.textSecondary);
+    std::string notif = "STATUS: " + m_lastNotification + "  |  [T] Toggle Theme  |  [1-4] Tabs  |  [Q] Quit";
+    XDrawString(display, win, gc, 45, 612, notif.c_str(), static_cast<int>(notif.size()));
 
     XFlush(display);
 }

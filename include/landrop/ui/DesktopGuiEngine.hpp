@@ -18,6 +18,11 @@ enum class GuiScreen {
     Settings
 };
 
+enum class ThemeMode {
+    Dark,
+    Light
+};
+
 class DesktopGuiEngine : public IDiscoveryView,
                          public ITransferView,
                          public IStorageView,
@@ -29,6 +34,9 @@ public:
     bool initialize(int width = 960, int height = 640, const std::string& title = "LAN-Drop Desktop Manager");
     void run();
     void stop();
+
+    void toggleTheme();
+    ThemeMode getTheme() const { return m_theme; }
 
     void updateDeviceList(const std::vector<DeviceViewModel>& devices) override;
     void setScanningStatus(bool isScanning) override;
@@ -60,6 +68,7 @@ private:
     std::string m_title;
     bool m_isRunning{false};
     GuiScreen m_currentScreen{GuiScreen::Discovery};
+    ThemeMode m_theme{ThemeMode::Dark};
 
     DiscoveryPresenter m_discoveryPresenter;
     TransferPresenter m_transferPresenter;
