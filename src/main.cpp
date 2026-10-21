@@ -210,6 +210,46 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
         return 1;
     }
 
+    if (!isValidFileSize(fileSize)) {
+        std::cerr << "Error: invalid or excessive file size: " << fileSize << "\n";
+        uint8_t nack = 0;
+        session.sendAll(&nack, 1);
+        return 1;
+    }
+
+    std::error_code ec;
+    auto space = std::filesystem::space(canonicalBase, ec);
+    if (!ec && space.available < fileSize) {
+        std::cerr << "Error: insufficient disk space: available=" << space.available
+                  << ", required=" << fileSize << "\n";
+        uint8_t nack = 0;
+        session.sendAll(&nack, 1);
+        return 1;
+    }
+
+    if (std::filesystem::is_symlink(std::filesystem::symlink_status(outPath))) {
+        std::cerr << "Error: destination path is a symlink: " << outPath.string() << "\n";
+        uint8_t nack = 0;
+        session.sendAll(&nack, 1);
+        return 1;
+    }
+
+    if (std::filesystem::exists(outPath)) {
+        std::cerr << "Error: destination file already exists: " << outPath.string() << "\n";
+        uint8_t nack = 0;
+        session.sendAll(&nack, 1);
+        return 1;
+    }
+
+    std::filesystem::path partPath = canonicalBase / (cleanName.string() + ".part");
+    if (std::filesystem::is_symlink(std::filesystem::symlink_status(partPath))) {
+        std::cerr << "Error: temporary part path is a symlink: " << partPath.string() << "\n";
+        uint8_t nack = 0;
+        session.sendAll(&nack, 1);
+        return 1;
+    }
+    std::filesystem::remove(partPath, ec);
+
     std::string expectedHash(64, '\0');
     if (!session.receiveExact(reinterpret_cast<uint8_t*>(expectedHash.data()), 64)) {
         std::cerr << "Error receiving expected hash\n";
@@ -219,9 +259,9 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
     std::cout << "[Receiver] Incoming file: " << fileName << " (" << fileSize << " bytes)\n";
     std::cout << "[Receiver] Expected SHA-256: " << expectedHash << "\n";
 
-    std::ofstream outFile(outPath, std::ios::binary);
+    std::ofstream outFile(partPath, std::ios::binary);
     if (!outFile.is_open()) {
-        std::cerr << "Error creating output file: " << outPath.string() << "\n";
+        std::cerr << "Error creating output part file: " << partPath.string() << "\n";
         uint8_t nack = 0;
         session.sendAll(&nack, 1);
         return 1;
@@ -241,7 +281,7 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
         if (!session.receiveExact(reinterpret_cast<uint8_t*>(&chunkSize), sizeof(uint32_t))) {
             std::cerr << "Error receiving chunk size\n";
             outFile.close();
-            std::filesystem::remove(outPath);
+            std::filesystem::remove(partPath, ec);
             return 1;
         }
 
@@ -249,7 +289,7 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
             std::cerr << "Error: invalid or bounded chunk size rejected: " << chunkSize
                       << " (totalReceived=" << totalReceived << ", fileSize=" << fileSize << ")\n";
             outFile.close();
-            std::filesystem::remove(outPath);
+            std::filesystem::remove(partPath, ec);
             uint8_t nack = 0;
             session.sendAll(&nack, 1);
             return 1;
@@ -260,7 +300,7 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
         } catch (const std::bad_alloc&) {
             std::cerr << "Error: memory allocation failure for chunk size: " << chunkSize << "\n";
             outFile.close();
-            std::filesystem::remove(outPath);
+            std::filesystem::remove(partPath, ec);
             uint8_t nack = 0;
             session.sendAll(&nack, 1);
             return 1;
@@ -269,7 +309,7 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
         if (!session.receiveExact(chunkBuf.data(), chunkSize)) {
             std::cerr << "Error receiving chunk data\n";
             outFile.close();
-            std::filesystem::remove(outPath);
+            std::filesystem::remove(partPath, ec);
             return 1;
         }
 
@@ -285,7 +325,7 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
     outFile.close();
 
     FileChunkHasher hasher;
-    auto actualHashOpt = hasher.computeFullFileHash(outPath.string());
+    auto actualHashOpt = hasher.computeFullFileHash(partPath.string());
     std::string actualHash = actualHashOpt.value_or("");
 
     std::cout << "[Receiver] Actual SHA-256:   " << actualHash << "\n";
@@ -293,11 +333,18 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
     session.sendAll(&ack, 1);
 
     if (ack == 1) {
+        std::error_code renameEc;
+        std::filesystem::rename(partPath, outPath, renameEc);
+        if (renameEc) {
+            std::cerr << "Error renaming temporary file to destination: " << renameEc.message() << "\n";
+            std::filesystem::remove(partPath, ec);
+            return 1;
+        }
         std::cout << "[Receiver] File verified successfully: " << outPath.string() << "\n";
         return 0;
     } else {
         std::cerr << "[Receiver] Hash mismatch! File may be corrupted.\n";
-        std::filesystem::remove(outPath);
+        std::filesystem::remove(partPath, ec);
         return 2;
     }
 }

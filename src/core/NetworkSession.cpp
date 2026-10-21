@@ -165,7 +165,11 @@ bool NetworkSession::sendAll(const uint8_t* data, size_t length) {
     }
     size_t total = 0;
     while (total < length) {
-        ssize_t bytes = send(m_socketFd, data + total, length - total, 0);
+        int flags = 0;
+#ifdef MSG_NOSIGNAL
+        flags |= MSG_NOSIGNAL;
+#endif
+        ssize_t bytes = send(m_socketFd, data + total, length - total, flags);
         if (bytes <= 0) {
             closeSession();
             return false;

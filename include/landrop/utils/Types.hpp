@@ -80,11 +80,12 @@ inline bool isSafeFileName(const std::string& fileName) {
     if (fileName.empty() || fileName.size() > 255) {
         return false;
     }
-    if (fileName == "." || fileName == "..") {
+    if (fileName.front() == '.') {
         return false;
     }
     for (char c : fileName) {
-        if (c == '\0' || c == '/' || c == '\\') {
+        unsigned char uc = static_cast<unsigned char>(c);
+        if (uc < 32 || uc == 127 || c == '/' || c == '\\') {
             return false;
         }
     }
@@ -92,6 +93,10 @@ inline bool isSafeFileName(const std::string& fileName) {
         return false;
     }
     return true;
+}
+
+inline bool isValidFileSize(uint64_t fileSize, uint64_t maxFileSize = 100ULL * 1024 * 1024 * 1024) {
+    return fileSize > 0 && fileSize <= maxFileSize;
 }
 
 inline bool isValidChunkSize(
