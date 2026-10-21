@@ -38,3 +38,9 @@ Makefile
 scratch/
 test_data/
 temp/
+downloads/
+shared_drop/
+demo_received/
+*.tmp
+*.txt
+*.bin

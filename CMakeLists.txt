@@ -12,4 +12,4 @@ file(GLOB_RECURSE SOURCES
 
 add_executable(lan_drop ${SOURCES})
 target_compile_options(lan_drop PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(lan_drop PRIVATE pthread)
+target_link_libraries(lan_drop PRIVATE pthread X11)
