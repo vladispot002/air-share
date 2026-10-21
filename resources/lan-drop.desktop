@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=LAN-Drop
+GenericName=File Transfer
+Comment=Cross-Platform P2P and Hybrid Cloud File Transfer
+Exec=/home/vladis/lan-drop/bin/lan_drop gui
+Icon=/home/vladis/lan-drop/resources/lan-drop.svg
+Terminal=false
+Categories=Network;FileTransfer;Utility;GTK;
+StartupNotify=true
+StartupWMClass=lan_drop
+Keywords=LAN;Drop;AirDrop;P2P;Share;

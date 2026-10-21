@@ -1,6 +1,8 @@
 CXX ?= g++
-CXXFLAGS ?= -std=c++20 -Wall -Wextra -Wpedantic -O2 -Iinclude -pthread
-LDFLAGS ?= -pthread -lX11
+GTK_CFLAGS = $(shell pkg-config --cflags gtk+-3.0)
+GTK_LIBS = $(shell pkg-config --libs gtk+-3.0)
+CXXFLAGS ?= -std=c++20 -Wall -Wextra -Wpedantic -O2 -Iinclude -pthread $(GTK_CFLAGS)
+LDFLAGS ?= -pthread -lX11 $(GTK_LIBS)
 
 SRC_DIR = src
 OBJ_DIR = obj

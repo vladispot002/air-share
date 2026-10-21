@@ -23,6 +23,7 @@
 #include "landrop/tasks/HttpWebTransferTask.hpp"
 
 #include "landrop/ui/DesktopGuiEngine.hpp"
+#include "landrop/ui/GtkDesktopApp.hpp"
 #include "landrop/mobile/NfcPairingSession.hpp"
 #include "landrop/mobile/AirDropProtocolBridge.hpp"
 #include "landrop/mobile/LandropMobileBridge.h"
@@ -243,25 +244,9 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
     }
 }
 
-static int runGui() {
-    ui::DesktopGuiEngine engine;
-    if (!engine.initialize(960, 640, "LAN-Drop Desktop Manager (MVP)")) {
-        std::cerr << "Warning: Could not open X11 Display. Running headless simulation.\n";
-    }
-    std::cout << "[GUI] Switching across 4 forms to verify MVP events...\n";
-    engine.switchScreen(ui::GuiScreen::Discovery);
-    engine.triggerAction(1);
-    engine.triggerAction(2);
-
-    engine.switchScreen(ui::GuiScreen::Transfers);
-    engine.triggerAction(3);
-    engine.triggerAction(4);
-
-    engine.switchScreen(ui::GuiScreen::Storage);
-    engine.switchScreen(ui::GuiScreen::Settings);
-
-    std::cout << "[GUI] 4 Screens, 20+ controls, 10+ event handlers verified.\n";
-    return 0;
+static int runGui(int argc, char* argv[]) {
+    ui::GtkDesktopApp app;
+    return app.run(argc, argv);
 }
 
 static int runMobileTest() {
@@ -417,7 +402,7 @@ static int runDemo() {
 
 int main(int argc, char* argv[]) {
     if (argc == 1) {
-        return runDemo();
+        return runGui(argc, argv);
     }
 
     std::string mode = argv[1];
@@ -426,7 +411,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (mode == "gui") {
-        return runGui();
+        return runGui(argc, argv);
     }
 
     if (mode == "mobile-test") {
