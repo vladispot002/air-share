@@ -76,4 +76,42 @@ inline std::string connectionStateToString(ConnectionState state) {
     }
 }
 
+inline bool isSafeFileName(const std::string& fileName) {
+    if (fileName.empty() || fileName.size() > 255) {
+        return false;
+    }
+    if (fileName == "." || fileName == "..") {
+        return false;
+    }
+    for (char c : fileName) {
+        if (c == '\0' || c == '/' || c == '\\') {
+            return false;
+        }
+    }
+    if (fileName.find("..") != std::string::npos) {
+        return false;
+    }
+    return true;
 }
+
+inline bool isValidChunkSize(
+    uint32_t chunkSize,
+    uint64_t fileSize,
+    uint64_t totalReceived,
+    uint32_t maxChunkSize = 4 * 1024 * 1024
+) {
+    if (chunkSize == 0 || chunkSize > maxChunkSize) {
+        return false;
+    }
+    if (totalReceived > fileSize) {
+        return false;
+    }
+    uint64_t remaining = fileSize - totalReceived;
+    if (static_cast<uint64_t>(chunkSize) > remaining) {
+        return false;
+    }
+    return true;
+}
+
+}
+

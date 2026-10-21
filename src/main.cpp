@@ -164,14 +164,43 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
         return 1;
     }
 
-    if (nameLen > 1024) {
-        std::cerr << "Error: invalid file name length\n";
+    if (nameLen == 0 || nameLen > 255) {
+        std::cerr << "Error: invalid file name length: " << nameLen << "\n";
+        uint8_t nack = 0;
+        session.sendAll(&nack, 1);
         return 1;
     }
 
     std::string fileName(nameLen, '\0');
     if (!session.receiveExact(reinterpret_cast<uint8_t*>(fileName.data()), nameLen)) {
         std::cerr << "Error receiving file name\n";
+        return 1;
+    }
+
+    if (!isSafeFileName(fileName)) {
+        std::cerr << "Error: unsafe or invalid file name rejected: " << fileName << "\n";
+        uint8_t nack = 0;
+        session.sendAll(&nack, 1);
+        return 1;
+    }
+
+    std::filesystem::path cleanName = std::filesystem::path(fileName).filename();
+    if (cleanName.empty() || cleanName.string() != fileName) {
+        std::cerr << "Error: file name contains path elements: " << fileName << "\n";
+        uint8_t nack = 0;
+        session.sendAll(&nack, 1);
+        return 1;
+    }
+
+    std::filesystem::path canonicalBase = std::filesystem::weakly_canonical(std::filesystem::path(saveDir));
+    std::filesystem::path outPath = canonicalBase / cleanName;
+    std::filesystem::path canonicalOut = std::filesystem::weakly_canonical(outPath);
+
+    auto rel = std::filesystem::relative(canonicalOut, canonicalBase);
+    if (rel.empty() || rel.string().rfind("..", 0) == 0 || canonicalOut == canonicalBase) {
+        std::cerr << "Error: path traversal attempt detected for: " << fileName << "\n";
+        uint8_t nack = 0;
+        session.sendAll(&nack, 1);
         return 1;
     }
 
@@ -190,10 +219,11 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
     std::cout << "[Receiver] Incoming file: " << fileName << " (" << fileSize << " bytes)\n";
     std::cout << "[Receiver] Expected SHA-256: " << expectedHash << "\n";
 
-    std::filesystem::path outPath = std::filesystem::path(saveDir) / fileName;
     std::ofstream outFile(outPath, std::ios::binary);
     if (!outFile.is_open()) {
         std::cerr << "Error creating output file: " << outPath.string() << "\n";
+        uint8_t nack = 0;
+        session.sendAll(&nack, 1);
         return 1;
     }
 
@@ -204,16 +234,42 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
     size_t chunkIndex = 0;
     std::vector<uint8_t> chunkBuf;
 
+    constexpr uint32_t kMaxChunkSize = 4 * 1024 * 1024; // 4 MB safety bound
+
     while (totalReceived < fileSize) {
         uint32_t chunkSize = 0;
         if (!session.receiveExact(reinterpret_cast<uint8_t*>(&chunkSize), sizeof(uint32_t))) {
             std::cerr << "Error receiving chunk size\n";
+            outFile.close();
+            std::filesystem::remove(outPath);
             return 1;
         }
 
-        chunkBuf.resize(chunkSize);
+        if (!isValidChunkSize(chunkSize, fileSize, totalReceived, kMaxChunkSize)) {
+            std::cerr << "Error: invalid or bounded chunk size rejected: " << chunkSize
+                      << " (totalReceived=" << totalReceived << ", fileSize=" << fileSize << ")\n";
+            outFile.close();
+            std::filesystem::remove(outPath);
+            uint8_t nack = 0;
+            session.sendAll(&nack, 1);
+            return 1;
+        }
+
+        try {
+            chunkBuf.resize(chunkSize);
+        } catch (const std::bad_alloc&) {
+            std::cerr << "Error: memory allocation failure for chunk size: " << chunkSize << "\n";
+            outFile.close();
+            std::filesystem::remove(outPath);
+            uint8_t nack = 0;
+            session.sendAll(&nack, 1);
+            return 1;
+        }
+
         if (!session.receiveExact(chunkBuf.data(), chunkSize)) {
             std::cerr << "Error receiving chunk data\n";
+            outFile.close();
+            std::filesystem::remove(outPath);
             return 1;
         }
 
@@ -241,6 +297,7 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
         return 0;
     } else {
         std::cerr << "[Receiver] Hash mismatch! File may be corrupted.\n";
+        std::filesystem::remove(outPath);
         return 2;
     }
 }
