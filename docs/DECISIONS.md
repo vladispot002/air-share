@@ -1,26 +1,31 @@
 # Architectural Decision Records (ADR)
 
-## ADR-001: Вибір C++20 як основного стандарту розробки
-- **Статус**: Прийнято.
-- **Контекст**: Необхідна висока швидкість передачі файлів, прямий доступ до системних сокетів, сувора типізація та сучасні можливості стандарту (`std::span`, концепції, структуровані прив'язки, `std::filesystem`).
-- **Рішення**: Базовим стандартом компілятора визначено C++20 (`-std=c++20`).
+## ADR-001: C++20 as Primary Standard
+- **Status**: Accepted & Verified.
+- **Context**: High performance file transfer, system socket interfaces, RAII resource management, `std::span`, and `std::filesystem`.
+- **Decision**: Base compiler standard set to C++20 (`-std=c++20`).
 
-## ADR-002: Використання патерну Model-View-Presenter (MVP)
-- **Статус**: Прийнято.
-- **Контекст**: Потрібно забезпечити повне покриття модульним тестуванням логіки виявлення, передачі, налаштувань та сховища незалежно від GTK3.
-- **Рішення**: Інтерфейси `IDiscoveryView`, `ITransferView`, `IStorageView`, `ISettingsView` реалізуються `GtkDesktopApp`, а вся координаційна логіка винесена у відповідні презентери.
+## ADR-002: Model-View-Presenter (MVP) Pattern
+- **Status**: Accepted & Verified.
+- **Context**: Complete headless unit testability of discovery, transfer, storage, and settings presenters independently of GTK3 and X11/Wayland display servers.
+- **Decision**: Interfaces `IDiscoveryView`, `ITransferView`, `IStorageView`, `ISettingsView` are implemented by `GtkDesktopApp` and mocked via `MockView` in unit tests.
 
-## ADR-003: Нативний графічний інтерфейс на GTK3 з підтримкою macOS HIG
-- **Статус**: Прийнято.
-- **Контекст**: Забезпечення легковагого запуску на Linux без важких середовищ браузерного типу (Electron/Chromium), точне відтворення дизайну Figma (`Design LAN-Drop macOS UI`).
-- **Рішення**: Нативний бекенд GTK3 з використанням CSS-теми macOS Big Sur/Monterey, системні traffic lights та підтримка мобільного вигляду (390x812).
+## ADR-003: Native GTK3 UI with Apple macOS HIG Styling
+- **Status**: Accepted & Verified.
+- **Context**: Lightweight Linux execution without Chromium/Electron, adhering to the design prototype (`Design LAN-Drop macOS UI`).
+- **Decision**: Native GTK3 backend with CSS styling, custom titlebar/traffic lights, and responsive mobile layout mode (390x812).
 
-## ADR-004: Блокове хешування SHA-256 для контролю цілісності
-- **Статус**: Прийнято.
-- **Контекст**: Помилки в мережі Wi-Fi або розрив каналу не повинні призводити до пошкодження цілого файлу.
-- **Рішення**: Кожен переданий блок верифікується за контрольним хешем SHA-256, що дозволяє виконувати відновлення передачі (Resume) лише для відсутніх блоків.
+## ADR-004: Block-level SHA-256 File Integrity Verification
+- **Status**: Partially Accepted / Under Refinement.
+- **Context**: Detecting bitrot and data corruption during network transmission.
+- **Current Reality**: End-to-end full file SHA-256 hashing is implemented and verified in the CLI transfer pipeline (`runSender` / `runReceiver`). Block-level in-flight verification and `.part` file resume require hardening before claiming full resumption.
 
-## ADR-005: Сумісність з Apple AirDrop та протокол NFC
-- **Статус**: Прийнято.
-- **Контекст**: Необхідна безшовна взаємодія з мобільними пристроями Android та iOS.
-- **Рішення**: Реалізовано парсинг та генерацію NDEF корисного навантаження для NFC та емуляцію точок входу AirDrop (`/Discover`, `/Ask`).
+## ADR-005: Mobile Bridging & Interoperability
+- **Status**: Clarified Scope.
+- **Context**: Mobile platform integration (Flutter, iOS, Android).
+- **Decision**: The in-tree AirDrop and NFC modules provide format serialization and simulated bridge endpoints for local testing. Native Apple AirDrop (requiring kernel AWDL and BLE) is out of scope for user-space POSIX sockets and remains a future bridge integration.
+
+## Proposed Decisions Status
+- **ADR-006 (Asynchronous Network Reactor)**: Deferred / Premature. Focus first on non-blocking timeouts and robust socket error handling.
+- **ADR-007 (LAN-Drop Wire Protocol v1)**: Accepted in principle for basic streaming framing (`.part` streaming and length validation); advanced multi-peer state machines deferred.
+- **ADR-008 (Kernel AWDL / AirDrop Plugin)**: Deferred. In-tree implementation remains scoped to local LAN and mock bridge testing.
