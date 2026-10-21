@@ -475,12 +475,30 @@ GtkWidget* GtkDesktopApp::createTrafficLights() {
     GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_set_margin_start(box, 12);
     gtk_widget_set_margin_end(box, 12);
+    gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
 
     const char* classes[] = {"traffic-red", "traffic-yellow", "traffic-green"};
     for (int i = 0; i < 3; ++i) {
         GtkWidget* dot = gtk_button_new();
         gtk_widget_set_size_request(dot, 12, 12);
+        gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
+        gtk_widget_set_focus_on_click(dot, FALSE);
         gtk_style_context_add_class(gtk_widget_get_style_context(dot), classes[i]);
+        g_object_set_data(G_OBJECT(dot), "traffic_action", GINT_TO_POINTER(i));
+        g_signal_connect(dot, "clicked", G_CALLBACK(+[](GtkButton* b, gpointer data) {
+            auto* app = static_cast<GtkDesktopApp*>(data);
+            GtkWindow* win = GTK_WINDOW(app->m_mainWindow);
+            int action = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "traffic_action"));
+            if (action == 0) {
+                gtk_window_close(win);
+            } else if (action == 1) {
+                gtk_window_iconify(win);
+            } else if (gtk_window_is_maximized(win)) {
+                gtk_window_unmaximize(win);
+            } else {
+                gtk_window_maximize(win);
+            }
+        }), this);
         gtk_box_pack_start(GTK_BOX(box), dot, FALSE, FALSE, 0);
     }
     return box;
@@ -540,6 +558,7 @@ void GtkDesktopApp::switchToTab(const std::string& tabName) {
 }
 
 GtkWidget* GtkDesktopApp::createMobileBottomBar() {
+    m_segmentedButtons.clear();
     GtkWidget* bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     gtk_style_context_add_class(gtk_widget_get_style_context(bar), "mobile-bottom-bar");
 
@@ -592,7 +611,7 @@ void GtkDesktopApp::buildUi() {
     g_signal_connect(m_mainWindow, "destroy", G_CALLBACK(gtk_main_quit), nullptr);
 
     m_headerBar = gtk_header_bar_new();
-    gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(m_headerBar), TRUE);
+    gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(m_headerBar), m_isMobileMode ? TRUE : FALSE);
     gtk_window_set_titlebar(GTK_WINDOW(m_mainWindow), m_headerBar);
 
     if (!m_isMobileMode) {
@@ -635,6 +654,13 @@ void GtkDesktopApp::buildUi() {
     gtk_box_pack_start(GTK_BOX(mainBox), m_stack, TRUE, TRUE, 0);
 
     if (m_isMobileMode) {
+        m_statusLabel = gtk_label_new("Status: Ready.");
+        gtk_label_set_ellipsize(GTK_LABEL(m_statusLabel), PANGO_ELLIPSIZE_END);
+        gtk_widget_set_opacity(m_statusLabel, 0.7);
+        gtk_widget_set_margin_start(m_statusLabel, 12);
+        gtk_widget_set_margin_end(m_statusLabel, 12);
+        gtk_widget_set_margin_bottom(m_statusLabel, 4);
+        gtk_box_pack_start(GTK_BOX(mainBox), m_statusLabel, FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(mainBox), createMobileBottomBar(), FALSE, FALSE, 0);
     } else {
         GtkWidget* footerBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
@@ -646,6 +672,46 @@ void GtkDesktopApp::buildUi() {
         gtk_widget_set_opacity(verLabel, 0.6);
         gtk_box_pack_end(GTK_BOX(footerBar), verLabel, FALSE, FALSE, 8);
         gtk_box_pack_start(GTK_BOX(mainBox), footerBar, FALSE, FALSE, 0);
+    }
+}
+
+void GtkDesktopApp::chooseAndSendFile(const std::string& peerId) {
+    GtkWidget* dialog = gtk_file_chooser_dialog_new(
+        "Select File to Send via LAN-Drop",
+        GTK_WINDOW(m_mainWindow),
+        GTK_FILE_CHOOSER_ACTION_OPEN,
+        "_Cancel", GTK_RESPONSE_CANCEL,
+        "_Send", GTK_RESPONSE_ACCEPT,
+        nullptr
+    );
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char* filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        if (filename) {
+            std::string target = peerId;
+            if (target.empty()) {
+                auto selected = m_discoveryPresenter.getSelectedPeer();
+                if (selected) {
+                    target = selected->getId();
+                } else if (!m_discoveryPresenter.getPeers().empty()) {
+                    target = m_discoveryPresenter.getPeers().front()->getId();
+                } else {
+                    target = "peer-thinkpad";
+                }
+            }
+            m_transferPresenter.onSendFileClicked(target, filename);
+            switchToTab("transfers");
+            g_free(filename);
+        }
+    }
+    gtk_widget_destroy(dialog);
+}
+
+void GtkDesktopApp::applyStoragePathFromEntry() {
+    if (!m_storagePathEntry) return;
+    const char* text = gtk_entry_get_text(GTK_ENTRY(m_storagePathEntry));
+    if (text && strlen(text) > 0) {
+        m_storagePresenter.onSharedPathChanged(text);
     }
 }
 
@@ -662,8 +728,9 @@ GtkWidget* GtkDesktopApp::createDiscoveryScreen() {
     GtkWidget* radarTitle = gtk_label_new(nullptr);
     gtk_label_set_markup(GTK_LABEL(radarTitle), "<b>Radar Scanner</b>");
 
-    GtkWidget* activeBadge = gtk_label_new("Active");
-    gtk_style_context_add_class(gtk_widget_get_style_context(activeBadge), "pill-active");
+    m_scanBadge = gtk_label_new("Active");
+    gtk_style_context_add_class(gtk_widget_get_style_context(m_scanBadge), "pill-active");
+    GtkWidget* activeBadge = m_scanBadge;
 
     m_scanStatusLabel = gtk_label_new("4 devices found");
     gtk_widget_set_opacity(m_scanStatusLabel, 0.7);
@@ -707,7 +774,7 @@ GtkWidget* GtkDesktopApp::createDiscoveryScreen() {
 
     m_nfcEntry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(m_nfcEntry), "Hold device near NFC sensor to pair...");
-    gtk_entry_set_text(GTK_ENTRY(m_nfcEntry), "LANDROP:NFC:v1;192.168.1.180:8848;PIN=4242");
+    gtk_entry_set_text(GTK_ENTRY(m_nfcEntry), "LANDROP:NFC:v1;id=phone-pixel-uuid;name=Pixel 9;ip=192.168.1.180;port=8848;pin=4242;key=00000000000000000000000000000000");
     gtk_box_pack_start(GTK_BOX(nfcBox), nfcTitle, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(nfcBox), m_nfcEntry, TRUE, TRUE, 0);
 
@@ -824,22 +891,7 @@ GtkWidget* GtkDesktopApp::createTransfersScreen() {
 
     g_signal_connect(sendBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         auto* app = static_cast<GtkDesktopApp*>(data);
-        GtkWidget* dialog = gtk_file_chooser_dialog_new(
-            "Select File to Send",
-            GTK_WINDOW(app->m_mainWindow),
-            GTK_FILE_CHOOSER_ACTION_OPEN,
-            "_Cancel", GTK_RESPONSE_CANCEL,
-            "_Send", GTK_RESPONSE_ACCEPT,
-            nullptr
-        );
-        if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
-            char* file = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
-            if (file) {
-                app->getTransferPresenter().onSendFileClicked("peer-thinkpad", file);
-                g_free(file);
-            }
-        }
-        gtk_widget_destroy(dialog);
+        app->chooseAndSendFile("");
     }), this);
 
     g_signal_connect(clearBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
@@ -867,6 +919,9 @@ GtkWidget* GtkDesktopApp::createStorageScreen() {
     GtkWidget* pathLabel = gtk_label_new("📁 Shared Folder:");
     m_storagePathEntry = gtk_entry_new();
     gtk_entry_set_text(GTK_ENTRY(m_storagePathEntry), "./shared_drop");
+    g_signal_connect(m_storagePathEntry, "activate", G_CALLBACK(+[](GtkEntry*, gpointer data) {
+        static_cast<GtkDesktopApp*>(data)->applyStoragePathFromEntry();
+    }), this);
 
     GtkWidget* browseBtn = gtk_button_new_with_label("Browse...");
     g_signal_connect(browseBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
@@ -895,6 +950,7 @@ GtkWidget* GtkDesktopApp::createStorageScreen() {
 
     g_signal_connect(rescanBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         auto* app = static_cast<GtkDesktopApp*>(data);
+        app->applyStoragePathFromEntry();
         app->getStoragePresenter().onRescanClicked();
     }), this);
 
@@ -1064,6 +1120,17 @@ GtkWidget* GtkDesktopApp::createSettingsScreen() {
     gtk_style_context_add_class(gtk_widget_get_style_context(termTitle), "mac-terminal-title");
     gtk_box_pack_start(GTK_BOX(termTopBar), termTitle, FALSE, FALSE, 8);
 
+    GtkWidget* clearLogsBtn = gtk_button_new_with_label("Clear");
+    gtk_style_context_add_class(gtk_widget_get_style_context(clearLogsBtn), "theme-btn");
+    g_signal_connect(clearLogsBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer appPtr) {
+        auto* app = static_cast<GtkDesktopApp*>(appPtr);
+        if (app->m_logBuffer) {
+            gtk_text_buffer_set_text(app->m_logBuffer, "", 0);
+        }
+        app->getSettingsPresenter().onClearLogsClicked();
+    }), this);
+    gtk_box_pack_end(GTK_BOX(termTopBar), clearLogsBtn, FALSE, FALSE, 4);
+
     GtkWidget* termPulse = gtk_label_new("●");
     gtk_style_context_add_class(gtk_widget_get_style_context(termPulse), "status-badge");
     gtk_box_pack_end(GTK_BOX(termTopBar), termPulse, FALSE, FALSE, 6);
@@ -1161,25 +1228,8 @@ void GtkDesktopApp::updateDeviceList(const std::vector<DeviceViewModel>& devices
             auto* app = static_cast<GtkDesktopApp*>(appPtr);
             const char* devId = static_cast<const char*>(g_object_get_data(G_OBJECT(b), "device_id"));
             if (!devId) return;
-
-            GtkWidget* dialog = gtk_file_chooser_dialog_new(
-                "Select File to Send via LAN-Drop",
-                GTK_WINDOW(app->m_mainWindow),
-                GTK_FILE_CHOOSER_ACTION_OPEN,
-                "_Cancel", GTK_RESPONSE_CANCEL,
-                "_Send", GTK_RESPONSE_ACCEPT,
-                nullptr
-            );
-
-            if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
-                char* filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
-                if (filename) {
-                    app->getTransferPresenter().onSendFileClicked(devId, filename);
-                    app->switchToTab("transfers");
-                    g_free(filename);
-                }
-            }
-            gtk_widget_destroy(dialog);
+            app->getDiscoveryPresenter().onSelectDeviceClicked(devId);
+            app->chooseAndSendFile(devId);
         }), this);
 
         gtk_box_pack_end(GTK_BOX(botRow), sendBtn, FALSE, FALSE, 0);
@@ -1204,6 +1254,17 @@ void GtkDesktopApp::setScanningStatus(bool isScanning) {
         std::string s = "Radar Scanner: " + std::string(isScanning ? "Active (Listening for LAN Beacons)" : "Idle");
         gtk_label_set_text(GTK_LABEL(m_scanStatusLabel), s.c_str());
     }
+    if (m_scanBadge) {
+        gtk_label_set_text(GTK_LABEL(m_scanBadge), isScanning ? "Active" : "Paused");
+        auto* ctx = gtk_widget_get_style_context(m_scanBadge);
+        if (isScanning) {
+            gtk_style_context_remove_class(ctx, "pill-os");
+            gtk_style_context_add_class(ctx, "pill-active");
+        } else {
+            gtk_style_context_remove_class(ctx, "pill-active");
+            gtk_style_context_add_class(ctx, "pill-os");
+        }
+    }
 }
 
 void GtkDesktopApp::showNfcPairResult(bool success, const std::string& message) {
@@ -1221,12 +1282,34 @@ void GtkDesktopApp::updateTransferTable(const std::vector<TransferViewModel>& tr
     if (!m_transferListStore) return;
     gtk_list_store_clear(m_transferListStore);
 
+    GtkTreeIter selectedIter;
+    bool hasSelected = false;
+
     for (const auto& t : transfers) {
         GtkTreeIter iter;
         gtk_list_store_append(m_transferListStore, &iter);
 
-        std::string sizeStr = std::to_string(t.fileSize / 1024) + " KB";
-        std::string speedStr = std::to_string(static_cast<int>(t.speedBytesPerSec / 1024.0)) + " KB/s";
+        std::string sizeStr;
+        if (t.fileSize >= 1024ULL * 1024 * 1024) {
+            sizeStr = std::to_string(t.fileSize / (1024ULL * 1024 * 1024)) + "." + std::to_string((t.fileSize % (1024ULL * 1024 * 1024)) / (100ULL * 1024 * 1024)) + " GB";
+        } else if (t.fileSize >= 1024 * 1024) {
+            sizeStr = std::to_string(t.fileSize / (1024 * 1024)) + "." + std::to_string((t.fileSize % (1024 * 1024)) / (100 * 1024)) + " MB";
+        } else {
+            sizeStr = std::to_string(t.fileSize / 1024) + " KB";
+        }
+
+        std::string speedStr;
+        if (t.speedBytesPerSec >= 1024.0 * 1024.0) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.1f MB/s", t.speedBytesPerSec / (1024.0 * 1024.0));
+            speedStr = buf;
+        } else if (t.speedBytesPerSec > 0) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.1f KB/s", t.speedBytesPerSec / 1024.0);
+            speedStr = buf;
+        } else {
+            speedStr = "0 KB/s";
+        }
 
         gtk_list_store_set(m_transferListStore, &iter,
             0, t.taskId.c_str(),
@@ -1238,6 +1321,16 @@ void GtkDesktopApp::updateTransferTable(const std::vector<TransferViewModel>& tr
             6, t.direction.c_str(),
             -1
         );
+
+        if (!m_selectedTaskId.empty() && t.taskId == m_selectedTaskId) {
+            selectedIter = iter;
+            hasSelected = true;
+        }
+    }
+
+    if (hasSelected && m_transferTreeView) {
+        GtkTreeSelection* sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(m_transferTreeView));
+        gtk_tree_selection_select_iter(sel, &selectedIter);
     }
 }
 
@@ -1314,7 +1407,16 @@ void GtkDesktopApp::setStorageStats(uint64_t totalBytes, size_t fileCount) {
 void GtkDesktopApp::setPasswordProtectionStatus(bool isProtected) {
     if (m_storageStatsLabel) {
         std::string current = gtk_label_get_text(GTK_LABEL(m_storageStatsLabel));
-        current += (isProtected ? " | Security: PIN Protected" : " | Security: Open Access");
+        size_t secPos = current.find("  |  Security:");
+        if (secPos != std::string::npos) {
+            current = current.substr(0, secPos);
+        } else {
+            secPos = current.find(" | Security:");
+            if (secPos != std::string::npos) {
+                current = current.substr(0, secPos);
+            }
+        }
+        current += (isProtected ? "  |  Security: PIN Protected" : "  |  Security: Open Access");
         gtk_label_set_text(GTK_LABEL(m_storageStatsLabel), current.c_str());
     }
 }

@@ -1,6 +1,7 @@
 #include "landrop/ui/DiscoveryPresenter.hpp"
 #include "landrop/peers/LocalPeer.hpp"
 #include "landrop/peers/CloudPeer.hpp"
+#include "landrop/mobile/NfcPairingSession.hpp"
 
 namespace landrop::ui {
 
@@ -48,21 +49,51 @@ void DiscoveryPresenter::onSelectDeviceClicked(const std::string& peerId) {
 }
 
 void DiscoveryPresenter::onNfcPairTriggered(const std::string& nfcPayload) {
-    std::string name, uuid;
+    std::string name, uuid, ip = "192.168.1.150";
     uint16_t port = 0;
-    if (MulticastBeacon::parsePayload(nfcPayload, name, uuid, port)) {
-        auto paired = std::make_shared<LocalPeer>(uuid, name, "192.168.1.150", port, "Android/iOS", "NFC Paired Device", "255.255.255.0", true);
-        paired->initialize();
-        m_peers.push_back(paired);
-        m_selectedPeer = paired;
-        refreshView();
-        if (m_view) {
-            m_view->showNfcPairResult(true, "NFC Handshake successful: " + name);
-        }
-    } else {
+    bool ok = false;
+
+    mobile::NfcPairingSession session("desktop-local", "LAN-Drop Desktop");
+    std::optional<mobile::NfcPairingData> data;
+    try {
+        data = session.parseNdefPayload(nfcPayload);
+    } catch (const std::exception&) {
+        data.reset();
+    }
+    if (data) {
+        name = data->deviceName;
+        uuid = data->deviceId.empty() ? ("nfc-" + data->ipAddress) : data->deviceId;
+        ip = data->ipAddress;
+        port = data->port;
+        ok = !name.empty() && !ip.empty();
+    } else if (MulticastBeacon::parsePayload(nfcPayload, name, uuid, port)) {
+        ok = true;
+    }
+
+    if (!ok) {
         if (m_view) {
             m_view->showNfcPairResult(false, "Invalid NFC payload format");
         }
+        return;
+    }
+
+    for (const auto& peer : m_peers) {
+        if (peer->getId() == uuid) {
+            m_selectedPeer = peer;
+            if (m_view) {
+                m_view->showNfcPairResult(true, "Already paired: " + peer->getDisplayName());
+            }
+            return;
+        }
+    }
+
+    auto paired = std::make_shared<LocalPeer>(uuid, name, ip, port, "Android/iOS", "NFC Paired Device", "255.255.255.0", true);
+    paired->initialize();
+    m_peers.push_back(paired);
+    m_selectedPeer = paired;
+    refreshView();
+    if (m_view) {
+        m_view->showNfcPairResult(true, "NFC Handshake successful: " + name);
     }
 }
 

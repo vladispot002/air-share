@@ -32,6 +32,7 @@ private:
     ITransferView* m_view{nullptr};
     std::vector<std::shared_ptr<TransferTask>> m_tasks;
     size_t m_selectedIndex{0};
+    int m_nextTaskNumber{43};
 
     void refreshView();
     std::shared_ptr<TransferTask> findTask(const std::string& taskId);

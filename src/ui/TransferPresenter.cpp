@@ -1,6 +1,7 @@
 #include "landrop/ui/TransferPresenter.hpp"
 #include "landrop/tasks/P2PTransferTask.hpp"
 #include <algorithm>
+#include <filesystem>
 
 namespace landrop::ui {
 
@@ -56,10 +57,23 @@ void TransferPresenter::initialize() {
 }
 
 void TransferPresenter::onSendFileClicked(const std::string& targetPeerId, const std::string& filePath) {
-    std::string taskId = "task-" + std::to_string(m_tasks.size() + 1);
-    auto task = std::make_shared<P2PTransferTask>(taskId, filePath, 5 * 1024 * 1024, TransferDirection::Upload, targetPeerId);
+    std::error_code ec;
+    std::filesystem::path p(filePath);
+    if (!std::filesystem::is_regular_file(p, ec)) {
+        if (m_view) {
+            m_view->showTransferError("-", "File not found: " + filePath);
+        }
+        return;
+    }
+    uint64_t size = std::filesystem::file_size(p, ec);
+    if (ec) {
+        size = 0;
+    }
+    std::string taskId = "T-" + std::to_string(m_nextTaskNumber++);
+    auto task = std::make_shared<P2PTransferTask>(taskId, p.filename().string(), size, TransferDirection::Upload, targetPeerId);
     task->initialize();
     m_tasks.push_back(task);
+    m_selectedIndex = m_tasks.size() - 1;
     refreshView();
 }
 
@@ -81,7 +95,7 @@ void TransferPresenter::onResumeTransferClicked(const std::string& taskId) {
 
 void TransferPresenter::onCancelTransferClicked(const std::string& taskId) {
     auto task = findTask(taskId);
-    if (task) {
+    if (task && task->getState() != TransferState::Completed) {
         task->cancel();
         refreshView();
     }
@@ -121,11 +135,27 @@ void TransferPresenter::addTask(const std::shared_ptr<TransferTask>& task) {
 }
 
 void TransferPresenter::tick() {
+    constexpr double kTickSeconds = 0.3;
+    constexpr double kDefaultSpeed = 8.0 * 1024 * 1024;
     for (auto& task : m_tasks) {
-        if (task->getState() == TransferState::Transferring) {
-            std::vector<uint8_t> block(128 * 1024, 0);
-            task->processChunk(0, block);
-            task->updateSpeed(128 * 1024, 0.2);
+        if (task->getState() == TransferState::Connecting) {
+            task->setState(TransferState::Transferring);
+        }
+        if (task->getState() != TransferState::Transferring) {
+            continue;
+        }
+        double speed = task->getCurrentSpeedBps();
+        if (speed <= 0.0) {
+            speed = kDefaultSpeed;
+            task->updateSpeed(static_cast<uint64_t>(speed), 1.0);
+        }
+        uint64_t step = static_cast<uint64_t>(speed * kTickSeconds);
+        uint64_t total = task->getFileSize();
+        uint64_t next = std::min(total, task->getBytesTransferred() + step);
+        task->setBytesTransferred(next);
+        if (next >= total) {
+            task->setState(TransferState::Completed);
+            task->updateSpeed(0, 1.0);
         }
     }
     refreshView();

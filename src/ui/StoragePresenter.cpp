@@ -36,9 +36,11 @@ void StoragePresenter::initialize() {
 }
 
 void StoragePresenter::onSharedPathChanged(const std::string& newPath) {
-    if (m_folderManager.setRootPath(newPath)) {
-        refreshView();
+    try {
+        m_folderManager.setRootPath(newPath);
+    } catch (const std::exception&) {
     }
+    refreshView();
 }
 
 void StoragePresenter::onRescanClicked() {

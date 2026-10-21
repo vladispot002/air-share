@@ -68,7 +68,11 @@ private:
 
     GtkWidget* m_deviceGrid{nullptr};
     GtkWidget* m_scanStatusLabel{nullptr};
+    GtkWidget* m_scanBadge{nullptr};
     GtkWidget* m_nfcEntry{nullptr};
+
+    void chooseAndSendFile(const std::string& peerId);
+    void applyStoragePathFromEntry();
 
     GtkWidget* m_transferTreeView{nullptr};
     GtkListStore* m_transferListStore{nullptr};
