@@ -30,19 +30,22 @@ Harden, secure, and complete the LAN-Drop peer-to-peer file transfer engine, res
 - **Result**: Not started.
 
 ### TASK-002: Remediate Path Traversal & Memory Allocation Bounds in Receiver
-- **Status**: TODO
+- **Status**: DONE
 - **Priority**: High (P0 - Security Vulnerability)
 - **Owner**: developer
 - **Depends on**: none
-- **Scope**: `src/main.cpp` (`runReceiver`)
+- **Scope**: `src/main.cpp` (`runReceiver`), `include/landrop/utils/Types.hpp`
 - **Acceptance Criteria**:
-  - [ ] Sanitize incoming `fileName` to strip directory components (e.g. using `std::filesystem::path(fileName).filename()`).
-  - [ ] Reject path traversal sequences (`..`, absolute paths) attempting to escape `saveDir`.
-  - [ ] Enforce upper limit on `chunkSize` (e.g., maximum 4 MB or configured chunk size) before buffer allocation to prevent DoS via `bad_alloc`.
+  - [x] Sanitize incoming `fileName` to strip directory components and validate using `isSafeFileName`.
+  - [x] Reject path traversal sequences (`..`, absolute paths, slashes, null bytes) attempting to escape `saveDir`.
+  - [x] Enforce upper limit on `chunkSize` (maximum 4 MB), enforce non-zero chunks, and check remaining expected file size.
+  - [x] Guard `chunkBuf.resize` with `try / catch (const std::bad_alloc&)` to prevent DoS aborts.
+  - [x] Transmit negative ACK (`0`) upon validation failure and clean up partial destination files on failure.
 - **Verification**:
-  - Test receiving files with relative and malicious paths (`../../test.txt`).
-  - Loopback transfer demo (`make run`) passes.
-- **Result**: Not started.
+  - `make test`: All 14/14 test suites passed (118/118 assertions passed), including 18 new assertions in `Receiver Security & Boundary Validation`.
+  - Live socket harness (`test_receiver_security.py`): Verified relative traversal rejection (`../../`), absolute path rejection (`/tmp/`), `0xFFFFFFFF` bad_alloc protection, 8MB chunk boundary rejection, and 0-size chunk rejection.
+  - `make run`: Loopback SHA-256 verified demo passed with exit status 0.
+- **Result**: Verified and passed.
 
 ### TASK-003: Fix Mutex Race & Dangling Reference in ChunkBuffer::operator[]
 - **Status**: TODO
@@ -106,6 +109,7 @@ None currently.
 
 ## Last Verification
 - **Date**: 2026-10-21
-- **Tests**: `make test` passed (13/13 suites, 97/97 assertions).
+- **Tests**: `make test` passed (14/14 suites, 118/118 assertions passed).
+- **Security**: Live network socket security harness passed (6/6 exploit vectors mitigated).
 - **Demo**: `make run` passed (TCP loopback transfer verified via SHA-256).
 
