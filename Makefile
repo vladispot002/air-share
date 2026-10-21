@@ -18,7 +18,7 @@ SRCS = $(wildcard $(SRC_DIR)/core/*.cpp) \
 OBJS = $(patsubst $(SRC_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(SRCS))
 TARGET = $(BIN_DIR)/lan_drop
 
-.PHONY: all clean run gui mobile-test
+.PHONY: all clean run gui mobile-test web
 
 all: $(TARGET)
 
@@ -38,6 +38,9 @@ gui: $(TARGET)
 
 mobile-test: $(TARGET)
 	@./$(TARGET) mobile-test
+
+web:
+	@cd "Design LAN-Drop macOS UI" && npm run dev -- --host 0.0.0.0 --port 5173
 
 clean:
 	rm -rf $(OBJ_DIR) $(BIN_DIR)

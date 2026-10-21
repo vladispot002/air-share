@@ -12,18 +12,42 @@ void TransferPresenter::setView(ITransferView* view) {
 }
 
 void TransferPresenter::initialize() {
-    auto task1 = std::make_shared<P2PTransferTask>("task-001", "system_update.tar.gz", 25 * 1024 * 1024, TransferDirection::Download, "peer-local-01");
+    auto task1 = std::make_shared<P2PTransferTask>("T-0042", "project-assets.zip", 248ULL * 1024 * 1024, TransferDirection::Upload, "peer-thinkpad");
     task1->initialize();
-    std::vector<uint8_t> dummy(10 * 1024 * 1024, 0x55);
-    task1->processChunk(0, dummy);
-    task1->updateSpeed(10 * 1024 * 1024, 1.5);
+    task1->setBytesTransferred(static_cast<uint64_t>(248ULL * 1024 * 1024 * 0.67));
+    task1->updateSpeed(static_cast<uint64_t>(24.5 * 1024 * 1024), 1.0);
 
-    auto task2 = std::make_shared<P2PTransferTask>("task-002", "presentation_final.pdf", 8 * 1024 * 1024, TransferDirection::Upload, "peer-local-02");
+    auto task2 = std::make_shared<P2PTransferTask>("T-0041", "backup-2026-10.tar", 1200ULL * 1024 * 1024, TransferDirection::Upload, "peer-cloud");
     task2->initialize();
-    task2->updateSpeed(4 * 1024 * 1024, 1.0);
+    task2->setBytesTransferred(1200ULL * 1024 * 1024);
+    task2->setState(TransferState::Completed);
+
+    auto task3 = std::make_shared<P2PTransferTask>("T-0040", "client-presentation.pdf", static_cast<uint64_t>(18.3 * 1024 * 1024), TransferDirection::Download, "peer-macbook");
+    task3->initialize();
+    task3->setBytesTransferred(static_cast<uint64_t>(18.3 * 1024 * 1024));
+    task3->setState(TransferState::Completed);
+
+    auto task4 = std::make_shared<P2PTransferTask>("T-0039", "system-logs.tar.gz", 342ULL * 1024 * 1024, TransferDirection::Download, "peer-galaxy");
+    task4->initialize();
+    task4->setBytesTransferred(static_cast<uint64_t>(342ULL * 1024 * 1024 * 0.34));
+    task4->updateSpeed(static_cast<uint64_t>(12.1 * 1024 * 1024), 1.0);
+
+    auto task5 = std::make_shared<P2PTransferTask>("T-0038", "design-exports.fig", static_cast<uint64_t>(87.4 * 1024 * 1024), TransferDirection::Upload, "peer-thinkpad");
+    task5->initialize();
+    task5->setBytesTransferred(static_cast<uint64_t>(87.4 * 1024 * 1024));
+    task5->setState(TransferState::Completed);
+
+    auto task6 = std::make_shared<P2PTransferTask>("T-0037", "raw-footage-edit.mov", 4700ULL * 1024 * 1024, TransferDirection::Download, "peer-macbook");
+    task6->initialize();
+    task6->setBytesTransferred(static_cast<uint64_t>(4700ULL * 1024 * 1024 * 0.08));
+    task6->updateSpeed(static_cast<uint64_t>(31.2 * 1024 * 1024), 1.0);
 
     m_tasks.push_back(task1);
     m_tasks.push_back(task2);
+    m_tasks.push_back(task3);
+    m_tasks.push_back(task4);
+    m_tasks.push_back(task5);
+    m_tasks.push_back(task6);
 
     refreshView();
 }

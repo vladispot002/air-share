@@ -44,3 +44,6 @@ demo_received/
 *.tmp
 *.txt
 *.bin
+node_modules/
+dist/
+Design LAN-Drop macOS UI.zip

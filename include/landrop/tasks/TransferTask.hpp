@@ -39,6 +39,7 @@ public:
     const std::string& getFileName() const { return m_fileName; }
     uint64_t getFileSize() const { return m_fileSize; }
     uint64_t getBytesTransferred() const { return m_bytesTransferred; }
+    void setBytesTransferred(uint64_t bytes) { m_bytesTransferred = bytes; }
     size_t getChunkSize() const { return m_chunkSize; }
 
     TransferState getState() const { return m_state; }

@@ -13,17 +13,22 @@ void StoragePresenter::setView(IStorageView* view) {
 
 void StoragePresenter::initialize() {
     std::filesystem::create_directories("./shared_drop");
-    std::string sample1 = "./shared_drop/sample_document.txt";
-    if (!std::filesystem::exists(sample1)) {
-        std::ofstream out(sample1);
-        out << "LAN-Drop shared document content sample.\n";
-    }
-
-    std::string sample2 = "./shared_drop/archive.bin";
-    if (!std::filesystem::exists(sample2)) {
-        std::ofstream out(sample2, std::ios::binary);
-        std::vector<char> dummy(1024 * 128, 'X');
-        out.write(dummy.data(), dummy.size());
+    const std::vector<std::pair<std::string, size_t>> sampleFiles = {
+        {"quarterly-report-Q3.pdf", 4 * 1024 * 1024},
+        {"design-system-v2.fig", 12 * 1024 * 1024},
+        {"deployment-bundle.tar.gz", 16 * 1024 * 1024},
+        {"meeting-recordings.mp4", 24 * 1024 * 1024},
+        {"client-contracts.zip", 2 * 1024 * 1024}
+    };
+    for (const auto& [fname, fsize] : sampleFiles) {
+        std::string p = "./shared_drop/" + fname;
+        if (!std::filesystem::exists(p)) {
+            std::ofstream out(p, std::ios::binary);
+            std::string content = "LAN-Drop payload for " + fname;
+            out << content;
+            out.seekp(fsize > 0 ? fsize - 1 : 0);
+            out.write("\0", 1);
+        }
     }
 
     m_folderManager.scanDirectory();

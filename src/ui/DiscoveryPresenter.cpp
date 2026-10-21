@@ -15,9 +15,10 @@ void DiscoveryPresenter::initialize() {
     m_beacon.start();
     m_isScanning = true;
 
-    m_peers.push_back(std::make_shared<LocalPeer>("peer-local-01", "Desktop-Workstation", "192.168.1.100", 8848, "Linux", "PC", "255.255.255.0", false));
-    m_peers.push_back(std::make_shared<LocalPeer>("peer-local-02", "Mobile-Android-NFC", "192.168.1.105", 8848, "Android", "Phone", "255.255.255.0", true));
-    m_peers.push_back(std::make_shared<CloudPeer>("peer-cloud-01", "DropCloud-Relay", "https://relay.landrop.net", 443));
+    m_peers.push_back(std::make_shared<LocalPeer>("peer-macbook", "MacBook Pro", "192.168.1.42", 8848, "macOS", "Laptop", "255.255.255.0", false));
+    m_peers.push_back(std::make_shared<LocalPeer>("peer-thinkpad", "ThinkPad X1", "192.168.1.67", 8848, "Windows", "PC", "255.255.255.0", false));
+    m_peers.push_back(std::make_shared<LocalPeer>("peer-galaxy", "Galaxy S24", "192.168.1.103", 8848, "Android", "Phone", "255.255.255.0", true));
+    m_peers.push_back(std::make_shared<CloudPeer>("peer-cloud", "Cloud Relay", "https://relay.landrop.io", 443, "Cloud Relay"));
 
     for (const auto& peer : m_peers) {
         peer->initialize();
