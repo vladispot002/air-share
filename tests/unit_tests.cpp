@@ -356,7 +356,14 @@ static bool testReceiverSecurityValidation() {
     TEST_ASSERT(!isSafeFileName(""), "Rejects empty filename");
     TEST_ASSERT(!isSafeFileName("."), "Rejects dot");
     TEST_ASSERT(!isSafeFileName(".."), "Rejects double dot");
+    TEST_ASSERT(!isSafeFileName(".bashrc"), "Rejects hidden dotfile .bashrc");
+    TEST_ASSERT(!isSafeFileName(".profile"), "Rejects hidden dotfile .profile");
+    TEST_ASSERT(!isSafeFileName(".env"), "Rejects hidden dotfile .env");
     TEST_ASSERT(!isSafeFileName(std::string("file\0evil.sh", 12)), "Rejects null byte");
+    TEST_ASSERT(!isSafeFileName("bad\x1b[31mcolor.txt"), "Rejects ANSI escape code");
+    TEST_ASSERT(!isSafeFileName("bad\r\nname.txt"), "Rejects CRLF in filename");
+    TEST_ASSERT(!isSafeFileName("bad\tname.txt"), "Rejects tab character in filename");
+    TEST_ASSERT(!isSafeFileName("del\x7fname.txt"), "Rejects DEL character in filename");
     TEST_ASSERT(!isSafeFileName(std::string(256, 'a')), "Rejects name length > 255");
     TEST_ASSERT(isSafeFileName("valid_report.pdf"), "Accepts valid filename");
     TEST_ASSERT(isSafeFileName("my-image.tar.gz"), "Accepts multi-dot extension");
@@ -373,6 +380,35 @@ static bool testReceiverSecurityValidation() {
     TEST_ASSERT(isValidChunkSize(500, fileSize, totalReceived, kMaxChunk), "Accepts valid 500B chunk within bounds");
     TEST_ASSERT(isValidChunkSize(500, fileSize, 500, kMaxChunk), "Accepts exact remainder chunk");
     TEST_ASSERT(!isValidChunkSize(501, fileSize, 500, kMaxChunk), "Rejects chunk exceeding exact remainder");
+
+    // File size boundary tests
+    TEST_ASSERT(!isValidFileSize(0), "Rejects 0 file size");
+    TEST_ASSERT(isValidFileSize(1), "Accepts 1 byte file size");
+    TEST_ASSERT(isValidFileSize(100ULL * 1024 * 1024 * 1024), "Accepts 100GB file size");
+    TEST_ASSERT(!isValidFileSize(100ULL * 1024 * 1024 * 1024 + 1), "Rejects >100GB file size");
+    TEST_ASSERT(!isValidFileSize(UINT64_MAX), "Rejects UINT64_MAX file size");
+
+    // Symlink and pre-existing file guards
+    std::filesystem::path testDir = "./unit_test_security_guards_tmp";
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
+    std::filesystem::create_directories(testDir, ec);
+
+    std::filesystem::path existingFile = testDir / "existing.txt";
+    {
+        std::ofstream out(existingFile);
+        out << "critical existing content";
+    }
+    TEST_ASSERT(std::filesystem::exists(existingFile), "Pre-existing file exists");
+
+    std::filesystem::path symlinkFile = testDir / "symlink_link.txt";
+    std::filesystem::create_symlink(existingFile, symlinkFile, ec);
+    if (!ec) {
+        TEST_ASSERT(std::filesystem::is_symlink(std::filesystem::symlink_status(symlinkFile)),
+                    "Symlink detected by symlink_status");
+    }
+
+    std::filesystem::remove_all(testDir, ec);
     return true;
 }
 
