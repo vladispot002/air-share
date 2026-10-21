@@ -33,6 +33,7 @@ using namespace landrop;
 static void printUsage(const char* progName) {
     std::cout << "Usage:\n";
     std::cout << "  " << progName << " gui\n";
+    std::cout << "  " << progName << " mobile-gui\n";
     std::cout << "  " << progName << " send <file_path> <receiver_ip> [port]\n";
     std::cout << "  " << progName << " receive [port] [save_dir]\n";
     std::cout << "  " << progName << " demo\n";
@@ -244,8 +245,8 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
     }
 }
 
-static int runGui(int argc, char* argv[]) {
-    ui::GtkDesktopApp app;
+static int runGui(int argc, char* argv[], bool isMobile = false) {
+    ui::GtkDesktopApp app(isMobile);
     return app.run(argc, argv);
 }
 
@@ -402,7 +403,7 @@ static int runDemo() {
 
 int main(int argc, char* argv[]) {
     if (argc == 1) {
-        return runGui(argc, argv);
+        return runGui(argc, argv, false);
     }
 
     std::string mode = argv[1];
@@ -410,8 +411,12 @@ int main(int argc, char* argv[]) {
         return runDemo();
     }
 
-    if (mode == "gui") {
-        return runGui(argc, argv);
+    if (mode == "gui" || mode == "desktop-gui") {
+        return runGui(argc, argv, false);
+    }
+
+    if (mode == "mobile-gui" || mode == "--mobile" || mode == "-m") {
+        return runGui(argc, argv, true);
     }
 
     if (mode == "mobile-test") {

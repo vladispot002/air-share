@@ -18,7 +18,7 @@ SRCS = $(wildcard $(SRC_DIR)/core/*.cpp) \
 OBJS = $(patsubst $(SRC_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(SRCS))
 TARGET = $(BIN_DIR)/lan_drop
 
-.PHONY: all clean run gui mobile-test web desktop test
+.PHONY: all clean run gui mobile-gui mobile-test web desktop test
 
 TEST_TARGET = $(BIN_DIR)/lan_drop_tests
 TEST_OBJS = $(filter-out $(OBJ_DIR)/main.o, $(OBJS)) $(OBJ_DIR)/tests/unit_tests.o
@@ -38,6 +38,9 @@ run: $(TARGET)
 
 gui: $(TARGET)
 	@./$(TARGET) gui
+
+mobile-gui: $(TARGET)
+	@./$(TARGET) mobile-gui
 
 mobile-test: $(TARGET)
 	@./$(TARGET) mobile-test

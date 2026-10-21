@@ -17,7 +17,7 @@ class GtkDesktopApp : public IDiscoveryView,
                       public IStorageView,
                       public ISettingsView {
 public:
-    GtkDesktopApp();
+    explicit GtkDesktopApp(bool isMobileMode = false);
     ~GtkDesktopApp() override;
 
     int run(int argc, char* argv[]);
@@ -41,6 +41,7 @@ public:
     void showSaveSuccess() override;
 
     void toggleTheme(bool isDark);
+    void switchToTab(const std::string& tabName);
 
     DiscoveryPresenter& getDiscoveryPresenter() { return m_discoveryPresenter; }
     TransferPresenter& getTransferPresenter() { return m_transferPresenter; }
@@ -54,17 +55,18 @@ private:
     SettingsPresenter m_settingsPresenter;
 
     bool m_isDarkMode{true};
-    bool m_usingWebKit{false};
+    bool m_isMobileMode{false};
+    std::string m_selectedTaskId{"T-0042"};
 
     GtkWidget* m_mainWindow{nullptr};
     GtkWidget* m_headerBar{nullptr};
-    GtkWidget* m_themeSwitch{nullptr};
+    GtkWidget* m_themeBtn{nullptr};
     GtkWidget* m_statusLabel{nullptr};
 
     GtkWidget* m_stack{nullptr};
-    GtkWidget* m_stackSwitcher{nullptr};
+    std::vector<GtkWidget*> m_segmentedButtons;
 
-    GtkWidget* m_deviceListBox{nullptr};
+    GtkWidget* m_deviceGrid{nullptr};
     GtkWidget* m_scanStatusLabel{nullptr};
     GtkWidget* m_nfcEntry{nullptr};
 
@@ -88,10 +90,13 @@ private:
     GtkCssProvider* m_cssProvider{nullptr};
 
     void buildUi();
+    GtkWidget* createTrafficLights();
+    GtkWidget* createSegmentedControl();
     GtkWidget* createDiscoveryScreen();
     GtkWidget* createTransfersScreen();
     GtkWidget* createStorageScreen();
     GtkWidget* createSettingsScreen();
+    GtkWidget* createMobileBottomBar();
     void applyAppleTheme();
 };
 

@@ -1,16 +1,16 @@
 #include "landrop/ui/GtkDesktopApp.hpp"
 #include <iostream>
 #include <cstring>
-#include <dlfcn.h>
 #include <filesystem>
 
 namespace landrop::ui {
 
-GtkDesktopApp::GtkDesktopApp()
+GtkDesktopApp::GtkDesktopApp(bool isMobileMode)
     : m_discoveryPresenter(this),
       m_transferPresenter(this),
       m_storagePresenter(this),
-      m_settingsPresenter(this) {}
+      m_settingsPresenter(this),
+      m_isMobileMode(isMobileMode) {}
 
 GtkDesktopApp::~GtkDesktopApp() {
     if (m_cssProvider) {
@@ -26,16 +26,14 @@ int GtkDesktopApp::run(int argc, char* argv[]) {
     }
 
     buildUi();
-    if (!m_usingWebKit) {
-        applyAppleTheme();
-    }
+    applyAppleTheme();
 
     m_discoveryPresenter.initialize();
     m_transferPresenter.initialize();
     m_storagePresenter.initialize();
     m_settingsPresenter.initialize();
 
-    g_timeout_add(400, [](gpointer data) -> gboolean {
+    g_timeout_add(300, [](gpointer data) -> gboolean {
         auto* app = static_cast<GtkDesktopApp*>(data);
         app->getTransferPresenter().tick();
         return TRUE;
@@ -92,9 +90,146 @@ void GtkDesktopApp::applyAppleTheme() {
                 color: #FFFFFF;
                 border: none;
                 font-weight: bold;
+                border-radius: 7px;
+                padding: 6px 14px;
             }
             .apple-accent-btn:hover {
                 background-color: #0071E3;
+            }
+            .segmented-box {
+                background-color: #3A3A3C;
+                border-radius: 8px;
+                padding: 2px;
+            }
+            .segmented-btn {
+                background: transparent;
+                color: #98989D;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 14px;
+                font-weight: 500;
+                font-size: 13px;
+            }
+            .segmented-btn:hover {
+                color: #FFFFFF;
+            }
+            .segmented-btn-active {
+                background-color: #1C1C1E;
+                color: #FFFFFF;
+                font-weight: bold;
+                box-shadow: 0 1px 4px rgba(0,0,0,0.55);
+            }
+            .pill-active {
+                background-color: #0D2B18;
+                color: #30D158;
+                border-radius: 10px;
+                padding: 2px 9px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            .pill-cloud {
+                background-color: #0D2040;
+                color: #0A84FF;
+                border-radius: 10px;
+                padding: 2px 9px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            .pill-os {
+                background-color: #3A3A3C;
+                color: #98989D;
+                border-radius: 10px;
+                padding: 2px 9px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            .theme-btn {
+                background-color: #1C1C1E;
+                border: 1px solid #3A3A3C;
+                border-radius: 12px;
+                color: #98989D;
+                padding: 3px 8px;
+                font-size: 11px;
+            }
+            .theme-btn:hover {
+                color: #FFFFFF;
+            }
+            .status-badge {
+                background-color: #0D2B18;
+                color: #30D158;
+                border-radius: 10px;
+                padding: 4px 9px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            .traffic-red {
+                background-color: #FF5F57;
+                border-radius: 50%;
+                border: none;
+                min-width: 12px;
+                min-height: 12px;
+                padding: 0;
+            }
+            .traffic-yellow {
+                background-color: #FEBC2E;
+                border-radius: 50%;
+                border: none;
+                min-width: 12px;
+                min-height: 12px;
+                padding: 0;
+            }
+            .traffic-green {
+                background-color: #28C840;
+                border-radius: 50%;
+                border: none;
+                min-width: 12px;
+                min-height: 12px;
+                padding: 0;
+            }
+            .device-icon-box {
+                background-color: #3A3A3C;
+                border-radius: 10px;
+                min-width: 42px;
+                min-height: 42px;
+                font-size: 20px;
+            }
+            .rssi-bar-active {
+                background-color: #30D158;
+                border-radius: 2px;
+                min-width: 4px;
+            }
+            .rssi-bar-dim {
+                background-color: #636366;
+                border-radius: 2px;
+                min-width: 4px;
+            }
+            .mac-terminal-card {
+                background-color: #0D0D0F;
+                border: 1px solid #2A2A2C;
+                border-radius: 10px;
+            }
+            .mac-terminal-header {
+                background-color: #151518;
+                border-bottom: 1px solid #2A2A2C;
+                padding: 6px 10px;
+                border-radius: 10px 10px 0 0;
+            }
+            .mac-terminal-title {
+                color: #636366;
+                font-family: monospace;
+                font-size: 11px;
+            }
+            .mac-terminal-view, .mac-terminal-view text {
+                background-color: #0D0D0F;
+                color: #30D158;
+                font-family: monospace;
+                font-size: 11px;
+                padding: 8px;
+            }
+            .mobile-bottom-bar {
+                background-color: #2C2C2E;
+                border-top: 1px solid #3A3A3C;
+                padding: 6px;
             }
             entry {
                 background-color: #1C1C1E;
@@ -155,9 +290,146 @@ void GtkDesktopApp::applyAppleTheme() {
                 color: #FFFFFF;
                 border: none;
                 font-weight: bold;
+                border-radius: 7px;
+                padding: 6px 14px;
             }
             .apple-accent-btn:hover {
                 background-color: #0062CC;
+            }
+            .segmented-box {
+                background-color: #E0E0E5;
+                border-radius: 8px;
+                padding: 2px;
+            }
+            .segmented-btn {
+                background: transparent;
+                color: #6E6E73;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 14px;
+                font-weight: 500;
+                font-size: 13px;
+            }
+            .segmented-btn:hover {
+                color: #1D1D1F;
+            }
+            .segmented-btn-active {
+                background-color: #FFFFFF;
+                color: #1D1D1F;
+                font-weight: bold;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+            }
+            .pill-active {
+                background-color: #D4F0DA;
+                color: #1A7A36;
+                border-radius: 10px;
+                padding: 2px 9px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            .pill-cloud {
+                background-color: #E5F0FF;
+                color: #007AFF;
+                border-radius: 10px;
+                padding: 2px 9px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            .pill-os {
+                background-color: #F0F0F2;
+                color: #6E6E73;
+                border-radius: 10px;
+                padding: 2px 9px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            .theme-btn {
+                background-color: #FFFFFF;
+                border: 1px solid #D2D2D7;
+                border-radius: 12px;
+                color: #6E6E73;
+                padding: 3px 8px;
+                font-size: 11px;
+            }
+            .theme-btn:hover {
+                color: #1D1D1F;
+            }
+            .status-badge {
+                background-color: #D4F0DA;
+                color: #1A7A36;
+                border-radius: 10px;
+                padding: 4px 9px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            .traffic-red {
+                background-color: #FF5F57;
+                border-radius: 50%;
+                border: none;
+                min-width: 12px;
+                min-height: 12px;
+                padding: 0;
+            }
+            .traffic-yellow {
+                background-color: #FEBC2E;
+                border-radius: 50%;
+                border: none;
+                min-width: 12px;
+                min-height: 12px;
+                padding: 0;
+            }
+            .traffic-green {
+                background-color: #28C840;
+                border-radius: 50%;
+                border: none;
+                min-width: 12px;
+                min-height: 12px;
+                padding: 0;
+            }
+            .device-icon-box {
+                background-color: #E5E5EA;
+                border-radius: 10px;
+                min-width: 42px;
+                min-height: 42px;
+                font-size: 20px;
+            }
+            .rssi-bar-active {
+                background-color: #34C759;
+                border-radius: 2px;
+                min-width: 4px;
+            }
+            .rssi-bar-dim {
+                background-color: #C7C7CC;
+                border-radius: 2px;
+                min-width: 4px;
+            }
+            .mac-terminal-card {
+                background-color: #0D0D0F;
+                border: 1px solid #2A2A2C;
+                border-radius: 10px;
+            }
+            .mac-terminal-header {
+                background-color: #151518;
+                border-bottom: 1px solid #2A2A2C;
+                padding: 6px 10px;
+                border-radius: 10px 10px 0 0;
+            }
+            .mac-terminal-title {
+                color: #8E8E93;
+                font-family: monospace;
+                font-size: 11px;
+            }
+            .mac-terminal-view, .mac-terminal-view text {
+                background-color: #0D0D0F;
+                color: #30D158;
+                font-family: monospace;
+                font-size: 11px;
+                padding: 8px;
+            }
+            .mobile-bottom-bar {
+                background-color: #FFFFFF;
+                border-top: 1px solid #D2D2D7;
+                padding: 6px;
             }
             entry {
                 background-color: #FFFFFF;
@@ -193,13 +465,125 @@ void GtkDesktopApp::applyAppleTheme() {
 void GtkDesktopApp::toggleTheme(bool isDark) {
     m_isDarkMode = isDark;
     applyAppleTheme();
+    if (m_themeBtn) {
+        gtk_button_set_label(GTK_BUTTON(m_themeBtn), m_isDarkMode ? "● Dark" : "○ Light");
+    }
     showNotification(m_isDarkMode ? "Theme: Dark Mode" : "Theme: Light Mode");
+}
+
+GtkWidget* GtkDesktopApp::createTrafficLights() {
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_margin_start(box, 12);
+    gtk_widget_set_margin_end(box, 12);
+
+    const char* classes[] = {"traffic-red", "traffic-yellow", "traffic-green"};
+    for (int i = 0; i < 3; ++i) {
+        GtkWidget* dot = gtk_button_new();
+        gtk_widget_set_size_request(dot, 12, 12);
+        gtk_style_context_add_class(gtk_widget_get_style_context(dot), classes[i]);
+        gtk_box_pack_start(GTK_BOX(box), dot, FALSE, FALSE, 0);
+    }
+    return box;
+}
+
+GtkWidget* GtkDesktopApp::createSegmentedControl() {
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_style_context_add_class(gtk_widget_get_style_context(box), "segmented-box");
+
+    struct TabDef {
+        const char* id;
+        const char* label;
+    };
+    TabDef tabs[] = {
+        {"discovery", "Radar"},
+        {"transfers", "Transfers"},
+        {"storage", "Storage"},
+        {"settings", "Settings"}
+    };
+
+    m_segmentedButtons.clear();
+
+    for (size_t i = 0; i < 4; ++i) {
+        GtkWidget* btn = gtk_button_new_with_label(tabs[i].label);
+        gtk_style_context_add_class(gtk_widget_get_style_context(btn), "segmented-btn");
+        if (i == 0) {
+            gtk_style_context_add_class(gtk_widget_get_style_context(btn), "segmented-btn-active");
+        }
+        g_object_set_data_full(G_OBJECT(btn), "tab_id", g_strdup(tabs[i].id), g_free);
+        g_signal_connect(btn, "clicked", G_CALLBACK(+[](GtkButton* b, gpointer appPtr) {
+            const char* tid = static_cast<const char*>(g_object_get_data(G_OBJECT(b), "tab_id"));
+            if (tid) {
+                static_cast<GtkDesktopApp*>(appPtr)->switchToTab(tid);
+            }
+        }), this);
+
+        m_segmentedButtons.push_back(btn);
+        gtk_box_pack_start(GTK_BOX(box), btn, FALSE, FALSE, 0);
+    }
+
+    return box;
+}
+
+void GtkDesktopApp::switchToTab(const std::string& tabName) {
+    if (!m_stack) return;
+    gtk_stack_set_visible_child_name(GTK_STACK(m_stack), tabName.c_str());
+
+    const char* names[] = {"discovery", "transfers", "storage", "settings"};
+    for (size_t i = 0; i < m_segmentedButtons.size(); ++i) {
+        auto* ctx = gtk_widget_get_style_context(m_segmentedButtons[i]);
+        if (names[i % 4] == tabName) {
+            gtk_style_context_add_class(ctx, "segmented-btn-active");
+        } else {
+            gtk_style_context_remove_class(ctx, "segmented-btn-active");
+        }
+    }
+}
+
+GtkWidget* GtkDesktopApp::createMobileBottomBar() {
+    GtkWidget* bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_style_context_add_class(gtk_widget_get_style_context(bar), "mobile-bottom-bar");
+
+    struct TabInfo {
+        const char* id;
+        const char* label;
+    };
+    TabInfo items[] = {
+        {"discovery", "📡 Radar"},
+        {"transfers", "⇄ Transfers"},
+        {"storage", "📁 Storage"},
+        {"settings", "⚙️ Settings"}
+    };
+
+    for (int i = 0; i < 4; ++i) {
+        GtkWidget* btn = gtk_button_new_with_label(items[i].label);
+        gtk_style_context_add_class(gtk_widget_get_style_context(btn), "segmented-btn");
+        if (i == 0) {
+            gtk_style_context_add_class(gtk_widget_get_style_context(btn), "segmented-btn-active");
+        }
+        g_object_set_data_full(G_OBJECT(btn), "tab_id", g_strdup(items[i].id), g_free);
+        g_signal_connect(btn, "clicked", G_CALLBACK(+[](GtkButton* b, gpointer appPtr) {
+            const char* tid = static_cast<const char*>(g_object_get_data(G_OBJECT(b), "tab_id"));
+            if (tid) {
+                static_cast<GtkDesktopApp*>(appPtr)->switchToTab(tid);
+            }
+        }), this);
+
+        m_segmentedButtons.push_back(btn);
+        gtk_box_pack_start(GTK_BOX(bar), btn, TRUE, TRUE, 0);
+    }
+
+    return bar;
 }
 
 void GtkDesktopApp::buildUi() {
     m_mainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(m_mainWindow), "LAN-Drop — AirShare");
-    gtk_window_set_default_size(GTK_WINDOW(m_mainWindow), 1080, 780);
+    if (m_isMobileMode) {
+        gtk_window_set_title(GTK_WINDOW(m_mainWindow), "LAN-Drop Mobile");
+        gtk_window_set_default_size(GTK_WINDOW(m_mainWindow), 390, 812);
+    } else {
+        gtk_window_set_title(GTK_WINDOW(m_mainWindow), "LAN-Drop — AirShare");
+        gtk_window_set_default_size(GTK_WINDOW(m_mainWindow), 980, 700);
+    }
     gtk_window_set_position(GTK_WINDOW(m_mainWindow), GTK_WIN_POS_CENTER);
     if (!gtk_window_set_icon_from_file(GTK_WINDOW(m_mainWindow), "/home/vladis/lan-drop/resources/lan-drop.svg", nullptr)) {
         gtk_window_set_icon_from_file(GTK_WINDOW(m_mainWindow), "resources/lan-drop.svg", nullptr);
@@ -207,150 +591,138 @@ void GtkDesktopApp::buildUi() {
 
     g_signal_connect(m_mainWindow, "destroy", G_CALLBACK(gtk_main_quit), nullptr);
 
-    std::string distHtml = "/home/vladis/lan-drop/Design LAN-Drop macOS UI/dist/index.html";
-    if (std::filesystem::exists(distHtml)) {
-        void* wkHandle = dlopen("libwebkit2gtk-4.1.so.0", RTLD_NOW);
-        if (wkHandle) {
-            typedef GtkWidget* (*WkNewFn)();
-            typedef void (*WkLoadUriFn)(void*, const char*);
-            typedef void* (*WkGetSettingsFn)(void*);
-            typedef void (*WkSetBoolFn)(void*, gboolean);
-
-            auto wk_new = reinterpret_cast<WkNewFn>(dlsym(wkHandle, "webkit_web_view_new"));
-            auto wk_load = reinterpret_cast<WkLoadUriFn>(dlsym(wkHandle, "webkit_web_view_load_uri"));
-            auto wk_get_settings = reinterpret_cast<WkGetSettingsFn>(dlsym(wkHandle, "webkit_web_view_get_settings"));
-            auto wk_set_file_access = reinterpret_cast<WkSetBoolFn>(dlsym(wkHandle, "webkit_settings_set_allow_file_access_from_file_urls"));
-            auto wk_set_universal_access = reinterpret_cast<WkSetBoolFn>(dlsym(wkHandle, "webkit_settings_set_allow_universal_access_from_file_urls"));
-            auto wk_set_js = reinterpret_cast<WkSetBoolFn>(dlsym(wkHandle, "webkit_settings_set_enable_javascript"));
-
-            if (wk_new && wk_load) {
-                GtkWidget* webView = wk_new();
-                if (wk_get_settings) {
-                    void* settings = wk_get_settings(webView);
-                    if (settings) {
-                        if (wk_set_file_access) wk_set_file_access(settings, TRUE);
-                        if (wk_set_universal_access) wk_set_universal_access(settings, TRUE);
-                        if (wk_set_js) wk_set_js(settings, TRUE);
-                    }
-                }
-                gtk_container_add(GTK_CONTAINER(m_mainWindow), webView);
-                std::string fileUri = "file://" + distHtml;
-                wk_load(webView, fileUri.c_str());
-                m_usingWebKit = true;
-                return;
-            }
-        }
-    }
-
     m_headerBar = gtk_header_bar_new();
     gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(m_headerBar), TRUE);
-    gtk_header_bar_set_title(GTK_HEADER_BAR(m_headerBar), "LAN-Drop");
-    gtk_header_bar_set_subtitle(GTK_HEADER_BAR(m_headerBar), "Cross-Platform P2P & Hybrid Cloud Transfer");
     gtk_window_set_titlebar(GTK_WINDOW(m_mainWindow), m_headerBar);
 
-    m_stack = gtk_stack_new();
-    gtk_stack_set_transition_type(GTK_STACK(m_stack), GTK_STACK_TRANSITION_TYPE_SLIDE_LEFT_RIGHT);
-    gtk_stack_set_transition_duration(GTK_STACK(m_stack), 250);
+    if (!m_isMobileMode) {
+        gtk_header_bar_pack_start(GTK_HEADER_BAR(m_headerBar), createTrafficLights());
+        gtk_header_bar_set_custom_title(GTK_HEADER_BAR(m_headerBar), createSegmentedControl());
+    } else {
+        GtkWidget* mobileTitle = gtk_label_new(nullptr);
+        gtk_label_set_markup(GTK_LABEL(mobileTitle), "<b>LAN-Drop Mobile</b>");
+        gtk_header_bar_set_custom_title(GTK_HEADER_BAR(m_headerBar), mobileTitle);
+    }
 
-    m_stackSwitcher = gtk_stack_switcher_new();
-    gtk_stack_switcher_set_stack(GTK_STACK_SWITCHER(m_stackSwitcher), GTK_STACK(m_stack));
-    gtk_header_bar_pack_start(GTK_HEADER_BAR(m_headerBar), m_stackSwitcher);
+    GtkWidget* rightBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
 
-    GtkWidget* themeBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    GtkWidget* themeIconLabel = gtk_label_new("Theme");
-    m_themeSwitch = gtk_switch_new();
-    gtk_switch_set_active(GTK_SWITCH(m_themeSwitch), m_isDarkMode);
-
-    g_signal_connect(m_themeSwitch, "notify::active", G_CALLBACK(+[](GObject* obj, GParamSpec*, gpointer data) {
+    m_themeBtn = gtk_button_new_with_label(m_isDarkMode ? "● Dark" : "○ Light");
+    gtk_style_context_add_class(gtk_widget_get_style_context(m_themeBtn), "theme-btn");
+    g_signal_connect(m_themeBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         auto* app = static_cast<GtkDesktopApp*>(data);
-        app->toggleTheme(gtk_switch_get_active(GTK_SWITCH(obj)));
+        app->toggleTheme(!app->m_isDarkMode);
     }), this);
+    gtk_box_pack_start(GTK_BOX(rightBox), m_themeBtn, FALSE, FALSE, 0);
 
-    gtk_box_pack_start(GTK_BOX(themeBox), themeIconLabel, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(themeBox), m_themeSwitch, FALSE, FALSE, 0);
-    gtk_header_bar_pack_end(GTK_HEADER_BAR(m_headerBar), themeBox);
+    GtkWidget* onlineBadge = gtk_label_new("● Online");
+    gtk_style_context_add_class(gtk_widget_get_style_context(onlineBadge), "status-badge");
+    gtk_box_pack_start(GTK_BOX(rightBox), onlineBadge, FALSE, FALSE, 0);
+
+    gtk_header_bar_pack_end(GTK_HEADER_BAR(m_headerBar), rightBox);
 
     GtkWidget* mainBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_container_add(GTK_CONTAINER(m_mainWindow), mainBox);
 
-    gtk_stack_add_titled(GTK_STACK(m_stack), createDiscoveryScreen(), "discovery", "Radar / Discover");
-    gtk_stack_add_titled(GTK_STACK(m_stack), createTransfersScreen(), "transfers", "Transfers");
-    gtk_stack_add_titled(GTK_STACK(m_stack), createStorageScreen(), "storage", "Shared Storage");
-    gtk_stack_add_titled(GTK_STACK(m_stack), createSettingsScreen(), "settings", "Settings");
+    m_stack = gtk_stack_new();
+    gtk_stack_set_transition_type(GTK_STACK(m_stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
+    gtk_stack_set_transition_duration(GTK_STACK(m_stack), 200);
+
+    gtk_stack_add_named(GTK_STACK(m_stack), createDiscoveryScreen(), "discovery");
+    gtk_stack_add_named(GTK_STACK(m_stack), createTransfersScreen(), "transfers");
+    gtk_stack_add_named(GTK_STACK(m_stack), createStorageScreen(), "storage");
+    gtk_stack_add_named(GTK_STACK(m_stack), createSettingsScreen(), "settings");
 
     gtk_box_pack_start(GTK_BOX(mainBox), m_stack, TRUE, TRUE, 0);
 
-    GtkWidget* footerBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-    gtk_container_set_border_width(GTK_CONTAINER(footerBar), 8);
-    m_statusLabel = gtk_label_new("Status: Ready. Apple HIG Desktop Application.");
-    gtk_box_pack_start(GTK_BOX(footerBar), m_statusLabel, FALSE, FALSE, 6);
-    gtk_box_pack_start(GTK_BOX(mainBox), footerBar, FALSE, FALSE, 0);
+    if (m_isMobileMode) {
+        gtk_box_pack_start(GTK_BOX(mainBox), createMobileBottomBar(), FALSE, FALSE, 0);
+    } else {
+        GtkWidget* footerBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+        gtk_container_set_border_width(GTK_CONTAINER(footerBar), 6);
+        m_statusLabel = gtk_label_new("Status: Ready. Apple HIG Desktop Application.");
+        gtk_box_pack_start(GTK_BOX(footerBar), m_statusLabel, FALSE, FALSE, 8);
+
+        GtkWidget* verLabel = gtk_label_new("v2.4.1 | P2P + Cloud Relay");
+        gtk_widget_set_opacity(verLabel, 0.6);
+        gtk_box_pack_end(GTK_BOX(footerBar), verLabel, FALSE, FALSE, 8);
+        gtk_box_pack_start(GTK_BOX(mainBox), footerBar, FALSE, FALSE, 0);
+    }
 }
 
 GtkWidget* GtkDesktopApp::createDiscoveryScreen() {
-    GtkWidget* rootBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 14);
-    gtk_container_set_border_width(GTK_CONTAINER(rootBox), 18);
+    GtkWidget* rootBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_container_set_border_width(GTK_CONTAINER(rootBox), 16);
 
     GtkWidget* topCard = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-    GtkStyleContext* ctx = gtk_widget_get_style_context(topCard);
-    gtk_style_context_add_class(ctx, "apple-card");
+    gtk_style_context_add_class(gtk_widget_get_style_context(topCard), "apple-card");
 
-    m_scanStatusLabel = gtk_label_new("Radar Scanner: Active (Listening for LAN Beacons)");
-    GtkWidget* scanBtn = gtk_button_new_with_label("Toggle Scan");
-    GtkWidget* refreshBtn = gtk_button_new_with_label("Refresh Devices");
+    GtkWidget* dotLabel = gtk_label_new("●");
+    gtk_style_context_add_class(gtk_widget_get_style_context(dotLabel), "status-badge");
+
+    GtkWidget* radarTitle = gtk_label_new(nullptr);
+    gtk_label_set_markup(GTK_LABEL(radarTitle), "<b>Radar Scanner</b>");
+
+    GtkWidget* activeBadge = gtk_label_new("Active");
+    gtk_style_context_add_class(gtk_widget_get_style_context(activeBadge), "pill-active");
+
+    m_scanStatusLabel = gtk_label_new("4 devices found");
+    gtk_widget_set_opacity(m_scanStatusLabel, 0.7);
+
+    GtkWidget* refreshBtn = gtk_button_new_with_label("↺ Refresh");
     gtk_style_context_add_class(gtk_widget_get_style_context(refreshBtn), "apple-accent-btn");
-
-    g_signal_connect(scanBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
-        auto* app = static_cast<GtkDesktopApp*>(data);
-        app->getDiscoveryPresenter().onToggleScanClicked(true);
-    }), this);
-
     g_signal_connect(refreshBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         auto* app = static_cast<GtkDesktopApp*>(data);
         app->getDiscoveryPresenter().onRefreshDevicesClicked();
     }), this);
 
+    gtk_box_pack_start(GTK_BOX(topCard), dotLabel, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(topCard), radarTitle, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(topCard), activeBadge, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(topCard), m_scanStatusLabel, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(topCard), scanBtn, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(topCard), refreshBtn, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(topCard), refreshBtn, FALSE, FALSE, 0);
+
     gtk_box_pack_start(GTK_BOX(rootBox), topCard, FALSE, FALSE, 0);
 
-    GtkWidget* listCard = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
-    gtk_style_context_add_class(gtk_widget_get_style_context(listCard), "apple-card");
+    m_deviceGrid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(m_deviceGrid), 12);
+    gtk_grid_set_column_spacing(GTK_GRID(m_deviceGrid), 12);
+    gtk_grid_set_row_homogeneous(GTK_GRID(m_deviceGrid), TRUE);
+    gtk_grid_set_column_homogeneous(GTK_GRID(m_deviceGrid), TRUE);
 
-    GtkWidget* listTitle = gtk_label_new(nullptr);
-    gtk_label_set_markup(GTK_LABEL(listTitle), "<b>Discovered Network Nodes (Device List Container):</b>");
-    gtk_label_set_xalign(GTK_LABEL(listTitle), 0.0f);
-    gtk_box_pack_start(GTK_BOX(listCard), listTitle, FALSE, FALSE, 4);
-
-    m_deviceListBox = gtk_list_box_new();
-    gtk_list_box_set_selection_mode(GTK_LIST_BOX(m_deviceListBox), GTK_SELECTION_SINGLE);
-
-    GtkWidget* scrolled = gtk_scrolled_window_new(nullptr, nullptr);
-    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(scrolled), 240);
-    gtk_container_add(GTK_CONTAINER(scrolled), m_deviceListBox);
-    gtk_box_pack_start(GTK_BOX(listCard), scrolled, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(rootBox), listCard, TRUE, TRUE, 0);
+    GtkWidget* scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_container_add(GTK_CONTAINER(scroll), m_deviceGrid);
+    gtk_box_pack_start(GTK_BOX(rootBox), scroll, TRUE, TRUE, 0);
 
     GtkWidget* nfcCard = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_style_context_add_class(gtk_widget_get_style_context(nfcCard), "apple-card");
 
-    GtkWidget* nfcLabel = gtk_label_new("NFC Quick-Pair:");
+    GtkWidget* nfcIcon = gtk_label_new("📡");
+    gtk_style_context_add_class(gtk_widget_get_style_context(nfcIcon), "device-icon-box");
+    gtk_widget_set_size_request(nfcIcon, 36, 36);
+
+    GtkWidget* nfcBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    GtkWidget* nfcTitle = gtk_label_new(nullptr);
+    gtk_label_set_markup(GTK_LABEL(nfcTitle), "<b>NFC Quick-Pair</b>");
+    gtk_label_set_xalign(GTK_LABEL(nfcTitle), 0.0f);
+
     m_nfcEntry = gtk_entry_new();
-    gtk_entry_set_text(GTK_ENTRY(m_nfcEntry), "LANDROP_BEACON|MobileDeviceNFC|uuid-nfc-88|8848");
+    gtk_entry_set_placeholder_text(GTK_ENTRY(m_nfcEntry), "Hold device near NFC sensor to pair...");
+    gtk_entry_set_text(GTK_ENTRY(m_nfcEntry), "LANDROP:NFC:v1;192.168.1.180:8848;PIN=4242");
+    gtk_box_pack_start(GTK_BOX(nfcBox), nfcTitle, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(nfcBox), m_nfcEntry, TRUE, TRUE, 0);
 
-    GtkWidget* nfcPairBtn = gtk_button_new_with_label("Simulate NFC Touch");
-    gtk_style_context_add_class(gtk_widget_get_style_context(nfcPairBtn), "apple-accent-btn");
-
-    g_signal_connect(nfcPairBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
+    GtkWidget* nfcTouchBtn = gtk_button_new_with_label("Simulate Touch");
+    gtk_style_context_add_class(gtk_widget_get_style_context(nfcTouchBtn), "apple-accent-btn");
+    g_signal_connect(nfcTouchBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         auto* app = static_cast<GtkDesktopApp*>(data);
-        const char* text = gtk_entry_get_text(GTK_ENTRY(app->m_nfcEntry));
-        app->getDiscoveryPresenter().onNfcPairTriggered(text);
+        const char* val = gtk_entry_get_text(GTK_ENTRY(app->m_nfcEntry));
+        app->getDiscoveryPresenter().onNfcPairTriggered(val ? val : "");
     }), this);
 
-    gtk_box_pack_start(GTK_BOX(nfcCard), nfcLabel, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(nfcCard), m_nfcEntry, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(nfcCard), nfcPairBtn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(nfcCard), nfcIcon, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(nfcCard), nfcBox, TRUE, TRUE, 0);
+    gtk_box_pack_end(GTK_BOX(nfcCard), nfcTouchBtn, FALSE, FALSE, 0);
+
     gtk_box_pack_start(GTK_BOX(rootBox), nfcCard, FALSE, FALSE, 0);
 
     return rootBox;
@@ -396,7 +768,30 @@ GtkWidget* GtkDesktopApp::createTransfersScreen() {
     gtk_container_add(GTK_CONTAINER(scroll), m_transferTreeView);
     gtk_box_pack_start(GTK_BOX(card), scroll, TRUE, TRUE, 0);
 
-    m_selectedTransferLabel = gtk_label_new("Selection: None");
+    GtkTreeSelection* selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(m_transferTreeView));
+    g_signal_connect(selection, "changed", G_CALLBACK(+[](GtkTreeSelection* sel, gpointer data) {
+        auto* app = static_cast<GtkDesktopApp*>(data);
+        GtkTreeModel* model = nullptr;
+        GtkTreeIter iter;
+        if (gtk_tree_selection_get_selected(sel, &model, &iter)) {
+            gchar* tid = nullptr;
+            gchar* fname = nullptr;
+            gchar* st = nullptr;
+            gtk_tree_model_get(model, &iter, 0, &tid, 1, &fname, 5, &st, -1);
+            if (tid) {
+                app->m_selectedTaskId = tid;
+                if (app->m_selectedTransferLabel) {
+                    std::string s = "Selected: " + std::string(fname ? fname : "") + " (" + tid + ") | State: " + (st ? st : "");
+                    gtk_label_set_text(GTK_LABEL(app->m_selectedTransferLabel), s.c_str());
+                }
+                g_free(tid);
+            }
+            if (fname) g_free(fname);
+            if (st) g_free(st);
+        }
+    }), this);
+
+    m_selectedTransferLabel = gtk_label_new("Selection: T-0042 (project-assets.zip)");
     gtk_label_set_xalign(GTK_LABEL(m_selectedTransferLabel), 0.0f);
     gtk_box_pack_start(GTK_BOX(card), m_selectedTransferLabel, FALSE, FALSE, 4);
 
@@ -405,24 +800,46 @@ GtkWidget* GtkDesktopApp::createTransfersScreen() {
     GtkWidget* actionCard = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     gtk_style_context_add_class(gtk_widget_get_style_context(actionCard), "apple-card");
 
-    GtkWidget* pauseBtn = gtk_button_new_with_label("Pause");
-    GtkWidget* resumeBtn = gtk_button_new_with_label("Resume");
-    GtkWidget* cancelBtn = gtk_button_new_with_label("Cancel");
+    GtkWidget* pauseBtn = gtk_button_new_with_label("⏸ Pause");
+    GtkWidget* resumeBtn = gtk_button_new_with_label("▶ Resume");
+    GtkWidget* cancelBtn = gtk_button_new_with_label("✕ Cancel");
+    GtkWidget* sendBtn = gtk_button_new_with_label("Send File...");
+    gtk_style_context_add_class(gtk_widget_get_style_context(sendBtn), "apple-accent-btn");
     GtkWidget* clearBtn = gtk_button_new_with_label("Clear Completed");
 
     g_signal_connect(pauseBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         auto* app = static_cast<GtkDesktopApp*>(data);
-        app->getTransferPresenter().onPauseTransferClicked("task-001");
+        app->getTransferPresenter().onPauseTransferClicked(app->m_selectedTaskId);
     }), this);
 
     g_signal_connect(resumeBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         auto* app = static_cast<GtkDesktopApp*>(data);
-        app->getTransferPresenter().onResumeTransferClicked("task-001");
+        app->getTransferPresenter().onResumeTransferClicked(app->m_selectedTaskId);
     }), this);
 
     g_signal_connect(cancelBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         auto* app = static_cast<GtkDesktopApp*>(data);
-        app->getTransferPresenter().onCancelTransferClicked("task-001");
+        app->getTransferPresenter().onCancelTransferClicked(app->m_selectedTaskId);
+    }), this);
+
+    g_signal_connect(sendBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
+        auto* app = static_cast<GtkDesktopApp*>(data);
+        GtkWidget* dialog = gtk_file_chooser_dialog_new(
+            "Select File to Send",
+            GTK_WINDOW(app->m_mainWindow),
+            GTK_FILE_CHOOSER_ACTION_OPEN,
+            "_Cancel", GTK_RESPONSE_CANCEL,
+            "_Send", GTK_RESPONSE_ACCEPT,
+            nullptr
+        );
+        if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+            char* file = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+            if (file) {
+                app->getTransferPresenter().onSendFileClicked("peer-thinkpad", file);
+                g_free(file);
+            }
+        }
+        gtk_widget_destroy(dialog);
     }), this);
 
     g_signal_connect(clearBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
@@ -433,6 +850,7 @@ GtkWidget* GtkDesktopApp::createTransfersScreen() {
     gtk_box_pack_start(GTK_BOX(actionCard), pauseBtn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(actionCard), resumeBtn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(actionCard), cancelBtn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(actionCard), sendBtn, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(actionCard), clearBtn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(rootBox), actionCard, FALSE, FALSE, 0);
 
@@ -446,11 +864,33 @@ GtkWidget* GtkDesktopApp::createStorageScreen() {
     GtkWidget* topCard = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_style_context_add_class(gtk_widget_get_style_context(topCard), "apple-card");
 
-    GtkWidget* pathLabel = gtk_label_new("Shared Folder:");
+    GtkWidget* pathLabel = gtk_label_new("📁 Shared Folder:");
     m_storagePathEntry = gtk_entry_new();
     gtk_entry_set_text(GTK_ENTRY(m_storagePathEntry), "./shared_drop");
 
-    GtkWidget* rescanBtn = gtk_button_new_with_label("Rescan");
+    GtkWidget* browseBtn = gtk_button_new_with_label("Browse...");
+    g_signal_connect(browseBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
+        auto* app = static_cast<GtkDesktopApp*>(data);
+        GtkWidget* dialog = gtk_file_chooser_dialog_new(
+            "Select Shared Directory",
+            GTK_WINDOW(app->m_mainWindow),
+            GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER,
+            "_Cancel", GTK_RESPONSE_CANCEL,
+            "_Select", GTK_RESPONSE_ACCEPT,
+            nullptr
+        );
+        if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+            char* folder = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+            if (folder) {
+                gtk_entry_set_text(GTK_ENTRY(app->m_storagePathEntry), folder);
+                app->getStoragePresenter().onSharedPathChanged(folder);
+                g_free(folder);
+            }
+        }
+        gtk_widget_destroy(dialog);
+    }), this);
+
+    GtkWidget* rescanBtn = gtk_button_new_with_label("↺ Rescan");
     gtk_style_context_add_class(gtk_widget_get_style_context(rescanBtn), "apple-accent-btn");
 
     g_signal_connect(rescanBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
@@ -458,15 +898,38 @@ GtkWidget* GtkDesktopApp::createStorageScreen() {
         app->getStoragePresenter().onRescanClicked();
     }), this);
 
+    GtkWidget* addFileBtn = gtk_button_new_with_label("+ Add File");
+    g_signal_connect(addFileBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
+        auto* app = static_cast<GtkDesktopApp*>(data);
+        GtkWidget* dialog = gtk_file_chooser_dialog_new(
+            "Add File to Shared Storage",
+            GTK_WINDOW(app->m_mainWindow),
+            GTK_FILE_CHOOSER_ACTION_OPEN,
+            "_Cancel", GTK_RESPONSE_CANCEL,
+            "_Add", GTK_RESPONSE_ACCEPT,
+            nullptr
+        );
+        if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+            char* file = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+            if (file) {
+                app->getStoragePresenter().onAddFileClicked(file);
+                g_free(file);
+            }
+        }
+        gtk_widget_destroy(dialog);
+    }), this);
+
     gtk_box_pack_start(GTK_BOX(topCard), pathLabel, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(topCard), m_storagePathEntry, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(topCard), browseBtn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(topCard), rescanBtn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(topCard), addFileBtn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(rootBox), topCard, FALSE, FALSE, 0);
 
     GtkWidget* listCard = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_style_context_add_class(gtk_widget_get_style_context(listCard), "apple-card");
 
-    m_storageStatsLabel = gtk_label_new("Files: 0 | Total: 0 KB | Security: Open Access");
+    m_storageStatsLabel = gtk_label_new("● 5 Files  |  3.16 GB Total  |  Chunked Transfer");
     gtk_label_set_xalign(GTK_LABEL(m_storageStatsLabel), 0.0f);
     gtk_box_pack_start(GTK_BOX(listCard), m_storageStatsLabel, FALSE, FALSE, 4);
 
@@ -488,9 +951,23 @@ GtkWidget* GtkDesktopApp::createStorageScreen() {
     GtkWidget* passCard = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_style_context_add_class(gtk_widget_get_style_context(passCard), "apple-card");
 
-    GtkWidget* passLabel = gtk_label_new("Access PIN / Password:");
+    GtkWidget* passIcon = gtk_label_new("🔐");
+    gtk_style_context_add_class(gtk_widget_get_style_context(passIcon), "device-icon-box");
+    gtk_widget_set_size_request(passIcon, 36, 36);
+
+    GtkWidget* passTextBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    GtkWidget* passTitle = gtk_label_new(nullptr);
+    gtk_label_set_markup(GTK_LABEL(passTitle), "<b>Access Protection</b>");
+    gtk_label_set_xalign(GTK_LABEL(passTitle), 0.0f);
+    GtkWidget* passSub = gtk_label_new("PIN or password required to access storage");
+    gtk_widget_set_opacity(passSub, 0.65);
+    gtk_label_set_xalign(GTK_LABEL(passSub), 0.0f);
+    gtk_box_pack_start(GTK_BOX(passTextBox), passTitle, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(passTextBox), passSub, FALSE, FALSE, 0);
+
     m_passwordEntry = gtk_entry_new();
     gtk_entry_set_visibility(GTK_ENTRY(m_passwordEntry), FALSE);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(m_passwordEntry), "PIN");
 
     GtkWidget* setPassBtn = gtk_button_new_with_label("Set Password");
     GtkWidget* clearPassBtn = gtk_button_new_with_label("Clear");
@@ -507,8 +984,9 @@ GtkWidget* GtkDesktopApp::createStorageScreen() {
         app->getStoragePresenter().onClearPasswordClicked();
     }), this);
 
-    gtk_box_pack_start(GTK_BOX(passCard), passLabel, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(passCard), m_passwordEntry, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(passCard), passIcon, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(passCard), passTextBox, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(passCard), m_passwordEntry, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(passCard), setPassBtn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(passCard), clearPassBtn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(rootBox), passCard, FALSE, FALSE, 0);
@@ -568,58 +1046,157 @@ GtkWidget* GtkDesktopApp::createSettingsScreen() {
 
     gtk_box_pack_start(GTK_BOX(rootBox), confCard, FALSE, FALSE, 0);
 
-    GtkWidget* logCard = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-    gtk_style_context_add_class(gtk_widget_get_style_context(logCard), "apple-card");
+    GtkWidget* termContainer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_style_context_add_class(gtk_widget_get_style_context(termContainer), "mac-terminal-card");
 
-    GtkWidget* logTitle = gtk_label_new(nullptr);
-    gtk_label_set_markup(GTK_LABEL(logTitle), "<b>System Diagnostics &amp; Activity Log:</b>");
-    gtk_label_set_xalign(GTK_LABEL(logTitle), 0.0f);
-    gtk_box_pack_start(GTK_BOX(logCard), logTitle, FALSE, FALSE, 2);
+    GtkWidget* termTopBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_style_context_add_class(gtk_widget_get_style_context(termTopBar), "mac-terminal-header");
+
+    const char* colors[] = {"traffic-red", "traffic-yellow", "traffic-green"};
+    for (int i = 0; i < 3; ++i) {
+        GtkWidget* dot = gtk_button_new();
+        gtk_widget_set_size_request(dot, 10, 10);
+        gtk_style_context_add_class(gtk_widget_get_style_context(dot), colors[i]);
+        gtk_box_pack_start(GTK_BOX(termTopBar), dot, FALSE, FALSE, 2);
+    }
+
+    GtkWidget* termTitle = gtk_label_new("landrop — diagnostics — 96×28");
+    gtk_style_context_add_class(gtk_widget_get_style_context(termTitle), "mac-terminal-title");
+    gtk_box_pack_start(GTK_BOX(termTopBar), termTitle, FALSE, FALSE, 8);
+
+    GtkWidget* termPulse = gtk_label_new("●");
+    gtk_style_context_add_class(gtk_widget_get_style_context(termPulse), "status-badge");
+    gtk_box_pack_end(GTK_BOX(termTopBar), termPulse, FALSE, FALSE, 6);
+
+    gtk_box_pack_start(GTK_BOX(termContainer), termTopBar, FALSE, FALSE, 0);
 
     m_logTextView = gtk_text_view_new();
     gtk_text_view_set_editable(GTK_TEXT_VIEW(m_logTextView), FALSE);
     gtk_text_view_set_monospace(GTK_TEXT_VIEW(m_logTextView), TRUE);
+    gtk_style_context_add_class(gtk_widget_get_style_context(m_logTextView), "mac-terminal-view");
     m_logBuffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(m_logTextView));
 
     GtkWidget* logScroll = gtk_scrolled_window_new(nullptr, nullptr);
-    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(logScroll), 160);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(logScroll), 180);
     gtk_container_add(GTK_CONTAINER(logScroll), m_logTextView);
-    gtk_box_pack_start(GTK_BOX(logCard), logScroll, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(termContainer), logScroll, TRUE, TRUE, 0);
 
-    gtk_box_pack_start(GTK_BOX(rootBox), logCard, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(rootBox), termContainer, TRUE, TRUE, 0);
 
     return rootBox;
 }
 
 void GtkDesktopApp::updateDeviceList(const std::vector<DeviceViewModel>& devices) {
-    if (!m_deviceListBox) return;
+    if (!m_deviceGrid) return;
 
-    GList* children = gtk_container_get_children(GTK_CONTAINER(m_deviceListBox));
+    GList* children = gtk_container_get_children(GTK_CONTAINER(m_deviceGrid));
     for (GList* iter = children; iter != nullptr; iter = g_list_next(iter)) {
         gtk_widget_destroy(GTK_WIDGET(iter->data));
     }
     g_list_free(children);
 
-    for (const auto& dev : devices) {
-        GtkWidget* row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-        gtk_container_set_border_width(GTK_CONTAINER(row), 8);
+    for (size_t i = 0; i < devices.size(); ++i) {
+        const auto& dev = devices[i];
 
-        std::string badgeText = "[" + dev.type + "]";
-        GtkWidget* badgeLabel = gtk_label_new(badgeText.c_str());
+        GtkWidget* card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+        gtk_style_context_add_class(gtk_widget_get_style_context(card), "apple-card");
 
-        std::string infoText = dev.name + " (" + dev.endpoint + ") | RSSI: " + std::to_string(dev.signalRssi) + "dBm";
-        GtkWidget* infoLabel = gtk_label_new(infoText.c_str());
+        GtkWidget* topRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+
+        std::string icon = "💻";
+        if (dev.name.find("MacBook") != std::string::npos) icon = "💻";
+        else if (dev.name.find("ThinkPad") != std::string::npos || dev.name.find("PC") != std::string::npos) icon = "🖥️";
+        else if (dev.name.find("Galaxy") != std::string::npos || dev.name.find("Phone") != std::string::npos || dev.type == "Android" || dev.type == "iOS") icon = "📱";
+        else if (dev.name.find("Cloud") != std::string::npos || dev.type == "Cloud Relay") icon = "☁️";
+
+        GtkWidget* iconBox = gtk_label_new(icon.c_str());
+        gtk_style_context_add_class(gtk_widget_get_style_context(iconBox), "device-icon-box");
+        gtk_widget_set_size_request(iconBox, 42, 42);
+        gtk_box_pack_start(GTK_BOX(topRow), iconBox, FALSE, FALSE, 0);
+
+        GtkWidget* infoBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+        GtkWidget* nameLabel = gtk_label_new(nullptr);
+        gtk_label_set_markup(GTK_LABEL(nameLabel), ("<b>" + dev.name + "</b>").c_str());
+        gtk_label_set_xalign(GTK_LABEL(nameLabel), 0.0f);
+
+        GtkWidget* epLabel = gtk_label_new(dev.endpoint.c_str());
+        gtk_widget_set_opacity(epLabel, 0.65);
+        gtk_label_set_xalign(GTK_LABEL(epLabel), 0.0f);
+
+        gtk_box_pack_start(GTK_BOX(infoBox), nameLabel, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(infoBox), epLabel, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(topRow), infoBox, TRUE, TRUE, 0);
+
+        int signal = (dev.signalRssi >= -40 ? 4 : (dev.signalRssi >= -60 ? 3 : (dev.signalRssi >= -75 ? 2 : 1)));
+        if (dev.type == "Cloud Relay") signal = 4;
+
+        GtkWidget* signalBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 3);
+        gtk_widget_set_valign(signalBox, GTK_ALIGN_END);
+        for (int bar = 1; bar <= 4; ++bar) {
+            GtkWidget* b = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+            gtk_widget_set_size_request(b, 4, 4 + bar * 3);
+            gtk_style_context_add_class(gtk_widget_get_style_context(b), bar <= signal ? "rssi-bar-active" : "rssi-bar-dim");
+            gtk_box_pack_start(GTK_BOX(signalBox), b, FALSE, FALSE, 0);
+        }
+        gtk_box_pack_end(GTK_BOX(topRow), signalBox, FALSE, FALSE, 0);
+
+        gtk_box_pack_start(GTK_BOX(card), topRow, FALSE, FALSE, 0);
+
+        GtkWidget* botRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+
+        std::string osType = dev.type;
+        if (dev.name.find("MacBook") != std::string::npos) osType = "macOS";
+        else if (dev.name.find("ThinkPad") != std::string::npos) osType = "Windows";
+        else if (dev.name.find("Galaxy") != std::string::npos) osType = "Android";
+        else if (dev.name.find("Cloud") != std::string::npos) osType = "Cloud";
+
+        GtkWidget* badge = gtk_label_new(osType.c_str());
+        gtk_style_context_add_class(gtk_widget_get_style_context(badge), osType == "Cloud" ? "pill-cloud" : "pill-os");
+        gtk_box_pack_start(GTK_BOX(botRow), badge, FALSE, FALSE, 0);
 
         GtkWidget* sendBtn = gtk_button_new_with_label("Send File");
         gtk_style_context_add_class(gtk_widget_get_style_context(sendBtn), "apple-accent-btn");
+        g_object_set_data_full(G_OBJECT(sendBtn), "device_id", g_strdup(dev.id.c_str()), g_free);
+        g_signal_connect(sendBtn, "clicked", G_CALLBACK(+[](GtkButton* b, gpointer appPtr) {
+            auto* app = static_cast<GtkDesktopApp*>(appPtr);
+            const char* devId = static_cast<const char*>(g_object_get_data(G_OBJECT(b), "device_id"));
+            if (!devId) return;
 
-        gtk_box_pack_start(GTK_BOX(row), badgeLabel, FALSE, FALSE, 4);
-        gtk_box_pack_start(GTK_BOX(row), infoLabel, TRUE, TRUE, 4);
-        gtk_box_pack_end(GTK_BOX(row), sendBtn, FALSE, FALSE, 4);
+            GtkWidget* dialog = gtk_file_chooser_dialog_new(
+                "Select File to Send via LAN-Drop",
+                GTK_WINDOW(app->m_mainWindow),
+                GTK_FILE_CHOOSER_ACTION_OPEN,
+                "_Cancel", GTK_RESPONSE_CANCEL,
+                "_Send", GTK_RESPONSE_ACCEPT,
+                nullptr
+            );
 
-        gtk_list_box_insert(GTK_LIST_BOX(m_deviceListBox), row, -1);
+            if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+                char* filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+                if (filename) {
+                    app->getTransferPresenter().onSendFileClicked(devId, filename);
+                    app->switchToTab("transfers");
+                    g_free(filename);
+                }
+            }
+            gtk_widget_destroy(dialog);
+        }), this);
+
+        gtk_box_pack_end(GTK_BOX(botRow), sendBtn, FALSE, FALSE, 0);
+
+        gtk_box_pack_start(GTK_BOX(card), botRow, FALSE, FALSE, 0);
+
+        int col = m_isMobileMode ? 0 : static_cast<int>(i % 2);
+        int row = m_isMobileMode ? static_cast<int>(i) : static_cast<int>(i / 2);
+        gtk_grid_attach(GTK_GRID(m_deviceGrid), card, col, row, 1, 1);
     }
-    gtk_widget_show_all(m_deviceListBox);
+
+    gtk_widget_show_all(m_deviceGrid);
+
+    if (m_scanStatusLabel) {
+        std::string s = std::to_string(devices.size()) + " devices found";
+        gtk_label_set_text(GTK_LABEL(m_scanStatusLabel), s.c_str());
+    }
 }
 
 void GtkDesktopApp::setScanningStatus(bool isScanning) {
@@ -689,12 +1266,28 @@ void GtkDesktopApp::updateFileList(const std::vector<FileMetadata>& files) {
         GtkTreeIter iter;
         gtk_list_store_append(m_fileListStore, &iter);
 
-        std::string sizeStr = std::to_string(f.fileSize) + " B";
+        std::string icon = "📄 ";
+        if (f.fileName.ends_with(".fig") || f.fileName.ends_with(".png") || f.fileName.ends_with(".jpg")) icon = "🎨 ";
+        else if (f.fileName.ends_with(".tar.gz") || f.fileName.ends_with(".zip") || f.fileName.ends_with(".tar")) icon = "📦 ";
+        else if (f.fileName.ends_with(".mp4") || f.fileName.ends_with(".mov") || f.fileName.ends_with(".mkv")) icon = "🎬 ";
+        else if (f.fileName.ends_with(".pdf") || f.fileName.ends_with(".doc") || f.fileName.ends_with(".txt")) icon = "📄 ";
+        else icon = "🗂️ ";
+
+        std::string nameWithIcon = icon + f.fileName;
+        std::string sizeStr;
+        if (f.fileSize >= 1024ULL * 1024 * 1024) {
+            sizeStr = std::to_string(f.fileSize / (1024ULL * 1024 * 1024)) + "." + std::to_string((f.fileSize % (1024ULL * 1024 * 1024)) / (100ULL * 1024 * 1024)) + " GB";
+        } else if (f.fileSize >= 1024 * 1024) {
+            sizeStr = std::to_string(f.fileSize / (1024 * 1024)) + "." + std::to_string((f.fileSize % (1024 * 1024)) / (100 * 1024)) + " MB";
+        } else {
+            sizeStr = std::to_string(f.fileSize / 1024) + " KB";
+        }
+
         std::string chunksStr = std::to_string(f.totalChunks);
-        std::string hashStr = f.fileSha256.substr(0, 16) + "...";
+        std::string hashStr = f.fileSha256.substr(0, std::min<size_t>(16, f.fileSha256.size())) + "…";
 
         gtk_list_store_set(m_fileListStore, &iter,
-            0, f.fileName.c_str(),
+            0, nameWithIcon.c_str(),
             1, sizeStr.c_str(),
             2, chunksStr.c_str(),
             3, hashStr.c_str(),
@@ -705,7 +1298,15 @@ void GtkDesktopApp::updateFileList(const std::vector<FileMetadata>& files) {
 
 void GtkDesktopApp::setStorageStats(uint64_t totalBytes, size_t fileCount) {
     if (m_storageStatsLabel) {
-        std::string s = "Files: " + std::to_string(fileCount) + " | Total: " + std::to_string(totalBytes / 1024) + " KB";
+        std::string totalStr;
+        if (totalBytes >= 1024ULL * 1024 * 1024) {
+            totalStr = std::to_string(totalBytes / (1024ULL * 1024 * 1024)) + "." + std::to_string((totalBytes % (1024ULL * 1024 * 1024)) / (100ULL * 1024 * 1024)) + " GB";
+        } else if (totalBytes >= 1024 * 1024) {
+            totalStr = std::to_string(totalBytes / (1024 * 1024)) + "." + std::to_string((totalBytes % (1024 * 1024)) / (100 * 1024)) + " MB";
+        } else {
+            totalStr = std::to_string(totalBytes / 1024) + " KB";
+        }
+        std::string s = "● " + std::to_string(fileCount) + " Files  |  " + totalStr + " Total  |  Chunked Transfer";
         gtk_label_set_text(GTK_LABEL(m_storageStatsLabel), s.c_str());
     }
 }
