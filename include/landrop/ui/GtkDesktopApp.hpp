@@ -54,6 +54,7 @@ private:
     SettingsPresenter m_settingsPresenter;
 
     bool m_isDarkMode{true};
+    bool m_usingWebKit{false};
 
     GtkWidget* m_mainWindow{nullptr};
     GtkWidget* m_headerBar{nullptr};

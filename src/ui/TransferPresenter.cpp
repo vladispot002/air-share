@@ -14,6 +14,7 @@ void TransferPresenter::setView(ITransferView* view) {
 void TransferPresenter::initialize() {
     auto task1 = std::make_shared<P2PTransferTask>("T-0042", "project-assets.zip", 248ULL * 1024 * 1024, TransferDirection::Upload, "peer-thinkpad");
     task1->initialize();
+    task1->setState(TransferState::Transferring);
     task1->setBytesTransferred(static_cast<uint64_t>(248ULL * 1024 * 1024 * 0.67));
     task1->updateSpeed(static_cast<uint64_t>(24.5 * 1024 * 1024), 1.0);
 
@@ -29,6 +30,7 @@ void TransferPresenter::initialize() {
 
     auto task4 = std::make_shared<P2PTransferTask>("T-0039", "system-logs.tar.gz", 342ULL * 1024 * 1024, TransferDirection::Download, "peer-galaxy");
     task4->initialize();
+    task4->setState(TransferState::Transferring);
     task4->setBytesTransferred(static_cast<uint64_t>(342ULL * 1024 * 1024 * 0.34));
     task4->updateSpeed(static_cast<uint64_t>(12.1 * 1024 * 1024), 1.0);
 
@@ -39,6 +41,7 @@ void TransferPresenter::initialize() {
 
     auto task6 = std::make_shared<P2PTransferTask>("T-0037", "raw-footage-edit.mov", 4700ULL * 1024 * 1024, TransferDirection::Download, "peer-macbook");
     task6->initialize();
+    task6->setState(TransferState::Transferring);
     task6->setBytesTransferred(static_cast<uint64_t>(4700ULL * 1024 * 1024 * 0.08));
     task6->updateSpeed(static_cast<uint64_t>(31.2 * 1024 * 1024), 1.0);
 

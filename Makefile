@@ -2,7 +2,7 @@ CXX ?= g++
 GTK_CFLAGS = $(shell pkg-config --cflags gtk+-3.0)
 GTK_LIBS = $(shell pkg-config --libs gtk+-3.0)
 CXXFLAGS ?= -std=c++20 -Wall -Wextra -Wpedantic -O2 -Iinclude -pthread $(GTK_CFLAGS)
-LDFLAGS ?= -pthread -lX11 $(GTK_LIBS)
+LDFLAGS ?= -pthread -lX11 $(GTK_LIBS) -ldl
 
 SRC_DIR = src
 OBJ_DIR = obj
@@ -18,7 +18,10 @@ SRCS = $(wildcard $(SRC_DIR)/core/*.cpp) \
 OBJS = $(patsubst $(SRC_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(SRCS))
 TARGET = $(BIN_DIR)/lan_drop
 
-.PHONY: all clean run gui mobile-test web desktop
+.PHONY: all clean run gui mobile-test web desktop test
+
+TEST_TARGET = $(BIN_DIR)/lan_drop_tests
+TEST_OBJS = $(filter-out $(OBJ_DIR)/main.o, $(OBJS)) $(OBJ_DIR)/tests/unit_tests.o
 
 all: $(TARGET)
 
@@ -38,6 +41,17 @@ gui: $(TARGET)
 
 mobile-test: $(TARGET)
 	@./$(TARGET) mobile-test
+
+$(OBJ_DIR)/tests/%.o: tests/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(TEST_TARGET): $(TEST_OBJS)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $^ $(LDFLAGS) -o $@
+
+test: $(TEST_TARGET)
+	@./$(TEST_TARGET)
 
 web:
 	@cd "Design LAN-Drop macOS UI" && npm run dev -- --host 0.0.0.0 --port 5173

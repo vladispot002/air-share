@@ -1,6 +1,8 @@
 #include "landrop/ui/GtkDesktopApp.hpp"
 #include <iostream>
 #include <cstring>
+#include <dlfcn.h>
+#include <filesystem>
 
 namespace landrop::ui {
 
@@ -24,7 +26,9 @@ int GtkDesktopApp::run(int argc, char* argv[]) {
     }
 
     buildUi();
-    applyAppleTheme();
+    if (!m_usingWebKit) {
+        applyAppleTheme();
+    }
 
     m_discoveryPresenter.initialize();
     m_transferPresenter.initialize();
@@ -195,13 +199,32 @@ void GtkDesktopApp::toggleTheme(bool isDark) {
 void GtkDesktopApp::buildUi() {
     m_mainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(m_mainWindow), "LAN-Drop — AirShare");
-    gtk_window_set_default_size(GTK_WINDOW(m_mainWindow), 980, 680);
+    gtk_window_set_default_size(GTK_WINDOW(m_mainWindow), 1080, 780);
     gtk_window_set_position(GTK_WINDOW(m_mainWindow), GTK_WIN_POS_CENTER);
     if (!gtk_window_set_icon_from_file(GTK_WINDOW(m_mainWindow), "/home/vladis/lan-drop/resources/lan-drop.svg", nullptr)) {
         gtk_window_set_icon_from_file(GTK_WINDOW(m_mainWindow), "resources/lan-drop.svg", nullptr);
     }
 
     g_signal_connect(m_mainWindow, "destroy", G_CALLBACK(gtk_main_quit), nullptr);
+
+    std::string distHtml = "/home/vladis/lan-drop/Design LAN-Drop macOS UI/dist/index.html";
+    if (std::filesystem::exists(distHtml)) {
+        void* wkHandle = dlopen("libwebkit2gtk-4.1.so.0", RTLD_NOW);
+        if (wkHandle) {
+            typedef GtkWidget* (*WkNewFn)();
+            typedef void (*WkLoadUriFn)(void*, const char*);
+            auto wk_new = reinterpret_cast<WkNewFn>(dlsym(wkHandle, "webkit_web_view_new"));
+            auto wk_load = reinterpret_cast<WkLoadUriFn>(dlsym(wkHandle, "webkit_web_view_load_uri"));
+            if (wk_new && wk_load) {
+                GtkWidget* webView = wk_new();
+                gtk_container_add(GTK_CONTAINER(m_mainWindow), webView);
+                std::string fileUri = "file://" + distHtml;
+                wk_load(webView, fileUri.c_str());
+                m_usingWebKit = true;
+                return;
+            }
+        }
+    }
 
     m_headerBar = gtk_header_bar_new();
     gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(m_headerBar), TRUE);
