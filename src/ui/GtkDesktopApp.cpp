@@ -213,10 +213,26 @@ void GtkDesktopApp::buildUi() {
         if (wkHandle) {
             typedef GtkWidget* (*WkNewFn)();
             typedef void (*WkLoadUriFn)(void*, const char*);
+            typedef void* (*WkGetSettingsFn)(void*);
+            typedef void (*WkSetBoolFn)(void*, gboolean);
+
             auto wk_new = reinterpret_cast<WkNewFn>(dlsym(wkHandle, "webkit_web_view_new"));
             auto wk_load = reinterpret_cast<WkLoadUriFn>(dlsym(wkHandle, "webkit_web_view_load_uri"));
+            auto wk_get_settings = reinterpret_cast<WkGetSettingsFn>(dlsym(wkHandle, "webkit_web_view_get_settings"));
+            auto wk_set_file_access = reinterpret_cast<WkSetBoolFn>(dlsym(wkHandle, "webkit_settings_set_allow_file_access_from_file_urls"));
+            auto wk_set_universal_access = reinterpret_cast<WkSetBoolFn>(dlsym(wkHandle, "webkit_settings_set_allow_universal_access_from_file_urls"));
+            auto wk_set_js = reinterpret_cast<WkSetBoolFn>(dlsym(wkHandle, "webkit_settings_set_enable_javascript"));
+
             if (wk_new && wk_load) {
                 GtkWidget* webView = wk_new();
+                if (wk_get_settings) {
+                    void* settings = wk_get_settings(webView);
+                    if (settings) {
+                        if (wk_set_file_access) wk_set_file_access(settings, TRUE);
+                        if (wk_set_universal_access) wk_set_universal_access(settings, TRUE);
+                        if (wk_set_js) wk_set_js(settings, TRUE);
+                    }
+                }
                 gtk_container_add(GTK_CONTAINER(m_mainWindow), webView);
                 std::string fileUri = "file://" + distHtml;
                 wk_load(webView, fileUri.c_str());

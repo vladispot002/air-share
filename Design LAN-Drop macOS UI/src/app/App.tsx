@@ -962,11 +962,13 @@ function TitleBar({
   theme,
   activeTab,
   setActiveTab,
+  onToggleTheme,
 }: {
   c: Colors;
   theme: Theme;
   activeTab: Tab;
   setActiveTab: (t: Tab) => void;
+  onToggleTheme?: () => void;
 }) {
   return (
     <div
@@ -1048,9 +1050,20 @@ function TitleBar({
           flexShrink: 0,
         }}
       >
-        <span style={{ fontSize: 11, color: c.textTer, fontWeight: 500, letterSpacing: "0.02em" }}>
+        <button
+          onClick={onToggleTheme}
+          style={{
+            background: "none",
+            border: `1px solid ${c.border}`,
+            borderRadius: 12,
+            padding: "3px 8px",
+            fontSize: 11,
+            color: c.textSec,
+            cursor: onToggleTheme ? "pointer" : "default",
+          }}
+        >
           {theme === "dark" ? "● Dark" : "○ Light"}
-        </span>
+        </button>
         <div
           style={{
             display: "flex",
@@ -1071,7 +1084,7 @@ function TitleBar({
 
 // ── LanDrop Window ────────────────────────────────────────────────────────────
 
-function LanDropWindow({ theme }: { theme: Theme }) {
+function LanDropWindow({ theme, onToggleTheme }: { theme: Theme; onToggleTheme?: () => void }) {
   const [activeTab, setActiveTab] = useState<Tab>("Radar");
   const [port, setPort] = useState("8848");
   const [speedLimit, setSpeedLimit] = useState(25);
@@ -1099,7 +1112,7 @@ function LanDropWindow({ theme }: { theme: Theme }) {
         WebkitFontSmoothing: "antialiased",
       } as React.CSSProperties}
     >
-      <TitleBar c={c} theme={theme} activeTab={activeTab} setActiveTab={setActiveTab} />
+      <TitleBar c={c} theme={theme} activeTab={activeTab} setActiveTab={setActiveTab} onToggleTheme={onToggleTheme} />
 
       <div style={{ flex: 1, overflow: "hidden" }}>
         {activeTab === "Radar" && <RadarScreen c={c} theme={theme} />}
@@ -1360,7 +1373,7 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>("dark");
   const [viewMode, setViewMode] = useState<"desktop" | "mobile" | "both">(() => {
     if (typeof window !== "undefined" && window.innerWidth < 768) return "mobile";
-    return "both";
+    return "desktop";
   });
 
   const toggleTheme = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
@@ -1541,7 +1554,7 @@ export default function App() {
               Перемкнути тему: {theme === "dark" ? "● Dark Mode" : "○ Light Mode"}
             </button>
           </div>
-          <LanDropWindow theme={theme} />
+          <LanDropWindow theme={theme} onToggleTheme={toggleTheme} />
         </div>
       )}
 
