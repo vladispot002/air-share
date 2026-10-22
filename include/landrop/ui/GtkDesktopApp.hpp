@@ -56,7 +56,8 @@ private:
 
     bool m_isDarkMode{true};
     bool m_isMobileMode{false};
-    std::string m_selectedTaskId{"T-0042"};
+    std::string m_selectedTaskId{""};
+    std::string m_selectedPeerId{""};
 
     GtkWidget* m_mainWindow{nullptr};
     GtkWidget* m_headerBar{nullptr};
@@ -69,23 +70,36 @@ private:
     GtkWidget* m_deviceGrid{nullptr};
     GtkWidget* m_scanStatusLabel{nullptr};
     GtkWidget* m_scanBadge{nullptr};
-    GtkWidget* m_nfcEntry{nullptr};
+    GtkWidget* m_directIpEntry{nullptr};
+    GtkWidget* m_directPortSpin{nullptr};
 
+    void updateDeviceListInternal(const std::vector<DeviceViewModel>& devices);
     void chooseAndSendFile(const std::string& peerId);
     void applyStoragePathFromEntry();
 
     GtkWidget* m_transferTreeView{nullptr};
     GtkListStore* m_transferListStore{nullptr};
     GtkWidget* m_selectedTransferLabel{nullptr};
+    GtkWidget* m_pauseBtn{nullptr};
+    GtkWidget* m_resumeBtn{nullptr};
+    GtkWidget* m_cancelBtn{nullptr};
+    void updateTransferButtonStates();
 
     GtkWidget* m_storagePathEntry{nullptr};
     GtkWidget* m_storageStatsLabel{nullptr};
     GtkWidget* m_fileTreeView{nullptr};
     GtkListStore* m_fileListStore{nullptr};
     GtkWidget* m_passwordEntry{nullptr};
+    GtkWidget* m_removeFileBtn{nullptr};
+    std::string m_selectedSharedFile{""};
+    uint64_t m_storageTotalBytes{0};
+    size_t m_storageFileCount{0};
+    bool m_storageIsProtected{false};
+    void updateStorageStatsLabel();
 
     GtkWidget* m_portSpin{nullptr};
     GtkWidget* m_speedScale{nullptr};
+    GtkWidget* m_speedValueLabel{nullptr};
     GtkWidget* m_autoAcceptSwitch{nullptr};
     GtkWidget* m_airdropSwitch{nullptr};
     GtkWidget* m_logTextView{nullptr};
@@ -94,7 +108,6 @@ private:
     GtkCssProvider* m_cssProvider{nullptr};
 
     void buildUi();
-    GtkWidget* createTrafficLights();
     GtkWidget* createSegmentedControl();
     GtkWidget* createDiscoveryScreen();
     GtkWidget* createTransfersScreen();

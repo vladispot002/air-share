@@ -185,6 +185,12 @@ void TransferPresenter::refreshView() {
     m_view->updateTransferTable(vms);
     if (!vms.empty() && m_selectedIndex < vms.size()) {
         m_view->updateSelectedTransferDetails(vms[m_selectedIndex]);
+    } else if (vms.empty()) {
+        TransferViewModel emptyVm;
+        emptyVm.taskId = "";
+        emptyVm.fileName = "No transfers";
+        emptyVm.stateStr = "Queue empty";
+        m_view->updateSelectedTransferDetails(emptyVm);
     }
 }
 

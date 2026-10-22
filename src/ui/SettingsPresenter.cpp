@@ -49,7 +49,7 @@ void SettingsPresenter::onAutoAcceptToggled(bool autoAccept) {
 
 void SettingsPresenter::onAirDropToggled(bool airdropEnabled) {
     m_airdropEnabled = airdropEnabled;
-    addLog("AirDrop Apple compatibility protocol: " + std::string(airdropEnabled ? "Enabled" : "Disabled"));
+    addLog("Multicast beacon discovery: " + std::string(airdropEnabled ? "Enabled" : "Disabled"));
 }
 
 void SettingsPresenter::onSaveSettingsClicked() {

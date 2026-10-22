@@ -147,6 +147,25 @@ static bool testMulticastBeacon() {
 
     beacon.simulateReceiveBeacon(serialized);
     TEST_ASSERT(beacon.getBeaconsReceived() == 1, "Beacon received count incremented");
+
+    // Test automatic unique UUID generation
+    MulticastBeacon autoNode1("AutoNode1");
+    MulticastBeacon autoNode2("AutoNode2");
+    TEST_ASSERT(!autoNode1.getDeviceUuid().empty(), "Auto node 1 has UUID");
+    TEST_ASSERT(!autoNode2.getDeviceUuid().empty(), "Auto node 2 has UUID");
+    TEST_ASSERT(autoNode1.getDeviceUuid() != autoNode2.getDeviceUuid(), "Auto nodes have unique distinct UUIDs");
+
+    // Test socket lifecycle (start, announcement, stop)
+    bool started = autoNode1.start();
+    if (started) {
+        TEST_ASSERT(autoNode1.isRunning(), "Beacon is running after start");
+        TEST_ASSERT(autoNode1.broadcastAnnouncement(), "Broadcast announcement succeeds");
+        TEST_ASSERT(autoNode1.getBeaconsSent() >= 1, "Beacons sent counter incremented");
+        autoNode1.stop();
+        TEST_ASSERT(!autoNode1.isRunning(), "Beacon stopped");
+        // Safe double stop
+        autoNode1.stop();
+    }
     return true;
 }
 
@@ -294,15 +313,23 @@ public:
     std::string notification;
     bool isScanning{false};
     uint16_t loadedPort{0};
+    ui::TransferViewModel lastSelectedTransfer;
+    std::string lastError;
+
+    bool lastNfcSuccess{false};
+    std::string lastNfcMessage;
 
     void updateDeviceList(const std::vector<ui::DeviceViewModel>& d) override { devices = d; }
     void setScanningStatus(bool scanning) override { isScanning = scanning; }
-    void showNfcPairResult(bool, const std::string&) override {}
+    void showNfcPairResult(bool s, const std::string& m) override {
+        lastNfcSuccess = s;
+        lastNfcMessage = m;
+    }
     void showNotification(const std::string& n) override { notification = n; }
 
     void updateTransferTable(const std::vector<ui::TransferViewModel>& t) override { transfers = t; }
-    void updateSelectedTransferDetails(const ui::TransferViewModel&) override {}
-    void showTransferError(const std::string&, const std::string&) override {}
+    void updateSelectedTransferDetails(const ui::TransferViewModel& vm) override { lastSelectedTransfer = vm; }
+    void showTransferError(const std::string&, const std::string& err) override { lastError = err; }
 
     void setSharedPath(const std::string&) override {}
     void updateFileList(const std::vector<FileMetadata>&) override {}
@@ -319,13 +346,82 @@ static bool testPresenters() {
 
     ui::DiscoveryPresenter disc(&mock);
     disc.initialize();
-    TEST_ASSERT(mock.devices.size() == 4, "Discovery presenter initialized with 4 devices");
+    TEST_ASSERT(mock.devices.empty(), "Discovery presenter initialized with 0 devices (clean real radar)");
+    TEST_ASSERT(!disc.getLocalDeviceName().empty(), "Local device name resolved");
+    TEST_ASSERT(!disc.getLocalDeviceIp().empty(), "Local device IP resolved");
+    TEST_ASSERT(disc.getLocalDevicePort() == 8848, "Local device port matches 8848");
+
     disc.onToggleScanClicked(false);
     TEST_ASSERT(!mock.isScanning, "Scan toggled off");
+
+    // Test direct connect requested
+    disc.onDirectConnectRequested("10.0.0.5", 9999);
+    TEST_ASSERT(mock.devices.size() == 1, "Direct peer added to devices");
+    TEST_ASSERT(disc.getSelectedPeer() != nullptr, "Direct peer selected");
+    TEST_ASSERT(disc.getSelectedPeer()->getId() == "peer-direct-10.0.0.5", "Direct peer ID matches");
+
+    // Test direct connect with empty host
+    disc.onDirectConnectRequested("", 9999);
+    TEST_ASSERT(mock.notification.find("empty") != std::string::npos, "Empty host rejected with notification");
+
+    // Test device selection
+    disc.onSelectDeviceClicked("peer-direct-10.0.0.5");
+    TEST_ASSERT(disc.getSelectedPeer() != nullptr && disc.getSelectedPeer()->getId() == "peer-direct-10.0.0.5", "Device selected by ID");
+
+    // Test duplicate direct connect selects existing peer
+    disc.onDirectConnectRequested("10.0.0.5", 9999);
+    TEST_ASSERT(mock.notification.find("Selected existing peer") != std::string::npos, "Duplicate direct connect selects existing peer");
+
+    // Test dynamic peer registration
+    disc.registerPeer(std::make_shared<LocalPeer>("dyn-peer-1", "Dynamic Test Node", "192.168.1.50", 8848));
+    TEST_ASSERT(mock.devices.size() == 2, "Dynamic peer registered into view");
+
+    // Test peer removal
+    disc.onRemovePeerClicked("peer-direct-10.0.0.5");
+    TEST_ASSERT(mock.devices.size() == 1, "Peer removed via onRemovePeerClicked");
+    disc.onRemovePeerClicked("dyn-peer-1");
+    TEST_ASSERT(mock.devices.empty(), "All peers removed, back to clean empty state");
+
+    // Test refresh devices
+    disc.onRefreshDevicesClicked();
+    TEST_ASSERT(mock.notification == "Devices refreshed", "Refresh devices triggered");
+
+    // Test onPeerDiscovered (simulating background UDP reception)
+    disc.onPeerDiscovered("Galaxy S24 Ultra", "uuid-s24-999", "192.168.1.180", 8848);
+    TEST_ASSERT(mock.devices.size() == 1, "Discovered device added to view");
+    TEST_ASSERT(mock.devices[0].type == "Android", "Android device type inferred");
+    TEST_ASSERT(mock.devices[0].name == "Galaxy S24 Ultra", "Device name matches");
+
+    disc.onPeerDiscovered("MacBook Air M3", "uuid-mac-888", "192.168.1.190", 8848);
+    TEST_ASSERT(mock.devices.size() == 2, "Second device discovered");
+
+    // Test duplicate beacon updates online status without duplicate rows
+    disc.onPeerDiscovered("Galaxy S24 Ultra", "uuid-s24-999", "192.168.1.180", 8848);
+    TEST_ASSERT(mock.devices.size() == 2, "Duplicate beacon does not duplicate peer list row");
+
+    // Test NFC pair triggered
+    disc.onNfcPairTriggered("INVALID_PAYLOAD");
+    TEST_ASSERT(mock.lastNfcSuccess == false, "Invalid NFC payload fails gracefully");
+
+    std::string nfcTag = "LANDROP:NFC:v1;id=uuid-nfc-peer;name=Pixel 8;ip=192.168.1.200;port=8848;pin=1234;key=aabbcc";
+    disc.onNfcPairTriggered(nfcTag);
+    TEST_ASSERT(mock.lastNfcSuccess == true, "Valid NFC payload pairs successfully");
+    TEST_ASSERT(disc.getSelectedPeer() != nullptr && disc.getSelectedPeer()->getId() == "uuid-nfc-peer", "NFC paired peer selected");
+
+    // Clean up
+    disc.onRemovePeerClicked("uuid-s24-999");
+    disc.onRemovePeerClicked("uuid-mac-888");
+    disc.onRemovePeerClicked("uuid-nfc-peer");
+    TEST_ASSERT(mock.devices.empty(), "All discovered/paired devices cleaned up");
 
     ui::TransferPresenter trans(&mock);
     trans.initialize();
     TEST_ASSERT(mock.transfers.size() == 6, "Transfer presenter initialized with 6 tasks");
+
+    // Test row selection updates details
+    trans.onSelectTransferRow(1);
+    TEST_ASSERT(mock.lastSelectedTransfer.taskId == trans.getTasks()[1]->getTaskId(), "Row selection updates details");
+
     trans.onPauseTransferClicked("T-0042");
     bool foundPaused = false;
     for (const auto& task : trans.getTasks()) {
@@ -336,13 +432,53 @@ static bool testPresenters() {
     }
     TEST_ASSERT(foundPaused, "T-0042 paused");
 
+    trans.onResumeTransferClicked("T-0042");
+    bool foundResumed = false;
+    for (const auto& task : trans.getTasks()) {
+        if (task && task->getTaskId() == "T-0042") {
+            foundResumed = (task->getState() == TransferState::Transferring);
+            break;
+        }
+    }
+    TEST_ASSERT(foundResumed, "T-0042 resumed");
+
+    // Test cancel transfer
+    trans.onCancelTransferClicked("T-0039");
+    bool foundCancelled = false;
+    for (const auto& task : trans.getTasks()) {
+        if (task && task->getTaskId() == "T-0039") {
+            foundCancelled = (task->getState() == TransferState::Cancelled);
+            break;
+        }
+    }
+    TEST_ASSERT(foundCancelled, "T-0039 cancelled");
+
+    // Test send missing file error
+    trans.onSendFileClicked("peer-macbook", "/path/to/missing/nonexistent_file.xyz");
+    TEST_ASSERT(mock.lastError.find("not found") != std::string::npos, "Missing file produces transfer error");
+
+    // Test clear completed tasks
+    trans.onClearHistoryClicked();
+    TEST_ASSERT(trans.getTasks().size() == 2, "Clear history removed completed and cancelled tasks");
+
     ui::StoragePresenter stor(&mock);
     stor.initialize();
+    size_t initialFiles = stor.getManager().getSharedFileCount();
+    stor.onRemoveFileClicked("quarterly-report-Q3.pdf");
+    TEST_ASSERT(stor.getManager().getSharedFileCount() < initialFiles, "File removed from storage manager");
+
+    stor.onSetPasswordClicked("9876");
+    TEST_ASSERT(stor.getManager().hasPasswordProtection(), "Access password enabled");
+    stor.onClearPasswordClicked();
+    TEST_ASSERT(!stor.getManager().hasPasswordProtection(), "Access password cleared");
 
     ui::SettingsPresenter sett(&mock);
     sett.initialize();
     TEST_ASSERT(mock.loadedPort == 8848, "Settings loaded port 8848");
     sett.onPortChanged(9090);
+    TEST_ASSERT(sett.getPort() == 9090, "Port updated to 9090");
+    sett.onSpeedLimitChanged(30000);
+    TEST_ASSERT(sett.getSpeedLimitKbps() == 30000, "Speed limit updated");
     return true;
 }
 
