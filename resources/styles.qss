@@ -1,0 +1,306 @@
+/* LAN-Drop Modern Dark & Light QSS Stylesheet */
+
+/* DARK THEME (DEFAULT) */
+.dark-theme {
+    background-color: #1e1e24;
+    color: #f3f3f5;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 13px;
+}
+
+.dark-theme QMainWindow,
+.dark-theme QWidget {
+    background-color: #1e1e24;
+    color: #f3f3f5;
+}
+
+.dark-theme QListWidget#sidebar {
+    background-color: #16161a;
+    border: none;
+    border-right: 1px solid #2a2a32;
+    padding-top: 12px;
+}
+
+.dark-theme QListWidget#sidebar::item {
+    padding: 12px 18px;
+    margin: 4px 8px;
+    border-radius: 8px;
+    font-weight: 600;
+    color: #9da3af;
+}
+
+.dark-theme QListWidget#sidebar::item:hover {
+    background-color: #24242e;
+    color: #ffffff;
+}
+
+.dark-theme QListWidget#sidebar::item:selected {
+    background-color: #007aff;
+    color: #ffffff;
+}
+
+.dark-theme QFrame#card,
+.dark-theme QFrame#myDeviceCard {
+    background-color: #262630;
+    border: 1px solid #343442;
+    border-radius: 10px;
+    padding: 12px;
+}
+
+.dark-theme QPushButton {
+    background-color: #2e2e3a;
+    color: #ffffff;
+    border: 1px solid #3e3e4e;
+    border-radius: 6px;
+    padding: 7px 14px;
+    font-weight: 500;
+}
+
+.dark-theme QPushButton:hover {
+    background-color: #3b3b4a;
+    border-color: #007aff;
+}
+
+.dark-theme QPushButton:pressed {
+    background-color: #007aff;
+    color: #ffffff;
+}
+
+.dark-theme QPushButton#primaryBtn {
+    background-color: #007aff;
+    border: 1px solid #0062cc;
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.dark-theme QPushButton#primaryBtn:hover {
+    background-color: #1a88ff;
+}
+
+.dark-theme QPushButton#dangerBtn {
+    background-color: #4a2020;
+    border: 1px solid #662626;
+    color: #ff6b6b;
+}
+
+.dark-theme QPushButton#dangerBtn:hover {
+    background-color: #6b2626;
+    color: #ffffff;
+}
+
+.dark-theme QTableWidget {
+    background-color: #22222b;
+    gridline-color: #2d2d38;
+    border: 1px solid #333340;
+    border-radius: 8px;
+    selection-background-color: #007aff;
+    selection-color: #ffffff;
+}
+
+.dark-theme QHeaderView::section {
+    background-color: #191920;
+    color: #8f96a3;
+    padding: 8px;
+    border: none;
+    border-bottom: 1px solid #2d2d38;
+    font-weight: 600;
+}
+
+.dark-theme QProgressBar {
+    background-color: #191920;
+    border: 1px solid #333340;
+    border-radius: 5px;
+    text-align: center;
+    color: #ffffff;
+    font-weight: 600;
+    font-size: 11px;
+}
+
+.dark-theme QProgressBar::chunk {
+    background-color: #30d158;
+    border-radius: 4px;
+}
+
+.dark-theme QLineEdit,
+.dark-theme QSpinBox,
+.dark-theme QComboBox {
+    background-color: #262632;
+    border: 1px solid #3a3a48;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #ffffff;
+}
+
+.dark-theme QLineEdit:focus,
+.dark-theme QSpinBox:focus,
+.dark-theme QComboBox:focus {
+    border-color: #007aff;
+}
+
+.dark-theme QPlainTextEdit {
+    background-color: #141418;
+    border: 1px solid #2d2d38;
+    border-radius: 6px;
+    color: #64d2ff;
+    font-family: monospace;
+    font-size: 12px;
+}
+
+.dark-theme QStatusBar {
+    background-color: #16161a;
+    border-top: 1px solid #282830;
+    color: #8e8e93;
+    padding: 4px;
+}
+
+/* LIGHT THEME */
+.light-theme {
+    background-color: #f6f7fb;
+    color: #1c1c1e;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 13px;
+}
+
+.light-theme QMainWindow,
+.light-theme QWidget {
+    background-color: #f6f7fb;
+    color: #1c1c1e;
+}
+
+.light-theme QListWidget#sidebar {
+    background-color: #eaebf2;
+    border: none;
+    border-right: 1px solid #d8d9e2;
+    padding-top: 12px;
+}
+
+.light-theme QListWidget#sidebar::item {
+    padding: 12px 18px;
+    margin: 4px 8px;
+    border-radius: 8px;
+    font-weight: 600;
+    color: #555562;
+}
+
+.light-theme QListWidget#sidebar::item:hover {
+    background-color: #dedfe8;
+    color: #000000;
+}
+
+.light-theme QListWidget#sidebar::item:selected {
+    background-color: #007aff;
+    color: #ffffff;
+}
+
+.light-theme QFrame#card,
+.light-theme QFrame#myDeviceCard {
+    background-color: #ffffff;
+    border: 1px solid #e2e4ed;
+    border-radius: 10px;
+    padding: 12px;
+}
+
+.light-theme QPushButton {
+    background-color: #ffffff;
+    color: #1c1c1e;
+    border: 1px solid #d1d3dc;
+    border-radius: 6px;
+    padding: 7px 14px;
+    font-weight: 500;
+}
+
+.light-theme QPushButton:hover {
+    background-color: #f0f2f8;
+    border-color: #007aff;
+}
+
+.light-theme QPushButton:pressed {
+    background-color: #007aff;
+    color: #ffffff;
+}
+
+.light-theme QPushButton#primaryBtn {
+    background-color: #007aff;
+    border: 1px solid #0062cc;
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.light-theme QPushButton#primaryBtn:hover {
+    background-color: #1a88ff;
+}
+
+.light-theme QPushButton#dangerBtn {
+    background-color: #ffebeb;
+    border: 1px solid #ffcccc;
+    color: #d70015;
+}
+
+.light-theme QPushButton#dangerBtn:hover {
+    background-color: #ffcccc;
+}
+
+.light-theme QTableWidget {
+    background-color: #ffffff;
+    gridline-color: #e5e7eb;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    selection-background-color: #007aff;
+    selection-color: #ffffff;
+}
+
+.light-theme QHeaderView::section {
+    background-color: #f3f4f6;
+    color: #4b5563;
+    padding: 8px;
+    border: none;
+    border-bottom: 1px solid #d1d5db;
+    font-weight: 600;
+}
+
+.light-theme QProgressBar {
+    background-color: #e5e7eb;
+    border: 1px solid #d1d5db;
+    border-radius: 5px;
+    text-align: center;
+    color: #111827;
+    font-weight: 600;
+    font-size: 11px;
+}
+
+.light-theme QProgressBar::chunk {
+    background-color: #34c759;
+    border-radius: 4px;
+}
+
+.light-theme QLineEdit,
+.light-theme QSpinBox,
+.light-theme QComboBox {
+    background-color: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #111827;
+}
+
+.light-theme QLineEdit:focus,
+.light-theme QSpinBox:focus,
+.light-theme QComboBox:focus {
+    border-color: #007aff;
+}
+
+.light-theme QPlainTextEdit {
+    background-color: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    color: #004085;
+    font-family: monospace;
+    font-size: 12px;
+}
+
+.light-theme QStatusBar {
+    background-color: #eaebf2;
+    border-top: 1px solid #d8d9e2;
+    color: #6b7280;
+    padding: 4px;
+}

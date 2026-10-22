@@ -22,8 +22,16 @@
 #include "landrop/tasks/P2PTransferTask.hpp"
 #include "landrop/tasks/HttpWebTransferTask.hpp"
 
+#if defined(LANDROP_BUILD_QT)
+#include <QApplication>
+#include "landrop/ui/qt/QtDesktopApp.hpp"
+#endif
+
+#if defined(LANDROP_BUILD_GTK) || !defined(LANDROP_BUILD_QT)
 #include "landrop/ui/DesktopGuiEngine.hpp"
 #include "landrop/ui/GtkDesktopApp.hpp"
+#endif
+
 #include "landrop/mobile/NfcPairingSession.hpp"
 #include "landrop/mobile/AirDropProtocolBridge.hpp"
 #include "landrop/mobile/LandropMobileBridge.h"
@@ -350,8 +358,22 @@ static int runReceiver(uint16_t port, const std::string& saveDir) {
 }
 
 static int runGui(int argc, char* argv[], bool isMobile = false) {
+#if defined(LANDROP_BUILD_QT)
+    (void)isMobile;
+    QApplication qtApp(argc, argv);
+    ui::QtDesktopApp mainWindow;
+    mainWindow.show();
+    return qtApp.exec();
+#elif defined(LANDROP_BUILD_GTK) || !defined(LANDROP_BUILD_QT)
     ui::GtkDesktopApp app(isMobile);
     return app.run(argc, argv);
+#else
+    (void)argc;
+    (void)argv;
+    (void)isMobile;
+    std::cerr << "Error: No GUI backend compiled in.\n";
+    return 1;
+#endif
 }
 
 static int runMobileTest() {
