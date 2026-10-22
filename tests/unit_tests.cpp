@@ -6,12 +6,18 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <thread>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include "landrop/utils/Types.hpp"
 #include "landrop/core/ChunkBuffer.hpp"
 #include "landrop/core/FileChunkHasher.hpp"
 #include "landrop/core/SharedFolderManager.hpp"
 #include "landrop/core/MulticastBeacon.hpp"
+#include "landrop/core/NetworkSession.hpp"
+#include "landrop/core/TlsContext.hpp"
+
 #include "landrop/peers/NetworkPeer.hpp"
 #include "landrop/peers/LocalPeer.hpp"
 #include "landrop/peers/CloudPeer.hpp"
@@ -655,6 +661,151 @@ static bool testJsonAndRestSerialization() {
     return true;
 }
 
+static bool testTlsTransportAndDeviceAuth() {
+    // 1. Certificate generation & Fingerprint calculation
+    TlsCertificate serverCert = TlsHelper::generateCertificate("LAN-Drop-Test-Server", 30);
+    TEST_ASSERT(!serverCert.certPem.empty(), "Server certificate PEM generated");
+    TEST_ASSERT(!serverCert.keyPem.empty(), "Server private key PEM generated");
+    TEST_ASSERT(!serverCert.fingerprintSha256.empty(), "Server fingerprint SHA-256 generated");
+
+    std::string recomputedFp = TlsHelper::computeFingerprint(serverCert.certPem);
+    TEST_ASSERT(recomputedFp == serverCert.fingerprintSha256, "Recomputed fingerprint matches generated fingerprint");
+
+    // Fingerprint normalization matching
+    TEST_ASSERT(TlsHelper::fingerprintsMatch("AA:BB:CC", "aa:bb:cc"), "Fingerprint matches case-insensitively");
+    TEST_ASSERT(TlsHelper::fingerprintsMatch("AABBCC", "aa:bb:cc"), "Fingerprint matches without colons");
+    TEST_ASSERT(!TlsHelper::fingerprintsMatch("AABBCC", "AABBDD"), "Different fingerprints do not match");
+
+    // 2. Positive TLS File Transfer over Connected Sockets
+    int fds[2];
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "Socketpair created for TLS test");
+
+    NetworkSession serverSession("test-tls-server", "127.0.0.1", 0);
+    NetworkSession clientSession("test-tls-client", "127.0.0.1", 0);
+    serverSession.attachSocket(fds[0]);
+    clientSession.attachSocket(fds[1]);
+
+    TlsConfig serverCfg;
+    serverCfg.role = TlsRole::Server;
+    serverCfg.certPem = serverCert.certPem;
+    serverCfg.keyPem = serverCert.keyPem;
+    serverSession.enableTls(serverCfg);
+
+    TlsConfig clientCfg;
+    clientCfg.role = TlsRole::Client;
+    clientCfg.verifyMode = TlsVerificationMode::VerifyPinnedFingerprint;
+    clientCfg.expectedFingerprint = serverCert.fingerprintSha256;
+    clientSession.enableTls(clientCfg);
+
+    TlsStatus sStatus = TlsStatus::None;
+    TlsStatus cStatus = TlsStatus::None;
+
+    std::thread sTh([&]() {
+        sStatus = serverSession.performTlsHandshake();
+    });
+    std::thread cTh([&]() {
+        cStatus = clientSession.performTlsHandshake();
+    });
+    sTh.join();
+    cTh.join();
+
+    TEST_ASSERT(sStatus == TlsStatus::Connected, "Server TLS handshake succeeded");
+    TEST_ASSERT(cStatus == TlsStatus::Connected, "Client TLS handshake succeeded");
+    TEST_ASSERT(serverSession.isEncrypted(), "Server session marked encrypted");
+    TEST_ASSERT(clientSession.isEncrypted(), "Client session marked encrypted");
+    TEST_ASSERT(TlsHelper::fingerprintsMatch(clientSession.getPeerFingerprint(), serverCert.fingerprintSha256),
+                "Client verified peer certificate fingerprint");
+    TEST_ASSERT(!clientSession.getTlsCipherSuite().empty() && clientSession.getTlsCipherSuite() != "None",
+                "Strong TLS cipher suite negotiated");
+
+    // Encrypted payload transfer
+    std::vector<uint8_t> testPayload(64 * 1024);
+    for (size_t i = 0; i < testPayload.size(); ++i) {
+        testPayload[i] = static_cast<uint8_t>(i & 0xFF);
+    }
+    bool sendOk = clientSession.sendAll(testPayload.data(), testPayload.size());
+    TEST_ASSERT(sendOk, "Client sent 64 KB payload over encrypted TLS");
+
+    std::vector<uint8_t> rxPayload(testPayload.size(), 0);
+    bool rxOk = serverSession.receiveExact(rxPayload.data(), rxPayload.size());
+    TEST_ASSERT(rxOk, "Server received 64 KB payload over encrypted TLS");
+    TEST_ASSERT(rxPayload == testPayload, "Received payload matches sent payload byte-for-byte");
+
+    serverSession.closeSession();
+    clientSession.closeSession();
+
+    // 3. Negative Test 1: Untrusted Certificate / Missing Pinning Rejected by Default
+    int fdsNeg1[2];
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, fdsNeg1) == 0, "Socketpair for negative test 1");
+    NetworkSession srvNeg1("srv-neg1", "127.0.0.1", 0);
+    NetworkSession cliNeg1("cli-neg1", "127.0.0.1", 0);
+    srvNeg1.attachSocket(fdsNeg1[0]);
+    cliNeg1.attachSocket(fdsNeg1[1]);
+
+    srvNeg1.enableTls(serverCfg);
+    TlsConfig cliCfgNoPin;
+    cliCfgNoPin.role = TlsRole::Client;
+    cliCfgNoPin.verifyMode = TlsVerificationMode::VerifyPinnedFingerprint;
+    cliCfgNoPin.expectedFingerprint = ""; // Default empty pin -> MUST REJECT!
+    cliNeg1.enableTls(cliCfgNoPin);
+
+    std::thread sTh1([&]() { srvNeg1.performTlsHandshake(); });
+    std::thread cTh1([&]() { cStatus = cliNeg1.performTlsHandshake(); });
+    sTh1.join();
+    cTh1.join();
+
+    TEST_ASSERT(cStatus == TlsStatus::UntrustedCertificate, "Untrusted self-signed certificate rejected by default");
+    TEST_ASSERT(!cliNeg1.isEncrypted(), "Client rejected unconfirmed peer and disabled encryption");
+    srvNeg1.closeSession();
+    cliNeg1.closeSession();
+
+    // 4. Negative Test 2: Rogue Peer / Fingerprint Mismatch Rejected
+    int fdsNeg2[2];
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, fdsNeg2) == 0, "Socketpair for negative test 2");
+    NetworkSession srvNeg2("srv-neg2", "127.0.0.1", 0);
+    NetworkSession cliNeg2("cli-neg2", "127.0.0.1", 0);
+    srvNeg2.attachSocket(fdsNeg2[0]);
+    cliNeg2.attachSocket(fdsNeg2[1]);
+
+    srvNeg2.enableTls(serverCfg);
+    TlsConfig cliCfgMismatch;
+    cliCfgMismatch.role = TlsRole::Client;
+    cliCfgMismatch.verifyMode = TlsVerificationMode::VerifyPinnedFingerprint;
+    cliCfgMismatch.expectedFingerprint = "11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00";
+    cliNeg2.enableTls(cliCfgMismatch);
+
+    std::thread sTh2([&]() { srvNeg2.performTlsHandshake(); });
+    std::thread cTh2([&]() { cStatus = cliNeg2.performTlsHandshake(); });
+    sTh2.join();
+    cTh2.join();
+
+    TEST_ASSERT(cStatus == TlsStatus::FingerprintMismatch, "Mismatched certificate fingerprint rejected");
+    TEST_ASSERT(!cliNeg2.isEncrypted(), "Client rejected rogue peer");
+    srvNeg2.closeSession();
+    cliNeg2.closeSession();
+
+    // 5. Negative Test 3: Protocol Mismatch (Plaintext Client to TLS Server)
+    int fdsNeg3[2];
+    TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, fdsNeg3) == 0, "Socketpair for negative test 3");
+    NetworkSession srvNeg3("srv-neg3", "127.0.0.1", 0);
+    srvNeg3.attachSocket(fdsNeg3[0]);
+    srvNeg3.enableTls(serverCfg);
+
+    std::thread sTh3([&]() { sStatus = srvNeg3.performTlsHandshake(); });
+    // Plaintext client sends raw HTTP or binary garbage
+    const char plaintextGarbage[] = "GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    send(fdsNeg3[1], plaintextGarbage, sizeof(plaintextGarbage), 0);
+    sTh3.join();
+    close(fdsNeg3[1]);
+
+    TEST_ASSERT(sStatus == TlsStatus::ProtocolMismatch || sStatus == TlsStatus::HandshakeFailed,
+                "TLS Server safely rejected plaintext protocol mismatch");
+    TEST_ASSERT(!srvNeg3.isEncrypted(), "Server remained unencrypted after protocol mismatch");
+    srvNeg3.closeSession();
+
+    return true;
+}
+
 int main() {
     std::cout << "==========================================\n";
     std::cout << "  LAN-Drop: Comprehensive Unit Test Suite \n";
@@ -680,8 +831,10 @@ int main() {
         {"LandropMobileBridge C-ABI FFI", testMobileFfiBridge},
         {"MVP Presenters & View Integration", testPresenters},
         {"Receiver Security & Boundary Validation", testReceiverSecurityValidation},
-        {"Third-Party JSON & REST Protocol Parsing", testJsonAndRestSerialization}
+        {"Third-Party JSON & REST Protocol Parsing", testJsonAndRestSerialization},
+        {"OpenSSL TLS Transport & Device Authentication", testTlsTransportAndDeviceAuth}
     };
+
 
     size_t passedCases = 0;
     for (const auto& tc : cases) {

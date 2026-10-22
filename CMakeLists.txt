@@ -14,6 +14,7 @@ set(LANDROP_CORE_SOURCES
     src/core/MulticastBeacon.cpp
     src/core/NetworkSession.cpp
     src/core/SharedFolderManager.cpp
+    src/core/TlsContext.cpp
     src/peers/NetworkPeer.cpp
     src/peers/LocalPeer.cpp
     src/peers/CloudPeer.cpp
@@ -29,12 +30,16 @@ set(LANDROP_CORE_SOURCES
     src/ui/SettingsPresenter.cpp
 )
 
+find_library(SSL_LIB NAMES ssl libssl.so.3 libssl PATHS ${CMAKE_CURRENT_SOURCE_DIR}/lib /lib64 /usr/lib64 /usr/lib)
+find_library(CRYPTO_LIB NAMES crypto libcrypto.so.3 libcrypto PATHS ${CMAKE_CURRENT_SOURCE_DIR}/lib /lib64 /usr/lib64 /usr/lib)
+
 add_library(landrop_core STATIC ${LANDROP_CORE_SOURCES})
 target_include_directories(landrop_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_compile_options(landrop_core PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(landrop_core PUBLIC pthread)
+target_link_libraries(landrop_core PUBLIC pthread ${SSL_LIB} ${CRYPTO_LIB})
+
 
 # Find Qt 6
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent)

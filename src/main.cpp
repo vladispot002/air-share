@@ -42,13 +42,13 @@ static void printUsage(const char* progName) {
     std::cout << "Usage:\n";
     std::cout << "  " << progName << " gui\n";
     std::cout << "  " << progName << " mobile-gui\n";
-    std::cout << "  " << progName << " send <file_path> <receiver_ip> [port]\n";
-    std::cout << "  " << progName << " receive [port] [save_dir]\n";
+    std::cout << "  " << progName << " send <file_path> <receiver_ip> [port] [--tls [expected_fingerprint]]\n";
+    std::cout << "  " << progName << " receive [port] [save_dir] [--tls]\n";
     std::cout << "  " << progName << " demo\n";
     std::cout << "  " << progName << " mobile-test\n";
 }
 
-static int runSender(const std::string& filePath, const std::string& receiverIp, uint16_t port) {
+static int runSender(const std::string& filePath, const std::string& receiverIp, uint16_t port, bool useTls = false, const std::string& expectedFingerprint = "") {
     std::filesystem::path p(filePath);
     if (!std::filesystem::exists(p) || !std::filesystem::is_regular_file(p)) {
         std::cerr << "Error: file does not exist: " << filePath << "\n";
@@ -67,11 +67,29 @@ static int runSender(const std::string& filePath, const std::string& receiverIp,
     std::cout << "[Sender] Connecting to " << receiverIp << ":" << port << "...\n";
 
     NetworkSession session("sender-session", receiverIp, port);
+    if (useTls) {
+        TlsConfig tlsConfig;
+        tlsConfig.role = TlsRole::Client;
+        tlsConfig.verifyMode = TlsVerificationMode::VerifyPinnedFingerprint;
+        tlsConfig.expectedFingerprint = expectedFingerprint;
+        session.enableTls(tlsConfig);
+        std::cout << "[Sender] TLS enabled. Pinned fingerprint: "
+                  << (expectedFingerprint.empty() ? "(none - self-signed will be rejected)" : expectedFingerprint) << "\n";
+    }
+
     if (!session.connectTo(receiverIp, port)) {
-        std::cerr << "Error: failed to connect to receiver\n";
+        if (useTls && session.getTlsStatus() != TlsStatus::Connected && session.getTlsStatus() != TlsStatus::None) {
+            std::cerr << "Error: TLS connection failed: " << TlsHelper::statusToString(session.getTlsStatus()) << "\n";
+        } else {
+            std::cerr << "Error: failed to connect to receiver\n";
+        }
         return 1;
     }
     std::cout << "[Sender] Connected successfully.\n";
+    if (useTls) {
+        std::cout << "[Sender] TLS Handshake succeeded! Cipher: " << session.getTlsCipherSuite() << "\n";
+        std::cout << "[Sender] Verified Peer Fingerprint: " << session.getPeerFingerprint() << "\n";
+    }
 
     P2PTransferTask task("task-upload-01", fileName, fileSize, TransferDirection::Upload, "remote-node");
     task.initialize();
@@ -147,24 +165,42 @@ static int runSender(const std::string& filePath, const std::string& receiverIp,
     return 0;
 }
 
-static int runReceiver(uint16_t port, const std::string& saveDir) {
+static int runReceiver(uint16_t port, const std::string& saveDir, bool useTls = false) {
     std::filesystem::create_directories(saveDir);
 
-    std::cout << "[Receiver] Listening on port " << port << "...\n";
-    std::cout << "[Receiver] Save directory: " << saveDir << "\n";
+    std::cout << "[Receiver] Listening on port " << port << "...\n" << std::flush;
+    std::cout << "[Receiver] Save directory: " << saveDir << "\n" << std::flush;
 
     NetworkSession session("receiver-session", "0.0.0.0", port);
+    if (useTls) {
+        TlsCertificate cert = TlsHelper::generateCertificate("LAN-Drop-Receiver");
+        std::cout << "[Receiver] TLS enabled. Device Fingerprint (SHA-256): " << cert.fingerprintSha256 << "\n" << std::flush;
+        TlsConfig tlsConfig;
+        tlsConfig.role = TlsRole::Server;
+        tlsConfig.certPem = cert.certPem;
+        tlsConfig.keyPem = cert.keyPem;
+        session.enableTls(tlsConfig);
+    }
+
+
     if (!session.listenOn(port)) {
         std::cerr << "Error: failed to bind and listen on port " << port << "\n";
         return 1;
     }
 
     if (!session.acceptIncoming()) {
-        std::cerr << "Error: failed to accept incoming connection\n";
+        if (useTls && session.getTlsStatus() != TlsStatus::Connected && session.getTlsStatus() != TlsStatus::None) {
+            std::cerr << "Error: TLS incoming connection failed: " << TlsHelper::statusToString(session.getTlsStatus()) << "\n";
+        } else {
+            std::cerr << "Error: failed to accept incoming connection\n";
+        }
         return 1;
     }
 
     std::cout << "[Receiver] Connection accepted from " << session.getRemoteIp() << ":" << session.getRemotePort() << "\n";
+    if (useTls) {
+        std::cout << "[Receiver] TLS Handshake succeeded! Cipher: " << session.getTlsCipherSuite() << "\n";
+    }
 
     uint32_t nameLen = 0;
     if (!session.receiveExact(reinterpret_cast<uint8_t*>(&nameLen), sizeof(uint32_t))) {
@@ -556,15 +592,40 @@ int main(int argc, char* argv[]) {
         }
         std::string filePath = argv[2];
         std::string ip = argv[3];
-        uint16_t port = (argc >= 5) ? static_cast<uint16_t>(std::stoi(argv[4])) : 8848;
-        return runSender(filePath, ip, port);
+        uint16_t port = 8848;
+        bool useTls = false;
+        std::string expectedFingerprint;
+        for (int i = 4; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--tls") {
+                useTls = true;
+                if (i + 1 < argc && argv[i + 1][0] != '-') {
+                    expectedFingerprint = argv[++i];
+                }
+            } else if (!arg.empty() && std::isdigit(static_cast<unsigned char>(arg[0]))) {
+                port = static_cast<uint16_t>(std::stoi(arg));
+            }
+        }
+        return runSender(filePath, ip, port, useTls, expectedFingerprint);
     }
 
     if (mode == "receive") {
-        uint16_t port = (argc >= 3) ? static_cast<uint16_t>(std::stoi(argv[2])) : 8848;
-        std::string saveDir = (argc >= 4) ? argv[3] : "./downloads";
-        return runReceiver(port, saveDir);
+        uint16_t port = 8848;
+        std::string saveDir = "./downloads";
+        bool useTls = false;
+        for (int i = 2; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--tls") {
+                useTls = true;
+            } else if (!arg.empty() && std::isdigit(static_cast<unsigned char>(arg[0]))) {
+                port = static_cast<uint16_t>(std::stoi(arg));
+            } else {
+                saveDir = arg;
+            }
+        }
+        return runReceiver(port, saveDir, useTls);
     }
+
 
     printUsage(argv[0]);
     return 1;

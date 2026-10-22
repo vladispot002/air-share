@@ -5,6 +5,7 @@
 #include <chrono>
 #include <vector>
 #include "landrop/utils/Types.hpp"
+#include "landrop/core/TlsContext.hpp"
 
 namespace landrop {
 
@@ -22,6 +23,7 @@ public:
     bool listenOn(uint16_t port);
     bool acceptIncoming();
     void closeSession();
+    bool attachSocket(int fd, ConnectionState state = ConnectionState::Connected);
 
     bool sendAll(const uint8_t* data, size_t length);
     bool sendData(const std::vector<uint8_t>& data);
@@ -37,6 +39,9 @@ public:
     ConnectionState getConnectionState() const { return m_state; }
     void setConnectionState(ConnectionState state) { m_state = state; }
 
+    int getSocketFd() const { return m_socketFd; }
+    int getListenFd() const { return m_listenFd; }
+
     uint64_t getBytesSent() const { return m_bytesSent; }
     uint64_t getBytesReceived() const { return m_bytesReceived; }
     uint32_t getTimeoutSeconds() const { return m_timeoutSeconds; }
@@ -48,6 +53,12 @@ public:
         m_tlsCipherSuite = std::move(cipher);
     }
     const std::string& getTlsCipherSuite() const { return m_tlsCipherSuite; }
+
+    bool enableTls(const TlsConfig& config);
+    TlsStatus performTlsHandshake();
+    TlsStatus getTlsStatus() const { return m_tlsStatus; }
+    const std::string& getPeerFingerprint() const { return m_peerFingerprint; }
+    const TlsConfig& getTlsConfig() const { return m_tlsConfig; }
 
     double getElapsedSeconds() const;
 
@@ -65,6 +76,14 @@ private:
     std::chrono::steady_clock::time_point m_lastActivityAt;
     std::string m_tlsCipherSuite{"None"};
     bool m_isEncrypted{false};
+
+    bool m_tlsEnabled{false};
+    TlsConfig m_tlsConfig;
+    TlsStatus m_tlsStatus{TlsStatus::None};
+    std::string m_peerFingerprint;
+    SSL_CTX* m_sslCtx{nullptr};
+    SSL* m_ssl{nullptr};
 };
 
 }
+
