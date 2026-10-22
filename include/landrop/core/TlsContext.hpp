@@ -16,8 +16,8 @@ enum class TlsRole {
 };
 
 enum class TlsVerificationMode {
-    VerifyPinnedFingerprint, // Pin specific SHA-256 fingerprint (device pairing, default)
-    VerifySystemCa,          // Standard trusted root CAs
+    VerifyPinnedFingerprint, // Pin specific SHA-256 fingerprint (device authentication / unilateral server auth)
+    VerifySystemCa,          // Standard trusted root CAs / PKI (used for HTTPS)
     AllowAnyUntrusted        // Insecure / dev mode (explicit opt-in only)
 };
 
@@ -28,6 +28,8 @@ enum class TlsStatus {
     ProtocolMismatch,
     UntrustedCertificate,
     FingerprintMismatch,
+    HostnameMismatch,
+    CertificateExpired,
     SocketError
 };
 

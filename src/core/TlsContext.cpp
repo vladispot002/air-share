@@ -4,8 +4,9 @@
 #include <iomanip>
 #include <algorithm>
 #include <cctype>
-
 #include <csignal>
+#include <arpa/inet.h>
+#include <openssl/x509v3.h>
 
 namespace landrop {
 
@@ -46,6 +47,30 @@ TlsCertificate TlsHelper::generateCertificate(const std::string& commonName, int
     X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC, reinterpret_cast<const unsigned char*>("LAN-Drop"), -1, -1, 0);
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>(commonName.c_str()), -1, -1, 0);
     X509_set_issuer_name(x509, name);
+
+    // Add X509v3 extensions: Basic Constraints & Subject Alternative Name (SAN)
+    X509V3_CTX extCtx;
+    X509V3_set_ctx_nodb(&extCtx);
+    X509V3_set_ctx(&extCtx, x509, x509, nullptr, nullptr, 0);
+
+    X509_EXTENSION* extBc = X509V3_EXT_conf_nid(nullptr, &extCtx, NID_basic_constraints, "critical,CA:TRUE");
+    if (extBc) {
+        X509_add_ext(x509, extBc, -1);
+        X509_EXTENSION_free(extBc);
+    }
+
+    std::string sanValue;
+    sockaddr_in dummyAddr{};
+    if (inet_pton(AF_INET, commonName.c_str(), &dummyAddr.sin_addr) == 1) {
+        sanValue = "IP:" + commonName;
+    } else {
+        sanValue = "DNS:" + commonName;
+    }
+    X509_EXTENSION* extSan = X509V3_EXT_conf_nid(nullptr, &extCtx, NID_subject_alt_name, sanValue.c_str());
+    if (extSan) {
+        X509_add_ext(x509, extSan, -1);
+        X509_EXTENSION_free(extSan);
+    }
 
     if (X509_sign(x509, pkey, EVP_sha256()) <= 0) {
         X509_free(x509);
@@ -184,16 +209,19 @@ SSL_CTX* TlsHelper::createClientContext(const std::string& caCertPem, const std:
         : cipherSuites;
     SSL_CTX_set_ciphersuites(ctx, ciphers.c_str());
 
+    // Load default system trusted CA certificates
+    SSL_CTX_set_default_verify_paths(ctx);
+
     if (!caCertPem.empty()) {
         BIO* bio = BIO_new_mem_buf(caCertPem.data(), static_cast<int>(caCertPem.size()));
         if (bio) {
-            X509* caCert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
-            if (caCert) {
-                X509_STORE* store = SSL_CTX_get_cert_store(ctx);
-                if (store) {
+            X509_STORE* store = SSL_CTX_get_cert_store(ctx);
+            if (store) {
+                while (X509* caCert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr)) {
                     X509_STORE_add_cert(store, caCert);
+                    X509_free(caCert);
                 }
-                X509_free(caCert);
+                X509_STORE_set_flags(store, X509_V_FLAG_PARTIAL_CHAIN);
             }
             BIO_free(bio);
         }
@@ -210,6 +238,8 @@ const char* TlsHelper::statusToString(TlsStatus status) {
         case TlsStatus::ProtocolMismatch: return "ProtocolMismatch";
         case TlsStatus::UntrustedCertificate: return "UntrustedCertificate";
         case TlsStatus::FingerprintMismatch: return "FingerprintMismatch";
+        case TlsStatus::HostnameMismatch: return "HostnameMismatch";
+        case TlsStatus::CertificateExpired: return "CertificateExpired";
         case TlsStatus::SocketError: return "SocketError";
         default: return "Unknown";
     }

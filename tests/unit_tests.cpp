@@ -739,6 +739,29 @@ static bool testTlsTransportAndDeviceAuth() {
     TEST_ASSERT(rxOk, "Server received 64 KB payload over encrypted TLS");
     TEST_ASSERT(rxPayload == testPayload, "Received payload matches sent payload byte-for-byte");
 
+    // Live 1MB file transfer with SHA-256 integrity verification
+    const size_t kOneMb = 1024 * 1024;
+    std::vector<uint8_t> oneMbPayload(kOneMb);
+    for (size_t i = 0; i < kOneMb; ++i) {
+        oneMbPayload[i] = static_cast<uint8_t>((i * 73 + 19) & 0xFF);
+    }
+    FileChunkHasher hasher;
+    std::string sentHash = hasher.computeChunkHash(oneMbPayload.data(), oneMbPayload.size());
+
+    std::vector<uint8_t> rx1Mb(kOneMb, 0);
+    std::thread sender1Mb([&]() {
+        clientSession.sendAll(oneMbPayload.data(), oneMbPayload.size());
+    });
+    std::thread receiver1Mb([&]() {
+        serverSession.receiveExact(rx1Mb.data(), rx1Mb.size());
+    });
+    sender1Mb.join();
+    receiver1Mb.join();
+
+    std::string recvHash = hasher.computeChunkHash(rx1Mb.data(), rx1Mb.size());
+    TEST_ASSERT(recvHash == sentHash, "1MB payload transmitted over TLS with exact SHA-256 integrity match");
+    TEST_ASSERT(rx1Mb == oneMbPayload, "1MB buffer matches source byte-for-byte");
+
     serverSession.closeSession();
     clientSession.closeSession();
 
@@ -816,7 +839,8 @@ static bool testTlsTransportAndDeviceAuth() {
 
 class MockHttpServer {
 public:
-    explicit MockHttpServer(int port = 0) {
+    explicit MockHttpServer(int port = 0, bool useHttps = false, const std::string& certCn = "127.0.0.1")
+        : m_isHttps(useHttps) {
         m_listenFd = socket(AF_INET, SOCK_STREAM, 0);
         int opt = 1;
         setsockopt(m_listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -832,13 +856,24 @@ public:
         socklen_t len = sizeof(addr);
         getsockname(m_listenFd, reinterpret_cast<sockaddr*>(&addr), &len);
         m_port = ntohs(addr.sin_port);
+
+        if (m_isHttps) {
+            TlsHelper::initOpenSsl();
+            m_cert = TlsHelper::generateCertificate(certCn);
+            m_sslCtx = TlsHelper::createServerContext(m_cert.certPem, m_cert.keyPem);
+        }
     }
 
     ~MockHttpServer() {
         stop();
+        if (m_sslCtx) {
+            SSL_CTX_free(m_sslCtx);
+            m_sslCtx = nullptr;
+        }
     }
 
     uint16_t getPort() const { return m_port; }
+    const std::string& getCertPem() const { return m_cert.certPem; }
 
     void start(std::function<std::string(const std::string& method, const std::string& path, const std::string& req)> handler) {
         m_running = true;
@@ -847,24 +882,40 @@ public:
                 fd_set rfds;
                 FD_ZERO(&rfds);
                 FD_SET(m_listenFd, &rfds);
-                struct timeval tv{0, 100000}; // 100ms
+                struct timeval tv{0, 50000}; // 50ms
                 int sel = select(m_listenFd + 1, &rfds, nullptr, nullptr, &tv);
                 if (sel <= 0) continue;
 
                 int clientFd = accept(m_listenFd, nullptr, nullptr);
                 if (clientFd < 0) continue;
 
-                char buf[4096] = {0};
-                ssize_t n = recv(clientFd, buf, sizeof(buf) - 1, 0);
-                if (n > 0) {
-                    std::string req(buf, n);
-                    std::istringstream iss(req);
-                    std::string method, path;
-                    iss >> method >> path;
-
-                    std::string response = handler(method, path, req);
-                    if (!response.empty()) {
-                        ::send(clientFd, response.data(), response.size(), MSG_NOSIGNAL);
+                if (m_isHttps && m_sslCtx) {
+                    SSL* ssl = SSL_new(m_sslCtx);
+                    SSL_set_fd(ssl, clientFd);
+                    if (SSL_accept(ssl) > 0) {
+                        std::string req = readRequest(clientFd, ssl);
+                        if (!req.empty()) {
+                            std::istringstream iss(req);
+                            std::string method, path;
+                            iss >> method >> path;
+                            std::string response = handler(method, path, req);
+                            if (!response.empty()) {
+                                SSL_write(ssl, response.data(), static_cast<int>(response.size()));
+                            }
+                        }
+                    }
+                    SSL_shutdown(ssl);
+                    SSL_free(ssl);
+                } else {
+                    std::string req = readRequest(clientFd, nullptr);
+                    if (!req.empty()) {
+                        std::istringstream iss(req);
+                        std::string method, path;
+                        iss >> method >> path;
+                        std::string response = handler(method, path, req);
+                        if (!response.empty()) {
+                            ::send(clientFd, response.data(), response.size(), MSG_NOSIGNAL);
+                        }
                     }
                 }
                 close(clientFd);
@@ -884,14 +935,54 @@ public:
     }
 
 private:
+    static std::string readRequest(int fd, SSL* ssl) {
+        std::string req;
+        char b[4096];
+        size_t reqContentLen = std::string::npos;
+        size_t hEnd = std::string::npos;
+        while (true) {
+            ssize_t n = 0;
+            if (ssl) {
+                int r = SSL_read(ssl, b, sizeof(b));
+                if (r <= 0) break;
+                n = r;
+            } else {
+                n = recv(fd, b, sizeof(b), 0);
+                if (n <= 0) break;
+            }
+            req.append(b, static_cast<size_t>(n));
+            if (hEnd == std::string::npos) {
+                hEnd = req.find("\r\n\r\n");
+                if (hEnd != std::string::npos) {
+                    size_t clPos = req.find("Content-Length:");
+                    if (clPos == std::string::npos) clPos = req.find("content-length:");
+                    if (clPos != std::string::npos && clPos < hEnd) {
+                        size_t lineEnd = req.find("\r\n", clPos);
+                        std::string clVal = req.substr(clPos + 15, lineEnd - (clPos + 15));
+                        try { reqContentLen = std::stoull(clVal); } catch (...) {}
+                    }
+                }
+            }
+            if (hEnd != std::string::npos) {
+                if (reqContentLen == std::string::npos || req.size() >= hEnd + 4 + reqContentLen) {
+                    break;
+                }
+            }
+        }
+        return req;
+    }
+
     int m_listenFd{-1};
     uint16_t m_port{0};
+    bool m_isHttps{false};
+    TlsCertificate m_cert;
+    SSL_CTX* m_sslCtx{nullptr};
     std::atomic<bool> m_running{false};
     std::thread m_worker;
 };
 
 static bool testHttpClientAndCloudSync() {
-    // 1. URL Parsing
+    // 1. URL Parsing & Validation
     std::string host, path;
     uint16_t port = 0;
     bool isHttps = false;
@@ -908,6 +999,12 @@ static bool testHttpClientAndCloudSync() {
     TEST_ASSERT(host == "relay.landrop.io", "Parsed HTTPS host");
     TEST_ASSERT(port == 443, "Parsed default HTTPS port");
     TEST_ASSERT(isHttps, "Parsed HTTPS flag");
+
+    // Invalid / malformed URLs
+    TEST_ASSERT(!HttpClient::parseUrl("", host, port, path, isHttps), "Rejects empty URL");
+    TEST_ASSERT(!HttpClient::parseUrl("ftp://files.landrop.io/file", host, port, path, isHttps), "Rejects non-HTTP scheme");
+    TEST_ASSERT(!HttpClient::parseUrl("http://:8080/path", host, port, path, isHttps), "Rejects empty host");
+    TEST_ASSERT(!HttpClient::parseUrl("http://localhost:99999/path", host, port, path, isHttps), "Rejects invalid port > 65535");
 
     // 2. Mock HTTP Server testing
     MockHttpServer server;
@@ -930,6 +1027,17 @@ static bool testHttpClientAndCloudSync() {
         if (path == "/status" && method == "GET") {
             return "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK";
         }
+        if (path == "/truncated" && method == "GET") {
+            // Announces 500 bytes but sends only 10 bytes and closes connection
+            return "HTTP/1.1 200 OK\r\nContent-Length: 500\r\nConnection: close\r\n\r\n1234567890";
+        }
+        if (path == "/echo-size" && method == "POST") {
+            size_t bodyPos = rawReq.find("\r\n\r\n");
+            size_t bodyLen = (bodyPos != std::string::npos) ? (rawReq.size() - (bodyPos + 4)) : 0;
+            std::string lenStr = std::to_string(bodyLen);
+            return "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " +
+                   std::to_string(lenStr.size()) + "\r\nConnection: close\r\n\r\n" + lenStr;
+        }
         if (path == "/drop") {
             return ""; // Emulate connection closed / no response
         }
@@ -939,7 +1047,7 @@ static bool testHttpClientAndCloudSync() {
     std::string baseUrl = "http://127.0.0.1:" + std::to_string(serverPort);
     HttpClient client;
 
-    // Test GET /status
+    // Test GET /status (HTTP 200)
     auto resGet = client.get(baseUrl + "/status", 2);
     TEST_ASSERT(resGet.isOk(), "GET /status is 200 OK");
     TEST_ASSERT(resGet.statusCode == 200, "Status code is 200");
@@ -983,7 +1091,86 @@ static bool testHttpClientAndCloudSync() {
     auto dropRes = client.get(baseUrl + "/drop", 1);
     TEST_ASSERT(!dropRes.isOk(), "Dropped connection reported as failure");
 
+    // 9. Partial send loop (128 KB payload)
+    std::string largePayload(128 * 1024, 'K');
+    auto largeRes = client.post(baseUrl + "/echo-size", largePayload, "", 5);
+    TEST_ASSERT(largeRes.isOk(), "Large 128KB payload sent successfully via write loop");
+    TEST_ASSERT(largeRes.body == std::to_string(128 * 1024), "Server verified 128KB payload fully received");
+
+    // 10. Truncated Content-Length response detection
+    auto truncRes = client.get(baseUrl + "/truncated", 2);
+    TEST_ASSERT(!truncRes.isOk(), "Truncated Content-Length response detected and rejected");
+    TEST_ASSERT(truncRes.errorMessage.find("Truncated") != std::string::npos, "Error message reports response truncation");
+
     server.stop();
+
+    // 11. HTTPS / TLS Mock Server Tests
+    // (a) Valid HTTPS with trusted custom CA & matching hostname "127.0.0.1"
+    MockHttpServer httpsServer(0, true, "127.0.0.1");
+    uint16_t httpsPort = httpsServer.getPort();
+    httpsServer.start([](const std::string&, const std::string& path, const std::string&) -> std::string {
+        if (path == "/secure") {
+            return "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nSECURE_DATA";
+        }
+        return "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+    });
+
+    std::string httpsUrl = "https://127.0.0.1:" + std::to_string(httpsPort) + "/secure";
+    auto secureRes = client.get(httpsUrl, 3, httpsServer.getCertPem());
+    TEST_ASSERT(secureRes.isOk(), "Valid HTTPS connection with trusted CA and matching hostname succeeded");
+    TEST_ASSERT(secureRes.body == "SECURE_DATA", "Secure payload verified");
+
+    // (b) Hostname mismatch in HTTPS (server certificate CN="evil-host.local", client connects to 127.0.0.1)
+    MockHttpServer mismatchServer(0, true, "evil-host.local");
+    uint16_t mismatchPort = mismatchServer.getPort();
+    mismatchServer.start([](const std::string&, const std::string&, const std::string&) -> std::string {
+        return "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nEVIL";
+    });
+
+    std::string mismatchUrl = "https://127.0.0.1:" + std::to_string(mismatchPort) + "/secure";
+    auto mismatchRes = client.get(mismatchUrl, 3, mismatchServer.getCertPem());
+    TEST_ASSERT(!mismatchRes.isOk(), "HTTPS hostname mismatch rejected before receiving application data");
+    TEST_ASSERT(mismatchRes.statusCode == 0, "Status code 0 on hostname mismatch failure");
+
+    // (c) Untrusted certificate in HTTPS (no CA provided, allowInsecureTls=false)
+    auto untrustedRes = client.get(httpsUrl, 3); // No caCertPem passed!
+    TEST_ASSERT(!untrustedRes.isOk(), "HTTPS untrusted certificate rejected by default");
+    TEST_ASSERT(untrustedRes.statusCode == 0, "Status code 0 on untrusted certificate failure");
+
+    // (d) Explicit insecure opt-in allows connection
+    HttpRequest insecureReq;
+    insecureReq.url = httpsUrl;
+    insecureReq.allowInsecureTls = true;
+    insecureReq.timeoutSeconds = 3;
+    auto insecureRes = client.send(insecureReq);
+    TEST_ASSERT(insecureRes.isOk(), "Explicit allowInsecureTls permitted connection to self-signed host");
+    TEST_ASSERT(insecureRes.body == "SECURE_DATA", "Insecure connection received body");
+
+    // (e) HTTPS Truncated Content-Length detection
+    MockHttpServer httpsTruncServer(0, true, "127.0.0.1");
+    uint16_t truncPort = httpsTruncServer.getPort();
+    httpsTruncServer.start([](const std::string&, const std::string& path, const std::string&) -> std::string {
+        if (path == "/trunc-https") {
+            return "HTTP/1.1 200 OK\r\nContent-Length: 600\r\nConnection: close\r\n\r\nshort";
+        }
+        return "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+    });
+    std::string httpsTruncUrl = "https://127.0.0.1:" + std::to_string(truncPort) + "/trunc-https";
+    auto httpsTruncRes = client.get(httpsTruncUrl, 3, httpsTruncServer.getCertPem());
+    TEST_ASSERT(!httpsTruncRes.isOk(), "HTTPS truncated Content-Length response detected and rejected");
+    TEST_ASSERT(httpsTruncRes.errorMessage.find("Truncated") != std::string::npos, "HTTPS truncation error reported");
+
+    // (f) Multi-cert bundle support in caCertPem
+    TlsCertificate dummyCa = TlsHelper::generateCertificate("Dummy-Root-CA");
+    std::string multiBundle = dummyCa.certPem + "\n" + httpsServer.getCertPem();
+    auto bundleRes = client.get(httpsUrl, 3, multiBundle);
+    TEST_ASSERT(bundleRes.isOk(), "HTTPS custom CA bundle with multiple certificates validated successfully");
+    TEST_ASSERT(bundleRes.body == "SECURE_DATA", "Payload verified with multi-cert bundle");
+
+    httpsServer.stop();
+    mismatchServer.stop();
+    httpsTruncServer.stop();
+
     return true;
 }
 

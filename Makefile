@@ -1,8 +1,9 @@
 CXX ?= g++
 GTK_CFLAGS = $(shell pkg-config --cflags gtk+-3.0)
 GTK_LIBS = $(shell pkg-config --libs gtk+-3.0)
-CXXFLAGS ?= -std=c++20 -Wall -Wextra -Wpedantic -O2 -Iinclude -pthread $(GTK_CFLAGS)
-SSL_FLAGS = $(shell [ -f lib/libssl.so ] && echo "-Llib -lssl -lcrypto" || echo "-l:libssl.so.3 -l:libcrypto.so.3")
+SSL_CFLAGS ?= $(shell pkg-config --cflags openssl 2>/dev/null)
+SSL_FLAGS ?= $(shell pkg-config --libs openssl 2>/dev/null || ([ -f lib/libssl.so ] && echo "-Llib -lssl -lcrypto") || ([ -f /lib64/libssl.so.3 ] && echo "-L/lib64 -lssl -lcrypto") || echo "-lssl -lcrypto")
+CXXFLAGS ?= -std=c++20 -Wall -Wextra -Wpedantic -O2 -Iinclude -pthread $(GTK_CFLAGS) $(SSL_CFLAGS)
 LDFLAGS ?= -pthread $(SSL_FLAGS) -lX11 $(GTK_LIBS) -ldl
 
 SRC_DIR = src

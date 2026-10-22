@@ -31,15 +31,26 @@ set(LANDROP_CORE_SOURCES
     src/ui/SettingsPresenter.cpp
 )
 
-find_library(SSL_LIB NAMES ssl libssl.so.3 libssl PATHS ${CMAKE_CURRENT_SOURCE_DIR}/lib /lib64 /usr/lib64 /usr/lib)
-find_library(CRYPTO_LIB NAMES crypto libcrypto.so.3 libcrypto PATHS ${CMAKE_CURRENT_SOURCE_DIR}/lib /lib64 /usr/lib64 /usr/lib)
+find_package(OpenSSL QUIET)
+if (OPENSSL_FOUND)
+    message(STATUS "Found system OpenSSL ${OPENSSL_VERSION}")
+    set(OPENSSL_TARGETS OpenSSL::SSL OpenSSL::Crypto)
+else()
+    message(STATUS "OpenSSL development package not found, falling back to local include headers and system runtime libraries")
+    find_library(SSL_LIB NAMES ssl libssl.so.3 libssl PATHS /lib64 /usr/lib64 /usr/lib ${CMAKE_CURRENT_SOURCE_DIR}/lib)
+    find_library(CRYPTO_LIB NAMES crypto libcrypto.so.3 libcrypto PATHS /lib64 /usr/lib64 /usr/lib ${CMAKE_CURRENT_SOURCE_DIR}/lib)
+    if (NOT SSL_LIB OR NOT CRYPTO_LIB)
+        message(FATAL_ERROR "OpenSSL libraries (libssl, libcrypto) not found. Please install openssl or openssl-devel.")
+    endif()
+    set(OPENSSL_TARGETS ${SSL_LIB} ${CRYPTO_LIB})
+endif()
 
 add_library(landrop_core STATIC ${LANDROP_CORE_SOURCES})
 target_include_directories(landrop_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_compile_options(landrop_core PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(landrop_core PUBLIC pthread ${SSL_LIB} ${CRYPTO_LIB})
+target_link_libraries(landrop_core PUBLIC pthread ${OPENSSL_TARGETS})
 
 
 # Find Qt 6
