@@ -29,13 +29,23 @@ public:
 
     void addLog(const std::string& log);
 
+    static std::string getDefaultConfigDirectory();
+    static std::string getDefaultConfigPath();
+
+    void setConfigPath(std::string path);
+    const std::string& getConfigPath() const { return m_configPath; }
+
+    bool loadSettings();
+    bool saveSettings() const;
+
     bool loadFromJson(const std::string& jsonStr);
     std::string saveToJson() const;
-    bool loadSettingsFromFile(const std::string& filePath = "settings.json");
-    bool saveSettingsToFile(const std::string& filePath = "settings.json") const;
+    bool loadSettingsFromFile(const std::string& filePath);
+    bool saveSettingsToFile(const std::string& filePath) const;
 
 private:
     ISettingsView* m_view{nullptr};
+    std::string m_configPath;
     uint16_t m_port{8848};
     uint32_t m_speedLimitKbps{0};
     bool m_autoAccept{true};

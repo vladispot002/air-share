@@ -8,6 +8,8 @@
 #include <QFile>
 #include <QTextStream>
 #include <QApplication>
+#include <QStandardPaths>
+#include <QDir>
 
 namespace landrop::ui {
 
@@ -94,6 +96,10 @@ void QtDesktopApp::setupPresenters() {
 
     m_settingsPresenter = std::make_unique<SettingsPresenter>(m_settingsWidget);
     m_settingsWidget->setPresenter(m_settingsPresenter.get());
+
+    QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    QDir().mkpath(configDir);
+    m_settingsPresenter->setConfigPath((configDir + "/settings.json").toStdString());
 
     m_discoveryPresenter->initialize();
     m_transferPresenter->initialize();

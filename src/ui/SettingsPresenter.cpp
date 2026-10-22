@@ -1,5 +1,7 @@
 #include "landrop/ui/SettingsPresenter.hpp"
 #include <fstream>
+#include <cstdlib>
+#include <filesystem>
 #include <nlohmann/json.hpp>
 
 namespace landrop::ui {
@@ -11,14 +13,55 @@ void SettingsPresenter::setView(ISettingsView* view) {
     m_view = view;
 }
 
+std::string SettingsPresenter::getDefaultConfigDirectory() {
+    const char* envCustom = std::getenv("LANDROP_CONFIG_DIR");
+    if (envCustom && envCustom[0] != '\0') {
+        return std::string(envCustom);
+    }
+
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    if (xdg && xdg[0] != '\0') {
+        return std::string(xdg) + "/lan-drop";
+    }
+
+    const char* home = std::getenv("HOME");
+    if (home && home[0] != '\0') {
+        return std::string(home) + "/.config/lan-drop";
+    }
+
+    const char* appData = std::getenv("APPDATA");
+    if (appData && appData[0] != '\0') {
+        return std::string(appData) + "/lan-drop";
+    }
+
+    return "./config";
+}
+
+std::string SettingsPresenter::getDefaultConfigPath() {
+    return getDefaultConfigDirectory() + "/settings.json";
+}
+
+void SettingsPresenter::setConfigPath(std::string path) {
+    m_configPath = std::move(path);
+}
+
 void SettingsPresenter::initialize() {
     m_port = 8848;
     m_speedLimitKbps = 25000;
     m_autoAccept = false;
     m_airdropEnabled = true;
 
+    if (m_configPath.empty()) {
+        m_configPath = getDefaultConfigPath();
+    }
+
     // Attempt to load saved JSON configuration if available
-    loadSettingsFromFile("settings.json");
+    bool loaded = loadSettings();
+    if (!loaded) {
+        addLog("No existing config at " + m_configPath + ", initialized with defaults.");
+    } else {
+        addLog("Loaded configuration from " + m_configPath);
+    }
 
     addLog("LAN-Drop daemon started on port " + std::to_string(m_port));
     addLog("Scanning local subnet for peers...");
@@ -51,10 +94,14 @@ void SettingsPresenter::onAirDropToggled(bool airdropEnabled) {
 }
 
 void SettingsPresenter::onSaveSettingsClicked() {
-    saveSettingsToFile("settings.json");
-    addLog("Configuration saved to settings.json successfully.");
-    if (m_view) {
-        m_view->showSaveSuccess();
+    bool saved = saveSettings();
+    if (saved) {
+        addLog("Configuration saved to " + m_configPath + " successfully.");
+        if (m_view) {
+            m_view->showSaveSuccess();
+        }
+    } else {
+        addLog("Error: failed to write configuration to " + m_configPath);
     }
 }
 
@@ -70,13 +117,35 @@ void SettingsPresenter::addLog(const std::string& log) {
     }
 }
 
+bool SettingsPresenter::loadSettings() {
+    return loadSettingsFromFile(m_configPath);
+}
+
+bool SettingsPresenter::saveSettings() const {
+    return saveSettingsToFile(m_configPath);
+}
+
 bool SettingsPresenter::loadFromJson(const std::string& jsonStr) {
+    if (jsonStr.empty()) {
+        return false;
+    }
     try {
         auto j = nlohmann::json::parse(jsonStr);
-        if (j.contains("port")) m_port = j["port"].get<uint16_t>();
-        if (j.contains("speedLimitKbps")) m_speedLimitKbps = j["speedLimitKbps"].get<uint32_t>();
-        if (j.contains("autoAccept")) m_autoAccept = j["autoAccept"].get<bool>();
-        if (j.contains("airdropEnabled")) m_airdropEnabled = j["airdropEnabled"].get<bool>();
+        if (j.contains("port") && j["port"].is_number_integer()) {
+            int p = j["port"].get<int>();
+            if (p >= 1 && p <= 65535) {
+                m_port = static_cast<uint16_t>(p);
+            }
+        }
+        if (j.contains("speedLimitKbps") && j["speedLimitKbps"].is_number_unsigned()) {
+            m_speedLimitKbps = j["speedLimitKbps"].get<uint32_t>();
+        }
+        if (j.contains("autoAccept") && j["autoAccept"].is_boolean()) {
+            m_autoAccept = j["autoAccept"].get<bool>();
+        }
+        if (j.contains("airdropEnabled") && j["airdropEnabled"].is_boolean()) {
+            m_airdropEnabled = j["airdropEnabled"].get<bool>();
+        }
         return true;
     } catch (const std::exception&) {
         return false;
@@ -93,6 +162,11 @@ std::string SettingsPresenter::saveToJson() const {
 }
 
 bool SettingsPresenter::loadSettingsFromFile(const std::string& filePath) {
+    std::error_code ec;
+    if (!std::filesystem::exists(filePath, ec)) {
+        return false;
+    }
+
     std::ifstream file(filePath);
     if (!file.is_open()) return false;
     std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
@@ -100,10 +174,20 @@ bool SettingsPresenter::loadSettingsFromFile(const std::string& filePath) {
 }
 
 bool SettingsPresenter::saveSettingsToFile(const std::string& filePath) const {
+    std::error_code ec;
+    std::filesystem::path p(filePath);
+    if (p.has_parent_path()) {
+        std::filesystem::create_directories(p.parent_path(), ec);
+        if (ec) {
+            return false;
+        }
+    }
+
     std::ofstream file(filePath);
     if (!file.is_open()) return false;
     file << saveToJson();
-    return true;
+    file.flush();
+    return file.good();
 }
 
 }

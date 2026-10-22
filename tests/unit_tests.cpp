@@ -597,6 +597,61 @@ static bool testJsonAndRestSerialization() {
     bool badOk = airdrop.handleIncomingAsk("Not a valid json string {[]}", badAsset);
     TEST_ASSERT(!badOk, "Malformed JSON safely rejected without throw");
 
+    // 5. Stable configuration path resolution & directory auto-creation
+    std::string defaultPath = ui::SettingsPresenter::getDefaultConfigPath();
+    TEST_ASSERT(!defaultPath.empty(), "Default config path is resolved");
+    TEST_ASSERT(defaultPath.find("settings.json") != std::string::npos, "Config path ends with settings.json");
+
+    std::string testConfigDir = "/tmp/landrop_test_cfg_dir/nested_profile";
+    std::string testConfigFile = testConfigDir + "/test_settings.json";
+    std::error_code ec;
+    std::filesystem::remove_all("/tmp/landrop_test_cfg_dir", ec);
+
+    // 6. First launch test on non-existent file
+    ui::SettingsPresenter firstLaunchPresenter(nullptr);
+    firstLaunchPresenter.setConfigPath(testConfigFile);
+    bool firstLoad = firstLaunchPresenter.loadSettings();
+    TEST_ASSERT(!firstLoad, "First launch correctly reports no config file");
+    TEST_ASSERT(firstLaunchPresenter.getPort() == 8848, "First launch keeps default port 8848");
+
+    // 7. Save to nested path with automatic directory creation
+    firstLaunchPresenter.onPortChanged(7788);
+    firstLaunchPresenter.onSpeedLimitChanged(32000);
+    firstLaunchPresenter.onAutoAcceptToggled(true);
+    firstLaunchPresenter.onAirDropToggled(false);
+    bool saveOk = firstLaunchPresenter.saveSettings();
+    TEST_ASSERT(saveOk, "Saved settings to nested non-existent directory");
+    TEST_ASSERT(std::filesystem::exists(testConfigFile), "Configuration file actually exists on disk");
+
+    // 8. Reload from file
+    ui::SettingsPresenter reloadedPresenter(nullptr);
+    reloadedPresenter.setConfigPath(testConfigFile);
+    bool reloadOk = reloadedPresenter.loadSettings();
+    TEST_ASSERT(reloadOk, "Settings successfully reloaded from disk");
+    TEST_ASSERT(reloadedPresenter.getPort() == 7788, "Reloaded port is 7788");
+    TEST_ASSERT(reloadedPresenter.getSpeedLimitKbps() == 32000, "Reloaded speed is 32000");
+    TEST_ASSERT(reloadedPresenter.isAutoAccept() == true, "Reloaded autoAccept is true");
+    TEST_ASSERT(reloadedPresenter.isAirDropEnabled() == false, "Reloaded airdrop is false");
+
+    // 9. Malformed JSON handling
+    {
+        std::ofstream corruptOut(testConfigFile);
+        corruptOut << "{ \"port\": \"not_a_number\", malformed json syntax";
+    }
+    ui::SettingsPresenter corruptPresenter(nullptr);
+    corruptPresenter.setConfigPath(testConfigFile);
+    bool corruptLoad = corruptPresenter.loadSettings();
+    TEST_ASSERT(!corruptLoad, "Malformed JSON safely rejected");
+    TEST_ASSERT(corruptPresenter.getPort() == 8848, "Presenter maintains safe defaults upon corrupt JSON");
+
+    // 10. Unwritable path error handling
+    ui::SettingsPresenter unwritablePresenter(nullptr);
+    unwritablePresenter.setConfigPath("/dev/null/impossible/settings.json");
+    bool unwriteOk = unwritablePresenter.saveSettings();
+    TEST_ASSERT(!unwriteOk, "Unwritable path safely reports failure without throwing");
+
+    std::filesystem::remove_all("/tmp/landrop_test_cfg_dir", ec);
+
     return true;
 }
 
