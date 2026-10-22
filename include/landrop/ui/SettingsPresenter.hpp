@@ -29,6 +29,11 @@ public:
 
     void addLog(const std::string& log);
 
+    bool loadFromJson(const std::string& jsonStr);
+    std::string saveToJson() const;
+    bool loadSettingsFromFile(const std::string& filePath = "settings.json");
+    bool saveSettingsToFile(const std::string& filePath = "settings.json") const;
+
 private:
     ISettingsView* m_view{nullptr};
     uint16_t m_port{8848};

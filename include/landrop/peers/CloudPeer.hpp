@@ -32,6 +32,9 @@ public:
     void refreshAccessToken(std::string newToken);
     const std::string& getAccessToken() const { return m_accessToken; }
 
+    std::string buildQuotaRequestPayload() const;
+    bool parseQuotaResponse(const std::string& jsonResponse);
+
     const std::string& getCloudProvider() const { return m_cloudProvider; }
     const std::string& getEndpointUrl() const { return m_endpointUrl; }
 

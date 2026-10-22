@@ -548,6 +548,58 @@ static bool testReceiverSecurityValidation() {
     return true;
 }
 
+static bool testJsonAndRestSerialization() {
+    // 1. SettingsPresenter JSON round-trip
+    ui::SettingsPresenter presenter(nullptr);
+    presenter.onPortChanged(9090);
+    presenter.onSpeedLimitChanged(50000);
+    presenter.onAutoAcceptToggled(true);
+    presenter.onAirDropToggled(false);
+
+    std::string jsonStr = presenter.saveToJson();
+    TEST_ASSERT(jsonStr.find("\"port\": 9090") != std::string::npos, "JSON contains port");
+    TEST_ASSERT(jsonStr.find("\"autoAccept\": true") != std::string::npos, "JSON contains autoAccept");
+
+    ui::SettingsPresenter loadedPresenter(nullptr);
+    bool loadOk = loadedPresenter.loadFromJson(jsonStr);
+    TEST_ASSERT(loadOk, "Settings loaded from JSON successfully");
+    TEST_ASSERT(loadedPresenter.getPort() == 9090, "Loaded port matches");
+    TEST_ASSERT(loadedPresenter.getSpeedLimitKbps() == 50000, "Loaded speed limit matches");
+    TEST_ASSERT(loadedPresenter.isAutoAccept() == true, "Loaded autoAccept matches");
+    TEST_ASSERT(loadedPresenter.isAirDropEnabled() == false, "Loaded airdropEnabled matches");
+
+    // 2. CloudPeer REST Quota JSON payload & parsing
+    CloudPeer cloud("peer-cloud-test", "CloudRelay", "https://relay.landrop.net", 443, "CustomDrop", "token-xyz");
+    std::string reqPayload = cloud.buildQuotaRequestPayload();
+    TEST_ASSERT(reqPayload.find("CustomDrop") != std::string::npos, "Quota request contains provider");
+    TEST_ASSERT(reqPayload.find("token-xyz") != std::string::npos, "Quota request contains token");
+
+    std::string mockQuotaResponse = R"({"storage_quota_bytes": 10737418240, "used_storage_bytes": 2147483648})";
+    bool parseOk = cloud.parseQuotaResponse(mockQuotaResponse);
+    TEST_ASSERT(parseOk, "Cloud quota response parsed");
+    TEST_ASSERT(cloud.getStorageQuotaBytes() == 10737418240ULL, "Quota matches 10 GB");
+    TEST_ASSERT(cloud.getUsedStorageBytes() == 2147483648ULL, "Used storage matches 2 GB");
+    TEST_ASSERT(cloud.hasAvailableQuota(1024), "Has available quota");
+
+    // 3. AirDropProtocolBridge JSON verification
+    mobile::AirDropProtocolBridge airdrop("bridge-uuid", "Bridge Node");
+    mobile::AirDropAsset asset{"archive.tar.gz", 1048576, "application/gzip", "hash-abc"};
+    std::string askReq = airdrop.buildAskRequest(asset);
+    mobile::AirDropAsset parsedAsset;
+    bool askOk = airdrop.handleIncomingAsk(askReq, parsedAsset);
+    TEST_ASSERT(askOk, "AirDrop JSON Ask payload parsed via nlohmann/json");
+    TEST_ASSERT(parsedAsset.fileName == "archive.tar.gz", "Parsed asset filename matches");
+    TEST_ASSERT(parsedAsset.fileSize == 1048576, "Parsed asset filesize matches");
+    TEST_ASSERT(parsedAsset.fileSha256 == "hash-abc", "Parsed asset hash matches");
+
+    // 4. Invalid JSON rejection test
+    mobile::AirDropAsset badAsset;
+    bool badOk = airdrop.handleIncomingAsk("Not a valid json string {[]}", badAsset);
+    TEST_ASSERT(!badOk, "Malformed JSON safely rejected without throw");
+
+    return true;
+}
+
 int main() {
     std::cout << "==========================================\n";
     std::cout << "  LAN-Drop: Comprehensive Unit Test Suite \n";
@@ -572,7 +624,8 @@ int main() {
         {"AirDropProtocolBridge Protocol", testAirDropBridge},
         {"LandropMobileBridge C-ABI FFI", testMobileFfiBridge},
         {"MVP Presenters & View Integration", testPresenters},
-        {"Receiver Security & Boundary Validation", testReceiverSecurityValidation}
+        {"Receiver Security & Boundary Validation", testReceiverSecurityValidation},
+        {"Third-Party JSON & REST Protocol Parsing", testJsonAndRestSerialization}
     };
 
     size_t passedCases = 0;

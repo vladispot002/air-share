@@ -1,5 +1,6 @@
 #include "landrop/peers/CloudPeer.hpp"
 #include <utility>
+#include <nlohmann/json.hpp>
 
 namespace landrop {
 
@@ -68,6 +69,30 @@ void CloudPeer::releaseStorage(uint64_t bytes) {
 void CloudPeer::refreshAccessToken(std::string newToken) {
     m_accessToken = std::move(newToken);
     m_isOnline = !m_accessToken.empty();
+}
+
+std::string CloudPeer::buildQuotaRequestPayload() const {
+    nlohmann::json j;
+    j["peer_id"] = m_id;
+    j["cloud_provider"] = m_cloudProvider;
+    j["access_token"] = m_accessToken;
+    j["request_type"] = "GET_QUOTA";
+    return j.dump();
+}
+
+bool CloudPeer::parseQuotaResponse(const std::string& jsonResponse) {
+    try {
+        auto j = nlohmann::json::parse(jsonResponse);
+        if (j.contains("storage_quota_bytes") && j["storage_quota_bytes"].is_number()) {
+            m_storageQuotaBytes = j["storage_quota_bytes"].get<uint64_t>();
+        }
+        if (j.contains("used_storage_bytes") && j["used_storage_bytes"].is_number()) {
+            m_usedStorageBytes = j["used_storage_bytes"].get<uint64_t>();
+        }
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 }
