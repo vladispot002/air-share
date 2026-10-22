@@ -34,6 +34,7 @@ public:
 
     std::string buildQuotaRequestPayload() const;
     bool parseQuotaResponse(const std::string& jsonResponse);
+    bool syncQuotaWithServer(const std::string& overrideUrl = "");
 
     const std::string& getCloudProvider() const { return m_cloudProvider; }
     const std::string& getEndpointUrl() const { return m_endpointUrl; }

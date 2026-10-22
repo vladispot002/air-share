@@ -15,6 +15,7 @@ set(LANDROP_CORE_SOURCES
     src/core/NetworkSession.cpp
     src/core/SharedFolderManager.cpp
     src/core/TlsContext.cpp
+    src/core/HttpClient.cpp
     src/peers/NetworkPeer.cpp
     src/peers/LocalPeer.cpp
     src/peers/CloudPeer.cpp

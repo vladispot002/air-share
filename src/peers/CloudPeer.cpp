@@ -2,6 +2,8 @@
 #include <utility>
 #include <nlohmann/json.hpp>
 
+#include "landrop/core/HttpClient.hpp"
+
 namespace landrop {
 
 CloudPeer::CloudPeer(
@@ -95,4 +97,23 @@ bool CloudPeer::parseQuotaResponse(const std::string& jsonResponse) {
     }
 }
 
+
+bool CloudPeer::syncQuotaWithServer(const std::string& overrideUrl) {
+    std::string targetUrl = overrideUrl.empty()
+        ? (m_endpointUrl + ":" + std::to_string(m_port) + "/api/v1/quota")
+        : overrideUrl;
+
+    HttpClient client;
+    std::string payload = buildQuotaRequestPayload();
+    auto response = client.post(targetUrl, payload, m_accessToken, 3);
+    if (!response.isOk()) {
+        if (response.statusCode == 401) {
+            m_isOnline = false;
+        }
+        return false;
+    }
+    return parseQuotaResponse(response.body);
 }
+
+}
+

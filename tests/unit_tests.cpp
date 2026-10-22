@@ -7,8 +7,14 @@
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <atomic>
+#include <functional>
 #include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
+
 
 #include "landrop/utils/Types.hpp"
 #include "landrop/core/ChunkBuffer.hpp"
@@ -17,6 +23,8 @@
 #include "landrop/core/MulticastBeacon.hpp"
 #include "landrop/core/NetworkSession.hpp"
 #include "landrop/core/TlsContext.hpp"
+#include "landrop/core/HttpClient.hpp"
+
 
 #include "landrop/peers/NetworkPeer.hpp"
 #include "landrop/peers/LocalPeer.hpp"
@@ -806,6 +814,179 @@ static bool testTlsTransportAndDeviceAuth() {
     return true;
 }
 
+class MockHttpServer {
+public:
+    explicit MockHttpServer(int port = 0) {
+        m_listenFd = socket(AF_INET, SOCK_STREAM, 0);
+        int opt = 1;
+        setsockopt(m_listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(port);
+
+        bind(m_listenFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        listen(m_listenFd, 5);
+
+        socklen_t len = sizeof(addr);
+        getsockname(m_listenFd, reinterpret_cast<sockaddr*>(&addr), &len);
+        m_port = ntohs(addr.sin_port);
+    }
+
+    ~MockHttpServer() {
+        stop();
+    }
+
+    uint16_t getPort() const { return m_port; }
+
+    void start(std::function<std::string(const std::string& method, const std::string& path, const std::string& req)> handler) {
+        m_running = true;
+        m_worker = std::thread([this, handler = std::move(handler)]() {
+            while (m_running) {
+                fd_set rfds;
+                FD_ZERO(&rfds);
+                FD_SET(m_listenFd, &rfds);
+                struct timeval tv{0, 100000}; // 100ms
+                int sel = select(m_listenFd + 1, &rfds, nullptr, nullptr, &tv);
+                if (sel <= 0) continue;
+
+                int clientFd = accept(m_listenFd, nullptr, nullptr);
+                if (clientFd < 0) continue;
+
+                char buf[4096] = {0};
+                ssize_t n = recv(clientFd, buf, sizeof(buf) - 1, 0);
+                if (n > 0) {
+                    std::string req(buf, n);
+                    std::istringstream iss(req);
+                    std::string method, path;
+                    iss >> method >> path;
+
+                    std::string response = handler(method, path, req);
+                    if (!response.empty()) {
+                        ::send(clientFd, response.data(), response.size(), MSG_NOSIGNAL);
+                    }
+                }
+                close(clientFd);
+            }
+        });
+    }
+
+    void stop() {
+        m_running = false;
+        if (m_worker.joinable()) {
+            m_worker.join();
+        }
+        if (m_listenFd >= 0) {
+            close(m_listenFd);
+            m_listenFd = -1;
+        }
+    }
+
+private:
+    int m_listenFd{-1};
+    uint16_t m_port{0};
+    std::atomic<bool> m_running{false};
+    std::thread m_worker;
+};
+
+static bool testHttpClientAndCloudSync() {
+    // 1. URL Parsing
+    std::string host, path;
+    uint16_t port = 0;
+    bool isHttps = false;
+
+    bool parse1 = HttpClient::parseUrl("http://127.0.0.1:8888/api/v1/quota", host, port, path, isHttps);
+    TEST_ASSERT(parse1, "Parsed HTTP URL successfully");
+    TEST_ASSERT(host == "127.0.0.1", "Parsed HTTP host");
+    TEST_ASSERT(port == 8888, "Parsed HTTP port");
+    TEST_ASSERT(path == "/api/v1/quota", "Parsed HTTP path");
+    TEST_ASSERT(!isHttps, "Parsed plain HTTP flag");
+
+    bool parse2 = HttpClient::parseUrl("https://relay.landrop.io/sync", host, port, path, isHttps);
+    TEST_ASSERT(parse2, "Parsed HTTPS URL successfully");
+    TEST_ASSERT(host == "relay.landrop.io", "Parsed HTTPS host");
+    TEST_ASSERT(port == 443, "Parsed default HTTPS port");
+    TEST_ASSERT(isHttps, "Parsed HTTPS flag");
+
+    // 2. Mock HTTP Server testing
+    MockHttpServer server;
+    uint16_t serverPort = server.getPort();
+    TEST_ASSERT(serverPort > 0, "Mock HTTP server listening on ephemeral port");
+
+    server.start([](const std::string& method, const std::string& path, const std::string& rawReq) -> std::string {
+        if (path == "/api/v1/quota" && method == "POST") {
+            if (rawReq.find("valid_secret_token") != std::string::npos) {
+                std::string body = R"({"storage_quota_bytes": 10737418240, "used_storage_bytes": 209715200})";
+                return "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n" + body;
+            } else if (rawReq.find("unauthorized_token") != std::string::npos) {
+                return "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\": \"Invalid token\"}";
+            } else if (rawReq.find("over_quota_token") != std::string::npos) {
+                return "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\": \"Quota exceeded\"}";
+            } else if (rawReq.find("crash_token") != std::string::npos) {
+                return "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\": \"Server error\"}";
+            }
+        }
+        if (path == "/status" && method == "GET") {
+            return "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK";
+        }
+        if (path == "/drop") {
+            return ""; // Emulate connection closed / no response
+        }
+        return "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+    });
+
+    std::string baseUrl = "http://127.0.0.1:" + std::to_string(serverPort);
+    HttpClient client;
+
+    // Test GET /status
+    auto resGet = client.get(baseUrl + "/status", 2);
+    TEST_ASSERT(resGet.isOk(), "GET /status is 200 OK");
+    TEST_ASSERT(resGet.statusCode == 200, "Status code is 200");
+    TEST_ASSERT(resGet.body == "OK", "Body matches response");
+
+    // 3. Positive Quota Sync with CloudPeer
+    CloudPeer validPeer("cloud-01", "DropCloud Personal", "http://127.0.0.1", serverPort, "DropCloud", "valid_secret_token");
+    validPeer.initialize();
+    bool syncOk = validPeer.syncQuotaWithServer(baseUrl + "/api/v1/quota");
+    TEST_ASSERT(syncOk, "CloudPeer successfully synced quota with server");
+    TEST_ASSERT(validPeer.getStorageQuotaBytes() == 10737418240ULL, "CloudPeer storage quota updated to 10 GB");
+    TEST_ASSERT(validPeer.getUsedStorageBytes() == 209715200ULL, "CloudPeer used storage updated to 200 MB");
+    TEST_ASSERT(validPeer.isOnline(), "CloudPeer remains online after successful sync");
+
+    // 4. Negative: 401 Unauthorized
+    CloudPeer unauthPeer("cloud-02", "DropCloud Unauth", "http://127.0.0.1", serverPort, "DropCloud", "unauthorized_token");
+    unauthPeer.initialize();
+    bool unauthSync = unauthPeer.syncQuotaWithServer(baseUrl + "/api/v1/quota");
+    TEST_ASSERT(!unauthSync, "Sync safely fails on 401 Unauthorized");
+    TEST_ASSERT(!unauthPeer.isOnline(), "CloudPeer invalidated and taken offline upon 401 Unauthorized");
+
+    // 5. Negative: 403 Forbidden
+    CloudPeer overQuotaPeer("cloud-03", "DropCloud Full", "http://127.0.0.1", serverPort, "DropCloud", "over_quota_token");
+    overQuotaPeer.initialize();
+    bool overQuotaSync = overQuotaPeer.syncQuotaWithServer(baseUrl + "/api/v1/quota");
+    TEST_ASSERT(!overQuotaSync, "Sync safely fails on 403 Forbidden");
+
+    // 6. Negative: 500 Internal Server Error
+    CloudPeer crashPeer("cloud-04", "DropCloud Down", "http://127.0.0.1", serverPort, "DropCloud", "crash_token");
+    crashPeer.initialize();
+    bool crashSync = crashPeer.syncQuotaWithServer(baseUrl + "/api/v1/quota");
+    TEST_ASSERT(!crashSync, "Sync safely fails on 500 Server Error");
+
+    // 7. Network Disconnection / Connection Refused
+    auto refusedRes = client.get("http://127.0.0.1:1/nonexistent", 1);
+    TEST_ASSERT(!refusedRes.isOk(), "Connection refused reported as failure");
+    TEST_ASSERT(refusedRes.statusCode == 0, "Status code is 0 for connection failure");
+    TEST_ASSERT(!refusedRes.errorMessage.empty(), "Error message populated for connection failure");
+
+    // 8. Timeout handling
+    auto dropRes = client.get(baseUrl + "/drop", 1);
+    TEST_ASSERT(!dropRes.isOk(), "Dropped connection reported as failure");
+
+    server.stop();
+    return true;
+}
+
 int main() {
     std::cout << "==========================================\n";
     std::cout << "  LAN-Drop: Comprehensive Unit Test Suite \n";
@@ -832,8 +1013,10 @@ int main() {
         {"MVP Presenters & View Integration", testPresenters},
         {"Receiver Security & Boundary Validation", testReceiverSecurityValidation},
         {"Third-Party JSON & REST Protocol Parsing", testJsonAndRestSerialization},
-        {"OpenSSL TLS Transport & Device Authentication", testTlsTransportAndDeviceAuth}
+        {"OpenSSL TLS Transport & Device Authentication", testTlsTransportAndDeviceAuth},
+        {"REST/HTTP Client & Cloud Quota Synchronization", testHttpClientAndCloudSync}
     };
+
 
 
     size_t passedCases = 0;
