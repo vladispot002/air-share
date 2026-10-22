@@ -20,11 +20,17 @@ public:
 
     void setPresenter(StoragePresenter* presenter);
 
-    // IStorageView overrides
     void setSharedPath(const std::string& path) override;
     void updateFileList(const std::vector<FileMetadata>& files) override;
     void setStorageStats(uint64_t totalBytes, size_t fileCount) override;
     void setPasswordProtectionStatus(bool isProtected) override;
+
+    QPushButton* getAddFolderBtn() const { return m_addFolderBtn; }
+    QPushButton* getSetPinBtn() const { return m_setPinBtn; }
+    QPushButton* getClearPinBtn() const { return m_clearPinBtn; }
+    QPushButton* getRescanBtn() const { return m_rescanBtn; }
+    QLabel* getPinStatusLabel() const { return m_pinStatusLabel; }
+    QTableWidget* getFileTable() const { return m_fileTable; }
 
 private slots:
     void onAddFolderClicked();

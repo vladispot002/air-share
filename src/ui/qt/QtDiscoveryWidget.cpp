@@ -7,6 +7,8 @@
 #include <QMetaObject>
 #include <QScrollArea>
 #include <QHostAddress>
+#include <QTimer>
+#include <QStyle>
 
 namespace landrop::ui {
 
@@ -35,7 +37,7 @@ void QtDiscoveryWidget::setupUi() {
     titleLabel->setFont(titleFont);
 
     m_statusLabel = new QLabel("Listening on LAN", this);
-    m_statusLabel->setStyleSheet("color: #30d158; font-weight: bold; padding: 4px 8px; border-radius: 4px; background: rgba(48, 209, 88, 0.15);");
+    m_statusLabel->setObjectName("badgeSuccess");
 
     headerLayout->addWidget(titleLabel);
     headerLayout->addStretch();
@@ -47,6 +49,7 @@ void QtDiscoveryWidget::setupUi() {
     myDeviceFrame->setObjectName("myDeviceCard");
     auto* myDeviceLayout = new QHBoxLayout(myDeviceFrame);
     myDeviceLayout->setContentsMargins(16, 12, 16, 12);
+    myDeviceLayout->setSpacing(12);
 
     m_myDeviceLabel = new QLabel("🖥️ My Device: Scanning...", myDeviceFrame);
     QFont devFont = m_myDeviceLabel->font();
@@ -58,13 +61,13 @@ void QtDiscoveryWidget::setupUi() {
     m_loopbackBtn->setToolTip("Add local loopback node for instant self-transfer testing");
     connect(m_loopbackBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onAddLoopbackClicked);
 
-    myDeviceLayout->addWidget(m_myDeviceLabel);
-    myDeviceLayout->addStretch();
-    myDeviceLayout->addWidget(m_loopbackBtn);
+    myDeviceLayout->addWidget(m_myDeviceLabel, 1);
+    myDeviceLayout->addWidget(m_loopbackBtn, 0, Qt::AlignRight);
     mainLayout->addWidget(myDeviceFrame);
 
     // Controls Bar
     auto* actionsLayout = new QHBoxLayout();
+    actionsLayout->setSpacing(10);
     m_refreshBtn = new QPushButton("↺ Broadcast Scan", this);
     m_refreshBtn->setObjectName("primaryBtn");
     connect(m_refreshBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onRefreshClicked);
@@ -103,7 +106,7 @@ void QtDiscoveryWidget::updateMyDeviceCard() {
     std::string ip = m_presenter->getLocalDeviceIp();
     uint16_t port = m_presenter->getLocalDevicePort();
 
-    QString text = QString("🖥️ My Device: <b>%1</b> &nbsp;|&nbsp; Local IP: <b>%2:%3</b> &nbsp;|&nbsp; <span style='color:#30d158'>Discoverable</span>")
+    QString text = QString("🖥️ My Device: <b>%1</b> &nbsp;•&nbsp; %2:%3 &nbsp;•&nbsp; <span style='color:#30d158'>● Discoverable</span>")
         .arg(QString::fromStdString(name))
         .arg(QString::fromStdString(ip))
         .arg(port);
@@ -121,12 +124,14 @@ void QtDiscoveryWidget::setScanningStatus(bool isScanning) {
         if (isScanning) {
             m_scanToggleBtn->setText("⚡ Beacon: ON");
             m_statusLabel->setText("Scanning Active");
-            m_statusLabel->setStyleSheet("color: #30d158; font-weight: bold; padding: 4px 8px; border-radius: 4px; background: rgba(48, 209, 88, 0.15);");
+            m_statusLabel->setObjectName("badgeSuccess");
         } else {
             m_scanToggleBtn->setText("⚡ Beacon: PAUSED");
             m_statusLabel->setText("Discovery Idle");
-            m_statusLabel->setStyleSheet("color: #ff9f0a; font-weight: bold; padding: 4px 8px; border-radius: 4px; background: rgba(255, 159, 10, 0.15);");
+            m_statusLabel->setObjectName("badgeWarning");
         }
+        m_statusLabel->style()->unpolish(m_statusLabel);
+        m_statusLabel->style()->polish(m_statusLabel);
     }, Qt::QueuedConnection);
 }
 
@@ -144,6 +149,14 @@ void QtDiscoveryWidget::showNotification(const std::string& text) {
     QMetaObject::invokeMethod(this, [this, text]() {
         if (m_statusLabel) {
             m_statusLabel->setText(QString::fromStdString(text));
+            m_statusLabel->setObjectName("badgeInfo");
+            m_statusLabel->style()->unpolish(m_statusLabel);
+            m_statusLabel->style()->polish(m_statusLabel);
+
+            // Revert back to scanning status after 4 seconds
+            QTimer::singleShot(4000, this, [this]() {
+                setScanningStatus(true);
+            });
         }
     }, Qt::QueuedConnection);
 }
@@ -177,7 +190,7 @@ void QtDiscoveryWidget::renderEmptyState() {
 
     auto* desc = new QLabel("Open LAN-Drop on another Mac, PC, or mobile device connected to this Wi-Fi network.\nOr add a loopback address below to perform local self-testing.", m_emptyStateWidget);
     desc->setAlignment(Qt::AlignCenter);
-    desc->setStyleSheet("color: #8e8e93; line-height: 1.4;");
+    desc->setObjectName("secondaryLabel");
 
     auto* btnLayout = new QHBoxLayout();
     btnLayout->setAlignment(Qt::AlignCenter);
@@ -222,6 +235,7 @@ void QtDiscoveryWidget::renderDeviceCards(const std::vector<DeviceViewModel>& de
         card->setObjectName("card");
         auto* cardLayout = new QHBoxLayout(card);
         cardLayout->setContentsMargins(16, 12, 16, 12);
+        cardLayout->setSpacing(12);
 
         QString icon = "🖥️";
         if (dev.type.find("Phone") != std::string::npos || dev.type.find("Galaxy") != std::string::npos || dev.type.find("iOS") != std::string::npos) {
@@ -237,15 +251,16 @@ void QtDiscoveryWidget::renderDeviceCards(const std::vector<DeviceViewModel>& de
         cardLayout->addWidget(iconLbl);
 
         auto* infoLayout = new QVBoxLayout();
+        infoLayout->setSpacing(2);
         auto* nameLbl = new QLabel(QString("<b>%1</b>").arg(QString::fromStdString(dev.name)), card);
         auto* endpLbl = new QLabel(QString::fromStdString(dev.endpoint), card);
-        endpLbl->setStyleSheet("color: #8e8e93; font-size: 11px;");
+        endpLbl->setObjectName("secondaryLabel");
         infoLayout->addWidget(nameLbl);
         infoLayout->addWidget(endpLbl);
         cardLayout->addLayout(infoLayout, 1);
 
         auto* badge = new QLabel(QString::fromStdString(dev.type), card);
-        badge->setStyleSheet("background: #007aff22; color: #007aff; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;");
+        badge->setObjectName("badgeInfo");
         cardLayout->addWidget(badge);
 
         QString peerId = QString::fromStdString(dev.id);

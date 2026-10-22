@@ -24,6 +24,7 @@ public:
 
     QComboBox* getThemeCombo() const { return m_themeCombo; }
     QSpinBox* getPortSpin() const { return m_portSpin; }
+    QSpinBox* getSpeedLimitSpin() const { return m_speedLimitSpin; }
     QCheckBox* getAutoAcceptCheck() const { return m_autoAcceptCheck; }
     QCheckBox* getEncryptCheck() const { return m_encryptCheck; }
     QPushButton* getSaveBtn() const { return m_saveBtn; }
@@ -48,6 +49,7 @@ private:
     SettingsPresenter* m_presenter{nullptr};
 
     QSpinBox* m_portSpin{nullptr};
+    QSpinBox* m_speedLimitSpin{nullptr};
     QSpinBox* m_bufferSpin{nullptr};
     QLineEdit* m_downloadPathEdit{nullptr};
     QPushButton* m_browsePathBtn{nullptr};

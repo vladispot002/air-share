@@ -10,8 +10,22 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QMetaObject>
+#include <QClipboard>
+#include <QApplication>
+#include <QToolTip>
+#include <QStyle>
 
 namespace landrop::ui {
+
+static QString formatBytes(uint64_t bytes) {
+    if (bytes < 1024) return QString::number(bytes) + " B";
+    double kb = static_cast<double>(bytes) / 1024.0;
+    if (kb < 1024.0) return QString("%1 KB").arg(kb, 0, 'f', 1);
+    double mb = kb / 1024.0;
+    if (mb < 1024.0) return QString("%1 MB").arg(mb, 0, 'f', 2);
+    double gb = mb / 1024.0;
+    return QString("%1 GB").arg(gb, 0, 'f', 2);
+}
 
 QtStorageWidget::QtStorageWidget(QWidget* parent)
     : QWidget(parent) {
@@ -43,7 +57,7 @@ void QtStorageWidget::setupUi() {
     auto* topPathRow = new QHBoxLayout();
     m_pathLabel = new QLabel("Active Shared Folder: <b>./shared</b>", pathFrame);
     m_pinStatusLabel = new QLabel("Security: No PIN", pathFrame);
-    m_pinStatusLabel->setStyleSheet("color: #ff9f0a; font-weight: bold; background: rgba(255,159,10,0.15); padding: 3px 8px; border-radius: 4px;");
+    m_pinStatusLabel->setObjectName("badgeWarning");
 
     topPathRow->addWidget(m_pathLabel);
     topPathRow->addStretch();
@@ -51,6 +65,7 @@ void QtStorageWidget::setupUi() {
     pathLayout->addLayout(topPathRow);
 
     auto* actionsRow = new QHBoxLayout();
+    actionsRow->setSpacing(10);
     m_addFolderBtn = new QPushButton("📂 Change Folder...", pathFrame);
     m_addFolderBtn->setObjectName("primaryBtn");
     connect(m_addFolderBtn, &QPushButton::clicked, this, &QtStorageWidget::onAddFolderClicked);
@@ -59,6 +74,7 @@ void QtStorageWidget::setupUi() {
     connect(m_setPinBtn, &QPushButton::clicked, this, &QtStorageWidget::onSetPinClicked);
 
     m_clearPinBtn = new QPushButton("Clear PIN", pathFrame);
+    m_clearPinBtn->setEnabled(false);
     connect(m_clearPinBtn, &QPushButton::clicked, this, &QtStorageWidget::onClearPinClicked);
 
     m_rescanBtn = new QPushButton("↺ Rescan", pathFrame);
@@ -81,13 +97,24 @@ void QtStorageWidget::setupUi() {
     m_fileTable->setHorizontalHeaderLabels(headers);
     m_fileTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_fileTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    m_fileTable->verticalHeader()->setVisible(false);
     m_fileTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_fileTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_fileTable->setAlternatingRowColors(false);
+
+    connect(m_fileTable, &QTableWidget::cellDoubleClicked, this, [this](int row, int /*col*/) {
+        if (row >= 0 && m_fileTable->item(row, 2)) {
+            QString hash = m_fileTable->item(row, 2)->text();
+            QApplication::clipboard()->setText(hash);
+            QToolTip::showText(QCursor::pos(), "Checksum copied to clipboard!", this, QRect(), 2000);
+        }
+    });
+
     mainLayout->addWidget(m_fileTable, 1);
 
     // Stats bar
-    m_statsLabel = new QLabel("Total Storage: 0.0 MB | Shared Files: 0", this);
-    m_statsLabel->setStyleSheet("color: #8e8e93; font-size: 12px;");
+    m_statsLabel = new QLabel("Total Storage: 0 B | Shared Files: 0", this);
+    m_statsLabel->setObjectName("secondaryLabel");
     mainLayout->addWidget(m_statsLabel);
 }
 
@@ -105,10 +132,7 @@ void QtStorageWidget::updateFileList(const std::vector<FileMetadata>& files) {
             int row = static_cast<int>(i);
 
             m_fileTable->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(f.fileName)));
-
-            double sizeMb = static_cast<double>(f.fileSize) / (1024.0 * 1024.0);
-            m_fileTable->setItem(row, 1, new QTableWidgetItem(QString("%1 MB").arg(sizeMb, 0, 'f', 2)));
-
+            m_fileTable->setItem(row, 1, new QTableWidgetItem(formatBytes(f.fileSize)));
             m_fileTable->setItem(row, 2, new QTableWidgetItem(QString::fromStdString(f.fileSha256)));
         }
     }, Qt::QueuedConnection);
@@ -116,8 +140,7 @@ void QtStorageWidget::updateFileList(const std::vector<FileMetadata>& files) {
 
 void QtStorageWidget::setStorageStats(uint64_t totalBytes, size_t fileCount) {
     QMetaObject::invokeMethod(this, [this, totalBytes, fileCount]() {
-        double mb = static_cast<double>(totalBytes) / (1024.0 * 1024.0);
-        m_statsLabel->setText(QString("Total Storage: %1 MB | Shared Files: %2").arg(mb, 0, 'f', 2).arg(fileCount));
+        m_statsLabel->setText(QString("Total Storage: %1 | Shared Files: %2").arg(formatBytes(totalBytes)).arg(fileCount));
     }, Qt::QueuedConnection);
 }
 
@@ -125,11 +148,15 @@ void QtStorageWidget::setPasswordProtectionStatus(bool isProtected) {
     QMetaObject::invokeMethod(this, [this, isProtected]() {
         if (isProtected) {
             m_pinStatusLabel->setText("Security: 🔒 PIN Protected");
-            m_pinStatusLabel->setStyleSheet("color: #30d158; font-weight: bold; background: rgba(48,209,88,0.15); padding: 3px 8px; border-radius: 4px;");
+            m_pinStatusLabel->setObjectName("badgeSuccess");
+            m_clearPinBtn->setEnabled(true);
         } else {
             m_pinStatusLabel->setText("Security: No PIN");
-            m_pinStatusLabel->setStyleSheet("color: #ff9f0a; font-weight: bold; background: rgba(255,159,10,0.15); padding: 3px 8px; border-radius: 4px;");
+            m_pinStatusLabel->setObjectName("badgeWarning");
+            m_clearPinBtn->setEnabled(false);
         }
+        m_pinStatusLabel->style()->unpolish(m_pinStatusLabel);
+        m_pinStatusLabel->style()->polish(m_pinStatusLabel);
     }, Qt::QueuedConnection);
 }
 

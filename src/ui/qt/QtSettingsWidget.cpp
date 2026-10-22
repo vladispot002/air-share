@@ -36,16 +36,23 @@ void QtSettingsWidget::setupUi() {
 
     // Settings Grid
     auto* topLayout = new QHBoxLayout();
+    topLayout->setSpacing(16);
 
     // Group 1: Network & Storage
-    auto* netGroup = new QGroupBox("Network & Storage", this);
+    auto* netGroup = new QGroupBox("Network && Storage", this);
     auto* netForm = new QFormLayout(netGroup);
-    netForm->setContentsMargins(16, 16, 16, 16);
-    netForm->setSpacing(10);
+    netForm->setContentsMargins(16, 20, 16, 16);
+    netForm->setSpacing(12);
 
     m_portSpin = new QSpinBox(netGroup);
     m_portSpin->setRange(1024, 65535);
     m_portSpin->setValue(8848);
+
+    m_speedLimitSpin = new QSpinBox(netGroup);
+    m_speedLimitSpin->setRange(0, 1000000);
+    m_speedLimitSpin->setValue(25000);
+    m_speedLimitSpin->setSuffix(" KB/s");
+    m_speedLimitSpin->setSpecialValueText("Unlimited (0 KB/s)");
 
     m_bufferSpin = new QSpinBox(netGroup);
     m_bufferSpin->setRange(16, 2048);
@@ -53,6 +60,7 @@ void QtSettingsWidget::setupUi() {
     m_bufferSpin->setSuffix(" KB");
 
     auto* pathLayout = new QHBoxLayout();
+    pathLayout->setSpacing(8);
     m_downloadPathEdit = new QLineEdit("./downloads", netGroup);
     m_browsePathBtn = new QPushButton("Browse...", netGroup);
     connect(m_browsePathBtn, &QPushButton::clicked, this, &QtSettingsWidget::onBrowseDownloadPathClicked);
@@ -60,21 +68,24 @@ void QtSettingsWidget::setupUi() {
     pathLayout->addWidget(m_browsePathBtn);
 
     netForm->addRow("Listening Port:", m_portSpin);
+    netForm->addRow("Transfer Speed Limit:", m_speedLimitSpin);
     netForm->addRow("Chunk Buffer Size:", m_bufferSpin);
     netForm->addRow("Downloads Path:", pathLayout);
     topLayout->addWidget(netGroup);
 
     // Group 2: Protocol & Security
-    auto* secGroup = new QGroupBox("Security & Protocols", this);
+    auto* secGroup = new QGroupBox("Security && Protocols", this);
     auto* secLayout = new QVBoxLayout(secGroup);
-    secLayout->setContentsMargins(16, 16, 16, 16);
-    secLayout->setSpacing(10);
+    secLayout->setContentsMargins(16, 20, 16, 16);
+    secLayout->setSpacing(12);
 
     m_autoAcceptCheck = new QCheckBox("Auto-accept transfers from known peers", secGroup);
     m_autoAcceptCheck->setChecked(true);
 
-    m_encryptCheck = new QCheckBox("Enforce SHA-256 integrity verification", secGroup);
+    m_encryptCheck = new QCheckBox("Enforce SHA-256 verification (Required by protocol)", secGroup);
     m_encryptCheck->setChecked(true);
+    m_encryptCheck->setEnabled(false);
+    m_encryptCheck->setToolTip("SHA-256 data integrity verification is mandatory in LAN-Drop.");
 
     m_airdropCheck = new QCheckBox("Enable AirDrop compatibility responder", secGroup);
     m_airdropCheck->setChecked(false);
@@ -107,9 +118,10 @@ void QtSettingsWidget::setupUi() {
     mainLayout->addLayout(saveBar);
 
     // Group 3: Diagnostics Log
-    auto* logGroup = new QGroupBox("Network Activity & Diagnostics Log", this);
+    auto* logGroup = new QGroupBox("Network Activity && Diagnostics Log", this);
     auto* logLayout = new QVBoxLayout(logGroup);
-    logLayout->setContentsMargins(16, 16, 16, 16);
+    logLayout->setContentsMargins(16, 20, 16, 16);
+    logLayout->setSpacing(10);
 
     m_logViewer = new QPlainTextEdit(logGroup);
     m_logViewer->setReadOnly(true);
@@ -117,6 +129,7 @@ void QtSettingsWidget::setupUi() {
     logLayout->addWidget(m_logViewer);
 
     auto* logActions = new QHBoxLayout();
+    logActions->setSpacing(10);
     m_clearLogsBtn = new QPushButton("Clear Log", logGroup);
     connect(m_clearLogsBtn, &QPushButton::clicked, this, &QtSettingsWidget::onClearLogsClicked);
 
@@ -141,9 +154,10 @@ void QtSettingsWidget::setupUi() {
     mainLayout->addWidget(logGroup, 1);
 }
 
-void QtSettingsWidget::loadSettings(uint16_t port, uint32_t /*speedLimitKbps*/, bool autoAccept, bool airdropEnabled) {
-    QMetaObject::invokeMethod(this, [this, port, autoAccept, airdropEnabled]() {
+void QtSettingsWidget::loadSettings(uint16_t port, uint32_t speedLimitKbps, bool autoAccept, bool airdropEnabled) {
+    QMetaObject::invokeMethod(this, [this, port, speedLimitKbps, autoAccept, airdropEnabled]() {
         m_portSpin->setValue(port);
+        m_speedLimitSpin->setValue(static_cast<int>(speedLimitKbps));
         m_autoAcceptCheck->setChecked(autoAccept);
         m_airdropCheck->setChecked(airdropEnabled);
     }, Qt::QueuedConnection);
@@ -165,6 +179,7 @@ void QtSettingsWidget::showSaveSuccess() {
 void QtSettingsWidget::onSaveClicked() {
     if (m_presenter) {
         m_presenter->onPortChanged(static_cast<uint16_t>(m_portSpin->value()));
+        m_presenter->onSpeedLimitChanged(static_cast<uint32_t>(m_speedLimitSpin->value()));
         m_presenter->onAutoAcceptToggled(m_autoAcceptCheck->isChecked());
         m_presenter->onAirDropToggled(m_airdropCheck->isChecked());
         m_presenter->onSaveSettingsClicked();

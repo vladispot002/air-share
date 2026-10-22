@@ -29,10 +29,11 @@ void QtDesktopApp::initialize() {
 
 void QtDesktopApp::setupUi() {
     setWindowTitle("LAN-Drop (Qt 6)");
-    setMinimumSize(960, 640);
-    resize(1080, 720);
+    setMinimumSize(800, 540);
+    resize(1080, 700);
 
     auto* central = new QWidget(this);
+    central->setObjectName("central");
     auto* mainLayout = new QHBoxLayout(central);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
@@ -124,16 +125,23 @@ void QtDesktopApp::onNavigationItemChanged(int row) {
 
 void QtDesktopApp::applyTheme(const QString& themeName) {
     QString normTheme = themeName.toLower();
-    QFile qssFile("resources/styles.qss");
-    if (!qssFile.exists()) {
-        qssFile.setFileName("../resources/styles.qss");
-    }
+    QStringList candidates = {
+        "resources/styles.qss",
+        "../resources/styles.qss",
+        QCoreApplication::applicationDirPath() + "/resources/styles.qss",
+        QCoreApplication::applicationDirPath() + "/../resources/styles.qss",
+        "/home/vladis/lan-drop/resources/styles.qss"
+    };
 
     QString fullQss;
-    if (qssFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        QTextStream stream(&qssFile);
-        fullQss = stream.readAll();
-        qssFile.close();
+    for (const auto& path : candidates) {
+        QFile qssFile(path);
+        if (qssFile.exists() && qssFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream stream(&qssFile);
+            fullQss = stream.readAll();
+            qssFile.close();
+            break;
+        }
     }
 
     QString themeClass = (normTheme == "light") ? "light-theme" : "dark-theme";
@@ -141,14 +149,17 @@ void QtDesktopApp::applyTheme(const QString& themeName) {
     if (centralWidget()) {
         centralWidget()->setProperty("class", themeClass);
     }
+    if (m_stackedWidget) {
+        m_stackedWidget->setProperty("class", themeClass);
+    }
 
     if (!fullQss.isEmpty()) {
         qApp->setStyleSheet(fullQss);
     } else {
         if (normTheme == "light") {
-            setStyleSheet("background: #f5f5f7; color: #1c1c1e;");
+            setStyleSheet("background: #f6f7fb; color: #1c1c1e;");
         } else {
-            setStyleSheet("background: #1c1c1e; color: #ffffff;");
+            setStyleSheet("background: #1e1e24; color: #f3f3f5;");
         }
     }
 
@@ -159,6 +170,5 @@ void QtDesktopApp::applyTheme(const QString& themeName) {
         centralWidget()->style()->polish(centralWidget());
     }
 }
-
 
 }

@@ -9,8 +9,20 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QMetaObject>
+#include <QDir>
+#include <algorithm>
 
 namespace landrop::ui {
+
+static QString formatBytes(uint64_t bytes) {
+    if (bytes < 1024) return QString::number(bytes) + " B";
+    double kb = static_cast<double>(bytes) / 1024.0;
+    if (kb < 1024.0) return QString("%1 KB").arg(kb, 0, 'f', 1);
+    double mb = kb / 1024.0;
+    if (mb < 1024.0) return QString("%1 MB").arg(mb, 0, 'f', 2);
+    double gb = mb / 1024.0;
+    return QString("%1 GB").arg(gb, 0, 'f', 2);
+}
 
 QtTransferWidget::QtTransferWidget(QWidget* parent)
     : QWidget(parent) {
@@ -35,7 +47,7 @@ void QtTransferWidget::setupUi() {
     titleLabel->setFont(titleFont);
 
     m_speedSummaryLabel = new QLabel("Active: 0 | Total: 0.0 MB/s", this);
-    m_speedSummaryLabel->setStyleSheet("color: #8e8e93; font-size: 12px; font-weight: 500;");
+    m_speedSummaryLabel->setObjectName("secondaryLabel");
 
     headerLayout->addWidget(titleLabel);
     headerLayout->addStretch();
@@ -44,18 +56,22 @@ void QtTransferWidget::setupUi() {
 
     // Actions bar
     auto* actionsLayout = new QHBoxLayout();
+    actionsLayout->setSpacing(10);
     m_sendFileBtn = new QPushButton("⬆ Send File...", this);
     m_sendFileBtn->setObjectName("primaryBtn");
     connect(m_sendFileBtn, &QPushButton::clicked, this, &QtTransferWidget::onSendFileClicked);
 
     m_pauseBtn = new QPushButton("⏸ Pause", this);
+    m_pauseBtn->setEnabled(false);
     connect(m_pauseBtn, &QPushButton::clicked, this, &QtTransferWidget::onPauseClicked);
 
     m_resumeBtn = new QPushButton("▶ Resume", this);
+    m_resumeBtn->setEnabled(false);
     connect(m_resumeBtn, &QPushButton::clicked, this, &QtTransferWidget::onResumeClicked);
 
     m_cancelBtn = new QPushButton("⏹ Cancel", this);
     m_cancelBtn->setObjectName("dangerBtn");
+    m_cancelBtn->setEnabled(false);
     connect(m_cancelBtn, &QPushButton::clicked, this, &QtTransferWidget::onCancelClicked);
 
     m_clearBtn = new QPushButton("Clear Finished", this);
@@ -81,6 +97,7 @@ void QtTransferWidget::setupUi() {
     m_table->setHorizontalHeaderLabels(headers);
     m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     m_table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    m_table->verticalHeader()->setVisible(false);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -91,8 +108,44 @@ void QtTransferWidget::setupUi() {
 
     // Details label
     m_detailsLabel = new QLabel("Select a transfer to view details and chunk verification metrics.", this);
-    m_detailsLabel->setStyleSheet("color: #8e8e93; font-size: 12px; padding: 6px; background: rgba(128,128,128,0.1); border-radius: 6px;");
+    m_detailsLabel->setObjectName("card");
     mainLayout->addWidget(m_detailsLabel);
+}
+
+void QtTransferWidget::updateActionButtons() {
+    if (m_selectedTaskId.empty()) {
+        m_pauseBtn->setEnabled(false);
+        m_resumeBtn->setEnabled(false);
+        m_cancelBtn->setEnabled(false);
+        return;
+    }
+
+    auto it = std::find_if(m_currentTransfers.begin(), m_currentTransfers.end(), [this](const TransferViewModel& item) {
+        return item.taskId == m_selectedTaskId;
+    });
+
+    if (it == m_currentTransfers.end()) {
+        m_pauseBtn->setEnabled(false);
+        m_resumeBtn->setEnabled(false);
+        m_cancelBtn->setEnabled(false);
+        return;
+    }
+
+    const std::string& st = it->stateStr;
+    if (st == "Transferring" || st == "Connecting") {
+        m_pauseBtn->setEnabled(true);
+        m_resumeBtn->setEnabled(false);
+        m_cancelBtn->setEnabled(true);
+    } else if (st == "Paused") {
+        m_pauseBtn->setEnabled(false);
+        m_resumeBtn->setEnabled(true);
+        m_cancelBtn->setEnabled(true);
+    } else {
+        // Completed, Failed, Cancelled
+        m_pauseBtn->setEnabled(false);
+        m_resumeBtn->setEnabled(false);
+        m_cancelBtn->setEnabled(false);
+    }
 }
 
 void QtTransferWidget::updateTransferTable(const std::vector<TransferViewModel>& transfers) {
@@ -109,17 +162,17 @@ void QtTransferWidget::updateTransferTable(const std::vector<TransferViewModel>&
 
             m_table->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(t.taskId)));
             m_table->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(t.fileName)));
-            m_table->setItem(row, 2, new QTableWidgetItem(QString::fromStdString(t.direction)));
 
-            double sizeMb = static_cast<double>(t.fileSize) / (1024.0 * 1024.0);
-            m_table->setItem(row, 3, new QTableWidgetItem(QString("%1 MB").arg(sizeMb, 0, 'f', 2)));
+            QString dirText = (t.direction == "Upload") ? "⬆ Upload" : "⬇ Download";
+            m_table->setItem(row, 2, new QTableWidgetItem(dirText));
+            m_table->setItem(row, 3, new QTableWidgetItem(formatBytes(t.fileSize)));
 
             // Progress bar
             auto* pBar = new QProgressBar();
             pBar->setRange(0, 100);
             pBar->setValue(static_cast<int>(t.progress));
             pBar->setFormat(QString("%1%").arg(t.progress, 0, 'f', 1));
-            pBar->setFixedHeight(20);
+            pBar->setFixedHeight(18);
             m_table->setCellWidget(row, 4, pBar);
 
             double speedMb = t.speedBytesPerSec / (1024.0 * 1024.0);
@@ -127,30 +180,38 @@ void QtTransferWidget::updateTransferTable(const std::vector<TransferViewModel>&
             m_table->setItem(row, 6, new QTableWidgetItem(QString::fromStdString(t.stateStr)));
 
             totalSpeed += speedMb;
-            if (t.stateStr == "Running" || t.stateStr == "Active") {
+            if (t.stateStr == "Transferring" || t.stateStr == "Connecting" || t.stateStr == "Running" || t.stateStr == "Active") {
                 activeCount++;
             }
         }
 
         m_speedSummaryLabel->setText(QString("Active: %1 | Total Speed: %2 MB/s").arg(activeCount).arg(totalSpeed, 0, 'f', 2));
+
+        if (transfers.empty()) {
+            m_detailsLabel->setText("No active or completed transfers. Select a device on the Radar tab to send files.");
+            m_clearBtn->setEnabled(false);
+        } else {
+            m_clearBtn->setEnabled(true);
+        }
+
+        updateActionButtons();
     }, Qt::QueuedConnection);
 }
 
 void QtTransferWidget::updateSelectedTransferDetails(const TransferViewModel& item) {
     QMetaObject::invokeMethod(this, [this, item]() {
-        double transferredMb = static_cast<double>(item.bytesTransferred) / (1024.0 * 1024.0);
-        double totalMb = static_cast<double>(item.fileSize) / (1024.0 * 1024.0);
         double speedMb = item.speedBytesPerSec / (1024.0 * 1024.0);
 
-        QString detail = QString("<b>Task:</b> %1 &nbsp;|&nbsp; <b>File:</b> %2 &nbsp;|&nbsp; <b>Transferred:</b> %3 / %4 MB (%5%) &nbsp;|&nbsp; <b>Speed:</b> %6 MB/s &nbsp;|&nbsp; <b>State:</b> %7")
+        QString detail = QString("<b>Task:</b> %1 &nbsp;•&nbsp; <b>File:</b> %2 &nbsp;•&nbsp; <b>Transferred:</b> %3 / %4 (%5%) &nbsp;•&nbsp; <b>Speed:</b> %6 MB/s &nbsp;•&nbsp; <b>State:</b> %7")
             .arg(QString::fromStdString(item.taskId))
             .arg(QString::fromStdString(item.fileName))
-            .arg(transferredMb, 0, 'f', 2)
-            .arg(totalMb, 0, 'f', 2)
+            .arg(formatBytes(item.bytesTransferred))
+            .arg(formatBytes(item.fileSize))
             .arg(item.progress, 0, 'f', 1)
             .arg(speedMb, 0, 'f', 2)
             .arg(QString::fromStdString(item.stateStr));
         m_detailsLabel->setText(detail);
+        updateActionButtons();
     }, Qt::QueuedConnection);
 }
 
@@ -190,11 +251,13 @@ void QtTransferWidget::onCancelClicked() {
 void QtTransferWidget::onClearClicked() {
     if (m_presenter) {
         m_presenter->onClearHistoryClicked();
+        m_selectedTaskId.clear();
+        updateActionButtons();
     }
 }
 
 void QtTransferWidget::onSendFileClicked() {
-    QString filePath = QFileDialog::getOpenFileName(this, "Select File to Send");
+    QString filePath = QFileDialog::getOpenFileName(this, "Select File to Send via LAN-Drop");
     if (filePath.isEmpty()) return;
 
     if (m_presenter) {
@@ -211,6 +274,7 @@ void QtTransferWidget::onOpenFolderClicked() {
 void QtTransferWidget::onTableRowSelected(int row, int /*column*/) {
     if (row < 0 || row >= static_cast<int>(m_currentTransfers.size())) return;
     m_selectedTaskId = m_currentTransfers[static_cast<size_t>(row)].taskId;
+    updateActionButtons();
     if (m_presenter) {
         m_presenter->onSelectTransferRow(static_cast<size_t>(row));
     }

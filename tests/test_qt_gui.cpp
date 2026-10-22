@@ -6,6 +6,8 @@
 #include <QPushButton>
 #include <QComboBox>
 #include <QSpinBox>
+#include <QMessageBox>
+#include <QTimer>
 
 #include "landrop/ui/qt/QtDesktopApp.hpp"
 #include "landrop/ui/qt/QtDiscoveryWidget.hpp"
@@ -24,6 +26,10 @@ private slots:
     void testButtonsAndDeviceDiscovery();
     void testThemeSwitching();
     void testInterWidgetSignals();
+    void testTransferButtonStatesAndActiveCount();
+    void testStoragePinStateAndFormat();
+    void testSettingsSpeedLimitAndAmpersands();
+    void testWindowResizeResponsiveness();
 };
 
 void TestQtGui::testAppInitialization() {
@@ -176,6 +182,121 @@ void TestQtGui::testInterWidgetSignals() {
 
     // Must automatically navigate to Transfers tab (index 1)
     QCOMPARE(stacked->currentIndex(), 1);
+}
+
+void TestQtGui::testTransferButtonStatesAndActiveCount() {
+    QtDesktopApp app;
+    app.initialize();
+
+    auto* transfer = app.getTransferWidget();
+    QVERIFY(transfer != nullptr);
+    QCoreApplication::processEvents();
+
+    // Verify active count: 3 items in default sample data are Transferring (T-0042, T-0039, T-0037)
+    QLabel* speedSummary = transfer->getSpeedSummaryLabel();
+    QVERIFY(speedSummary != nullptr);
+    QVERIFY(speedSummary->text().contains("Active: 3"));
+
+    // Action buttons must be initially disabled before any row is selected
+    QPushButton* pauseBtn = transfer->getPauseBtn();
+    QPushButton* resumeBtn = transfer->getResumeBtn();
+    QPushButton* cancelBtn = transfer->getCancelBtn();
+    QVERIFY(pauseBtn != nullptr && !pauseBtn->isEnabled());
+    QVERIFY(resumeBtn != nullptr && !resumeBtn->isEnabled());
+    QVERIFY(cancelBtn != nullptr && !cancelBtn->isEnabled());
+
+    // Select row 0 (T-0042: state = Transferring)
+    QTableWidget* table = transfer->getTable();
+    QVERIFY(table != nullptr);
+    table->selectRow(0);
+    emit table->cellClicked(0, 0);
+    QCoreApplication::processEvents();
+
+    QVERIFY(pauseBtn->isEnabled());
+    QVERIFY(!resumeBtn->isEnabled());
+    QVERIFY(cancelBtn->isEnabled());
+
+    // Select row 1 (T-0041: state = Completed)
+    table->selectRow(1);
+    emit table->cellClicked(1, 0);
+    QCoreApplication::processEvents();
+
+    QVERIFY(!pauseBtn->isEnabled());
+    QVERIFY(!resumeBtn->isEnabled());
+    QVERIFY(!cancelBtn->isEnabled());
+}
+
+void TestQtGui::testStoragePinStateAndFormat() {
+    QtDesktopApp app;
+    app.initialize();
+
+    auto* storage = app.getStorageWidget();
+    QVERIFY(storage != nullptr);
+    QCoreApplication::processEvents();
+
+    // Clear PIN button must be initially disabled when no PIN is set
+    QPushButton* clearBtn = storage->getClearPinBtn();
+    QVERIFY(clearBtn != nullptr);
+    QVERIFY(!clearBtn->isEnabled());
+
+    // Simulate password protection enabled
+    storage->setPasswordProtectionStatus(true);
+    QCoreApplication::processEvents();
+    QVERIFY(clearBtn->isEnabled());
+
+    // Simulate password protection cleared
+    storage->setPasswordProtectionStatus(false);
+    QCoreApplication::processEvents();
+    QVERIFY(!clearBtn->isEnabled());
+}
+
+void TestQtGui::testSettingsSpeedLimitAndAmpersands() {
+    QtDesktopApp app;
+    app.initialize();
+
+    auto* settings = app.getSettingsWidget();
+    QVERIFY(settings != nullptr);
+    QCoreApplication::processEvents();
+
+    // Speed limit spinbox must exist and have non-negative value
+    QSpinBox* speedSpin = settings->getSpeedLimitSpin();
+    QVERIFY(speedSpin != nullptr);
+    QVERIFY(speedSpin->value() >= 0);
+
+    // Update speed limit and save
+    uint32_t targetVal = (speedSpin->value() == 45000) ? 75000 : 45000;
+    speedSpin->setValue(static_cast<int>(targetVal));
+    QTimer::singleShot(50, []() {
+        for (QWidget* w : QApplication::topLevelWidgets()) {
+            if (auto* mb = qobject_cast<QMessageBox*>(w)) {
+                mb->accept();
+            }
+        }
+    });
+    QTest::mouseClick(settings->getSaveBtn(), Qt::LeftButton);
+    QCoreApplication::processEvents();
+
+    auto* presenter = app.getSettingsPresenter();
+    QVERIFY(presenter != nullptr);
+    QCOMPARE(presenter->getSpeedLimitKbps(), targetVal);
+}
+
+void TestQtGui::testWindowResizeResponsiveness() {
+    QtDesktopApp app;
+    app.initialize();
+    app.show();
+
+    // Minimum portable resolution
+    app.resize(800, 540);
+    QCoreApplication::processEvents();
+    QVERIFY(app.width() >= 800);
+    QVERIFY(app.height() >= 540);
+
+    // Full HD resolution
+    app.resize(1920, 1080);
+    QCoreApplication::processEvents();
+    QCOMPARE(app.width(), 1920);
+    QCOMPARE(app.height(), 1080);
 }
 
 int main(int argc, char* argv[]) {

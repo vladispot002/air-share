@@ -27,6 +27,13 @@ public:
 
     void initiateSendFile(const std::string& targetPeerId, const std::string& filePath);
 
+    QPushButton* getPauseBtn() const { return m_pauseBtn; }
+    QPushButton* getResumeBtn() const { return m_resumeBtn; }
+    QPushButton* getCancelBtn() const { return m_cancelBtn; }
+    QPushButton* getClearBtn() const { return m_clearBtn; }
+    QLabel* getSpeedSummaryLabel() const { return m_speedSummaryLabel; }
+    QTableWidget* getTable() const { return m_table; }
+
 private slots:
     void onPauseClicked();
     void onResumeClicked();
@@ -53,6 +60,7 @@ private:
     std::string m_selectedTaskId;
 
     void setupUi();
+    void updateActionButtons();
 };
 
 }
