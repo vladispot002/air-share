@@ -22,7 +22,16 @@ public:
 
     void setPresenter(DiscoveryPresenter* presenter);
 
+    static bool validateDirectConnectInput(const QString& ip, int port, QString* outError = nullptr);
+
+    QPushButton* getScanToggleBtn() const { return m_scanToggleBtn; }
+    QPushButton* getRefreshBtn() const { return m_refreshBtn; }
+    QPushButton* getDirectConnectBtn() const { return m_directConnectBtn; }
+    QPushButton* getLoopbackBtn() const { return m_loopbackBtn; }
+    QLabel* getStatusLabel() const { return m_statusLabel; }
+
     // IDiscoveryView overrides
+
     void updateDeviceList(const std::vector<DeviceViewModel>& devices) override;
     void setScanningStatus(bool isScanning) override;
     void showNfcPairResult(bool success, const std::string& message) override;

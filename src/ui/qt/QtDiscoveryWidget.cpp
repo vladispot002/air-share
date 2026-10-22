@@ -6,8 +6,10 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QScrollArea>
+#include <QHostAddress>
 
 namespace landrop::ui {
+
 
 QtDiscoveryWidget::QtDiscoveryWidget(QWidget* parent)
     : QWidget(parent) {
@@ -140,9 +142,12 @@ void QtDiscoveryWidget::showNfcPairResult(bool success, const std::string& messa
 
 void QtDiscoveryWidget::showNotification(const std::string& text) {
     QMetaObject::invokeMethod(this, [this, text]() {
-        QMessageBox::information(this, "LAN-Drop Notification", QString::fromStdString(text));
+        if (m_statusLabel) {
+            m_statusLabel->setText(QString::fromStdString(text));
+        }
     }, Qt::QueuedConnection);
 }
+
 
 void QtDiscoveryWidget::renderEmptyState() {
     // Clear existing widgets
@@ -279,6 +284,27 @@ void QtDiscoveryWidget::onToggleScanClicked() {
     }
 }
 
+bool QtDiscoveryWidget::validateDirectConnectInput(const QString& ip, int port, QString* outError) {
+    QString trimmed = ip.trimmed();
+    if (trimmed.isEmpty()) {
+        if (outError) *outError = "IP address cannot be empty.";
+        return false;
+    }
+
+    QHostAddress addr;
+    if (!addr.setAddress(trimmed)) {
+        if (outError) *outError = "Invalid IP address format: " + trimmed;
+        return false;
+    }
+
+    if (port <= 0 || port > 65535) {
+        if (outError) *outError = "Port must be in range 1-65535: " + QString::number(port);
+        return false;
+    }
+
+    return true;
+}
+
 void QtDiscoveryWidget::onDirectConnectClicked() {
     bool ok = false;
     QString ip = QInputDialog::getText(this, "Direct Connect", "Enter Target IP Address:", QLineEdit::Normal, "192.168.1.100", &ok);
@@ -287,10 +313,17 @@ void QtDiscoveryWidget::onDirectConnectClicked() {
     int port = QInputDialog::getInt(this, "Direct Connect", "Enter Port:", 8848, 1, 65535, 1, &ok);
     if (!ok) return;
 
+    QString errorMsg;
+    if (!validateDirectConnectInput(ip, port, &errorMsg)) {
+        QMessageBox::warning(this, "Direct Connect Error", errorMsg);
+        return;
+    }
+
     if (m_presenter) {
-        m_presenter->onDirectConnectRequested(ip.toStdString(), static_cast<uint16_t>(port));
+        m_presenter->onDirectConnectRequested(ip.trimmed().toStdString(), static_cast<uint16_t>(port));
     }
 }
+
 
 void QtDiscoveryWidget::onAddLoopbackClicked() {
     if (m_presenter) {

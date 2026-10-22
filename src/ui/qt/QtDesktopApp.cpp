@@ -22,6 +22,11 @@ QtDesktopApp::QtDesktopApp(QWidget* parent)
 
 QtDesktopApp::~QtDesktopApp() = default;
 
+void QtDesktopApp::initialize() {
+    // Presenters and UI initialized in constructor
+}
+
+
 void QtDesktopApp::setupUi() {
     setWindowTitle("LAN-Drop (Qt 6)");
     setMinimumSize(960, 640);
@@ -118,27 +123,42 @@ void QtDesktopApp::onNavigationItemChanged(int row) {
 }
 
 void QtDesktopApp::applyTheme(const QString& themeName) {
+    QString normTheme = themeName.toLower();
     QFile qssFile("resources/styles.qss");
     if (!qssFile.exists()) {
-        // Fallback search relative to binary
         qssFile.setFileName("../resources/styles.qss");
     }
 
+    QString fullQss;
     if (qssFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
         QTextStream stream(&qssFile);
-        QString fullQss = stream.readAll();
+        fullQss = stream.readAll();
         qssFile.close();
+    }
 
-        QString themeClass = (themeName == "light") ? "light-theme" : "dark-theme";
-        setProperty("class", themeClass);
+    QString themeClass = (normTheme == "light") ? "light-theme" : "dark-theme";
+    setProperty("class", themeClass);
+    if (centralWidget()) {
         centralWidget()->setProperty("class", themeClass);
+    }
 
+    if (!fullQss.isEmpty()) {
         qApp->setStyleSheet(fullQss);
-        style()->unpolish(this);
-        style()->polish(this);
+    } else {
+        if (normTheme == "light") {
+            setStyleSheet("background: #f5f5f7; color: #1c1c1e;");
+        } else {
+            setStyleSheet("background: #1c1c1e; color: #ffffff;");
+        }
+    }
+
+    style()->unpolish(this);
+    style()->polish(this);
+    if (centralWidget()) {
         centralWidget()->style()->unpolish(centralWidget());
         centralWidget()->style()->polish(centralWidget());
     }
 }
+
 
 }

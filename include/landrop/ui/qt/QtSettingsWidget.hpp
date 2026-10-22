@@ -22,7 +22,15 @@ public:
 
     void setPresenter(SettingsPresenter* presenter);
 
+    QComboBox* getThemeCombo() const { return m_themeCombo; }
+    QSpinBox* getPortSpin() const { return m_portSpin; }
+    QCheckBox* getAutoAcceptCheck() const { return m_autoAcceptCheck; }
+    QCheckBox* getEncryptCheck() const { return m_encryptCheck; }
+    QPushButton* getSaveBtn() const { return m_saveBtn; }
+    QPlainTextEdit* getLogViewer() const { return m_logViewer; }
+
     // ISettingsView overrides
+
     void loadSettings(uint16_t port, uint32_t speedLimitKbps, bool autoAccept, bool airdropEnabled) override;
     void appendDiagnosticLog(const std::string& logLine) override;
     void showSaveSuccess() override;

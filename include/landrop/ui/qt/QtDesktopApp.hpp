@@ -26,7 +26,17 @@ public:
 
     void initialize();
 
+    QListWidget* getSidebar() const { return m_sidebar; }
+    QStackedWidget* getStackedWidget() const { return m_stackedWidget; }
+    QtDiscoveryWidget* getDiscoveryWidget() const { return m_discoveryWidget; }
+    QtTransferWidget* getTransferWidget() const { return m_transferWidget; }
+    QtStorageWidget* getStorageWidget() const { return m_storageWidget; }
+    QtSettingsWidget* getSettingsWidget() const { return m_settingsWidget; }
+    DiscoveryPresenter* getDiscoveryPresenter() const { return m_discoveryPresenter.get(); }
+    SettingsPresenter* getSettingsPresenter() const { return m_settingsPresenter.get(); }
+
 public slots:
+
     void applyTheme(const QString& themeName);
 
 private slots:

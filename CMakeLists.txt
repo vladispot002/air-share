@@ -43,7 +43,7 @@ target_link_libraries(landrop_core PUBLIC pthread ${SSL_LIB} ${CRYPTO_LIB})
 
 
 # Find Qt 6
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent Test)
 
 # Qt 6 UI Sources & Headers
 set(LANDROP_QT_HEADERS
@@ -110,3 +110,22 @@ target_link_libraries(lan_drop_tests PRIVATE
     pthread
 )
 add_test(NAME ComprehensiveTests COMMAND lan_drop_tests)
+
+# Automated Qt 6 GUI Tests Target (Runs headless via offscreen platform)
+add_executable(lan_drop_gui_tests
+    tests/test_qt_gui.cpp
+    ${LANDROP_QT_SOURCES}
+    ${LANDROP_QT_HEADERS}
+)
+target_compile_definitions(lan_drop_gui_tests PRIVATE LANDROP_BUILD_QT)
+target_compile_options(lan_drop_gui_tests PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(lan_drop_gui_tests PRIVATE
+    landrop_core
+    Qt6::Widgets
+    Qt6::Test
+    Qt6::Network
+    Qt6::Concurrent
+    pthread
+)
+add_test(NAME QtGuiTests COMMAND lan_drop_gui_tests)
+
