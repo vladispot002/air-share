@@ -707,14 +707,17 @@ static bool testJsonAndRestSerialization() {
     TEST_ASSERT(!defaultPath.empty(), "Default config path is resolved");
     TEST_ASSERT(defaultPath.find("settings.json") != std::string::npos, "Config path ends with settings.json");
 
-    std::string testConfigDir = "/tmp/landrop_test_cfg_dir/nested_profile";
-    std::string testConfigFile = testConfigDir + "/test_settings.json";
+    std::filesystem::path tempBase = std::filesystem::temp_directory_path() / "landrop_test_cfg_dir";
     std::error_code ec;
-    std::filesystem::remove_all("/tmp/landrop_test_cfg_dir", ec);
+    std::filesystem::remove_all(tempBase, ec);
+
+    std::filesystem::path testConfigDir = tempBase / "nested_profile";
+    std::filesystem::path testConfigFile = testConfigDir / "test_settings.json";
+    std::string testConfigFilePath = testConfigFile.string();
 
     // 6. First launch test on non-existent file
     ui::SettingsPresenter firstLaunchPresenter(nullptr);
-    firstLaunchPresenter.setConfigPath(testConfigFile);
+    firstLaunchPresenter.setConfigPath(testConfigFilePath);
     bool firstLoad = firstLaunchPresenter.loadSettings();
     TEST_ASSERT(!firstLoad, "First launch correctly reports no config file");
     TEST_ASSERT(firstLaunchPresenter.getPort() == 8848, "First launch keeps default port 8848");
@@ -730,7 +733,7 @@ static bool testJsonAndRestSerialization() {
 
     // 8. Reload from file
     ui::SettingsPresenter reloadedPresenter(nullptr);
-    reloadedPresenter.setConfigPath(testConfigFile);
+    reloadedPresenter.setConfigPath(testConfigFilePath);
     bool reloadOk = reloadedPresenter.loadSettings();
     TEST_ASSERT(reloadOk, "Settings successfully reloaded from disk");
     TEST_ASSERT(reloadedPresenter.getPort() == 7788, "Reloaded port is 7788");
@@ -744,18 +747,27 @@ static bool testJsonAndRestSerialization() {
         corruptOut << "{ \"port\": \"not_a_number\", malformed json syntax";
     }
     ui::SettingsPresenter corruptPresenter(nullptr);
-    corruptPresenter.setConfigPath(testConfigFile);
+    corruptPresenter.setConfigPath(testConfigFilePath);
     bool corruptLoad = corruptPresenter.loadSettings();
     TEST_ASSERT(!corruptLoad, "Malformed JSON safely rejected");
     TEST_ASSERT(corruptPresenter.getPort() == 8848, "Presenter maintains safe defaults upon corrupt JSON");
 
     // 10. Unwritable path error handling
+    // Create a regular file so that attempting to create directories or files inside it fails
+    // deterministically on both POSIX (ENOTDIR) and Windows (ERROR_DIRECTORY / ERROR_PATH_NOT_FOUND).
+    std::filesystem::path blockerFile = tempBase / "blocker.txt";
+    {
+        std::ofstream blockerOut(blockerFile);
+        blockerOut << "regular_file_blocking_subdirectories";
+    }
+    std::filesystem::path unwritablePath = blockerFile / "impossible_sub_dir" / "settings.json";
+
     ui::SettingsPresenter unwritablePresenter(nullptr);
-    unwritablePresenter.setConfigPath("/dev/null/impossible/settings.json");
+    unwritablePresenter.setConfigPath(unwritablePath.string());
     bool unwriteOk = unwritablePresenter.saveSettings();
     TEST_ASSERT(!unwriteOk, "Unwritable path safely reports failure without throwing");
 
-    std::filesystem::remove_all("/tmp/landrop_test_cfg_dir", ec);
+    std::filesystem::remove_all(tempBase, ec);
 
     return true;
 }

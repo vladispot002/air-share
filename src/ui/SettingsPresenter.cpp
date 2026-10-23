@@ -203,32 +203,40 @@ std::string SettingsPresenter::saveToJson() const {
 }
 
 bool SettingsPresenter::loadSettingsFromFile(const std::string& filePath) {
-    std::error_code ec;
-    if (!std::filesystem::exists(filePath, ec)) {
+    try {
+        std::error_code ec;
+        if (!std::filesystem::exists(filePath, ec)) {
+            return false;
+        }
+
+        std::ifstream file(filePath);
+        if (!file.is_open()) return false;
+        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        return loadFromJson(content);
+    } catch (...) {
         return false;
     }
-
-    std::ifstream file(filePath);
-    if (!file.is_open()) return false;
-    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    return loadFromJson(content);
 }
 
 bool SettingsPresenter::saveSettingsToFile(const std::string& filePath) const {
-    std::error_code ec;
-    std::filesystem::path p(filePath);
-    if (p.has_parent_path()) {
-        std::filesystem::create_directories(p.parent_path(), ec);
-        if (ec) {
-            return false;
+    try {
+        std::error_code ec;
+        std::filesystem::path p(filePath);
+        if (p.has_parent_path()) {
+            std::filesystem::create_directories(p.parent_path(), ec);
+            if (ec) {
+                return false;
+            }
         }
-    }
 
-    std::ofstream file(filePath);
-    if (!file.is_open()) return false;
-    file << saveToJson();
-    file.flush();
-    return file.good();
+        std::ofstream file(filePath);
+        if (!file.is_open()) return false;
+        file << saveToJson();
+        file.flush();
+        return file.good();
+    } catch (...) {
+        return false;
+    }
 }
 
 }
