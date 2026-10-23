@@ -52,7 +52,7 @@ bool MulticastBeacon::start() {
     }
 
     m_listenSocketFd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (m_listenSocketFd < 0) {
+    if (!isValidSocket(m_listenSocketFd)) {
         return false;
     }
 
@@ -68,7 +68,7 @@ bool MulticastBeacon::start() {
 
     if (bind(m_listenSocketFd, reinterpret_cast<struct sockaddr*>(&bindAddr), sizeof(bindAddr)) != 0) {
         closeSocket(m_listenSocketFd);
-        m_listenSocketFd = -1;
+        m_listenSocketFd = INVALID_SOCKET_VALUE;
         return false;
     }
 
@@ -90,7 +90,7 @@ bool MulticastBeacon::start() {
             FD_ZERO(&readFds);
             FD_SET(m_listenSocketFd, &readFds);
             struct timeval tv{0, 200000}; // 200ms
-            int ret = select(m_listenSocketFd + 1, &readFds, nullptr, nullptr, &tv);
+            int ret = select(static_cast<int>(m_listenSocketFd + 1), &readFds, nullptr, nullptr, &tv);
             if (ret > 0 && FD_ISSET(m_listenSocketFd, &readFds)) {
                 struct sockaddr_in senderAddr{};
                 socklen_t addrLen = sizeof(senderAddr);
@@ -132,9 +132,9 @@ void MulticastBeacon::stop() {
     if (m_listenerThread.joinable()) {
         m_listenerThread.join();
     }
-    if (m_listenSocketFd >= 0) {
+    if (isValidSocket(m_listenSocketFd)) {
         closeSocket(m_listenSocketFd);
-        m_listenSocketFd = -1;
+        m_listenSocketFd = INVALID_SOCKET_VALUE;
     }
 }
 
@@ -144,8 +144,8 @@ bool MulticastBeacon::broadcastAnnouncement() {
     }
     ++m_beaconsSent;
 
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
+    socket_handle_t sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (!isValidSocket(sock)) {
         return false;
     }
 

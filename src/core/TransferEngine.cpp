@@ -348,13 +348,13 @@ bool TransferEngine::receiveFileOnce(
     }
 
     // Wait for connection with cancel support
-    int listenFd = session->getListenFd();
+    socket_handle_t listenFd = session->getListenFd();
     while (!cancelFlag || !cancelFlag->load()) {
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(listenFd, &fds);
         timeval tv{0, 200000}; // 200 ms
-        int ret = select(listenFd + 1, &fds, nullptr, nullptr, &tv);
+        int ret = select(static_cast<int>(listenFd + 1), &fds, nullptr, nullptr, &tv);
         if (ret > 0 && FD_ISSET(listenFd, &fds)) {
             break;
         }
@@ -700,20 +700,20 @@ void TransferEngine::serverLoop(
 ) {
     while (m_serverRunning.load()) {
         if (!m_listenSession) break;
-        int listenFd = m_listenSession->getListenFd();
-        if (listenFd < 0) break;
+        socket_handle_t listenFd = m_listenSession->getListenFd();
+        if (!isValidSocket(listenFd)) break;
 
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(listenFd, &fds);
         timeval tv{0, 250000}; // 250 ms timeout for responsiveness
 
-        int ret = select(listenFd + 1, &fds, nullptr, nullptr, &tv);
+        int ret = select(static_cast<int>(listenFd + 1), &fds, nullptr, nullptr, &tv);
         if (ret > 0 && FD_ISSET(listenFd, &fds)) {
             sockaddr_in clientAddr{};
             socklen_t clientLen = sizeof(clientAddr);
-            int clientFd = accept(listenFd, reinterpret_cast<sockaddr*>(&clientAddr), &clientLen);
-            if (clientFd >= 0) {
+            socket_handle_t clientFd = accept(listenFd, reinterpret_cast<sockaddr*>(&clientAddr), &clientLen);
+            if (isValidSocket(clientFd)) {
                 char ipStr[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
                 auto clientSession = std::make_unique<NetworkSession>("rx-client", ipStr, ntohs(clientAddr.sin_port));

@@ -6,6 +6,7 @@
 #include <vector>
 #include "landrop/utils/Types.hpp"
 #include "landrop/core/TlsContext.hpp"
+#include "landrop/utils/SocketCompat.hpp"
 
 namespace landrop {
 
@@ -23,7 +24,7 @@ public:
     bool listenOn(uint16_t port);
     bool acceptIncoming();
     void closeSession();
-    bool attachSocket(int fd, ConnectionState state = ConnectionState::Connected);
+    bool attachSocket(socket_handle_t fd, ConnectionState state = ConnectionState::Connected);
 
     bool sendAll(const uint8_t* data, size_t length);
     bool sendData(const std::vector<uint8_t>& data);
@@ -39,8 +40,8 @@ public:
     ConnectionState getConnectionState() const { return m_state; }
     void setConnectionState(ConnectionState state) { m_state = state; }
 
-    int getSocketFd() const { return m_socketFd; }
-    int getListenFd() const { return m_listenFd; }
+    socket_handle_t getSocketFd() const { return m_socketFd; }
+    socket_handle_t getListenFd() const { return m_listenFd; }
 
     uint64_t getBytesSent() const { return m_bytesSent; }
     uint64_t getBytesReceived() const { return m_bytesReceived; }
@@ -66,8 +67,8 @@ private:
     std::string m_sessionId;
     std::string m_remoteIp;
     uint16_t m_remotePort;
-    int m_socketFd{-1};
-    int m_listenFd{-1};
+    socket_handle_t m_socketFd{INVALID_SOCKET_VALUE};
+    socket_handle_t m_listenFd{INVALID_SOCKET_VALUE};
     ConnectionState m_state{ConnectionState::Disconnected};
     uint64_t m_bytesSent{0};
     uint64_t m_bytesReceived{0};

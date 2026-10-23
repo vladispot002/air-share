@@ -776,7 +776,7 @@ static bool testTlsTransportAndDeviceAuth() {
     TEST_ASSERT(!TlsHelper::fingerprintsMatch("AABBCC", "AABBDD"), "Different fingerprints do not match");
 
     // 2. Positive TLS File Transfer over Connected Sockets
-    int fds[2];
+    socket_handle_t fds[2];
     TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "Socketpair created for TLS test");
 
     NetworkSession serverSession("test-tls-server", "127.0.0.1", 0);
@@ -857,7 +857,7 @@ static bool testTlsTransportAndDeviceAuth() {
     clientSession.closeSession();
 
     // 3. Negative Test 1: Untrusted Certificate / Missing Pinning Rejected by Default
-    int fdsNeg1[2];
+    socket_handle_t fdsNeg1[2];
     TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, fdsNeg1) == 0, "Socketpair for negative test 1");
     NetworkSession srvNeg1("srv-neg1", "127.0.0.1", 0);
     NetworkSession cliNeg1("cli-neg1", "127.0.0.1", 0);
@@ -882,7 +882,7 @@ static bool testTlsTransportAndDeviceAuth() {
     cliNeg1.closeSession();
 
     // 4. Negative Test 2: Rogue Peer / Fingerprint Mismatch Rejected
-    int fdsNeg2[2];
+    socket_handle_t fdsNeg2[2];
     TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, fdsNeg2) == 0, "Socketpair for negative test 2");
     NetworkSession srvNeg2("srv-neg2", "127.0.0.1", 0);
     NetworkSession cliNeg2("cli-neg2", "127.0.0.1", 0);
@@ -907,7 +907,7 @@ static bool testTlsTransportAndDeviceAuth() {
     cliNeg2.closeSession();
 
     // 5. Negative Test 3: Protocol Mismatch (Plaintext Client to TLS Server)
-    int fdsNeg3[2];
+    socket_handle_t fdsNeg3[2];
     TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, fdsNeg3) == 0, "Socketpair for negative test 3");
     NetworkSession srvNeg3("srv-neg3", "127.0.0.1", 0);
     srvNeg3.attachSocket(fdsNeg3[0]);
@@ -974,15 +974,15 @@ public:
                 FD_ZERO(&rfds);
                 FD_SET(m_listenFd, &rfds);
                 struct timeval tv{0, 50000}; // 50ms
-                int sel = select(m_listenFd + 1, &rfds, nullptr, nullptr, &tv);
+                int sel = select(static_cast<int>(m_listenFd + 1), &rfds, nullptr, nullptr, &tv);
                 if (sel <= 0) continue;
 
-                int clientFd = accept(m_listenFd, nullptr, nullptr);
-                if (clientFd < 0) continue;
+                socket_handle_t clientFd = accept(m_listenFd, nullptr, nullptr);
+                if (!isValidSocket(clientFd)) continue;
 
                 if (m_isHttps && m_sslCtx) {
                     SSL* ssl = SSL_new(m_sslCtx);
-                    SSL_set_fd(ssl, clientFd);
+                    SSL_set_fd(ssl, static_cast<int>(clientFd));
                     if (SSL_accept(ssl) > 0) {
                         std::string req = readRequest(clientFd, ssl);
                         if (!req.empty()) {
@@ -1019,14 +1019,14 @@ public:
         if (m_worker.joinable()) {
             m_worker.join();
         }
-        if (m_listenFd >= 0) {
+        if (isValidSocket(m_listenFd)) {
             closeSocket(m_listenFd);
-            m_listenFd = -1;
+            m_listenFd = INVALID_SOCKET_VALUE;
         }
     }
 
 private:
-    static std::string readRequest(int fd, SSL* ssl) {
+    static std::string readRequest(socket_handle_t fd, SSL* ssl) {
         std::string req;
         char b[4096];
         size_t reqContentLen = std::string::npos;
@@ -1063,7 +1063,7 @@ private:
         return req;
     }
 
-    int m_listenFd{-1};
+    socket_handle_t m_listenFd{INVALID_SOCKET_VALUE};
     uint16_t m_port{0};
     bool m_isHttps{false};
     TlsCertificate m_cert;
@@ -1278,9 +1278,9 @@ static bool testLiveSocketTransferPipeline() {
     FileChunkHasher hasher;
 
     // Helper to start an ephemeral receiver socket
-    auto bindEphemeral = [](int& listenFd, uint16_t& outPort) -> bool {
+    auto bindEphemeral = [](socket_handle_t& listenFd, uint16_t& outPort) -> bool {
         listenFd = socket(AF_INET, SOCK_STREAM, 0);
-        if (listenFd < 0) return false;
+        if (!isValidSocket(listenFd)) return false;
         int opt = 1;
         setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
         sockaddr_in addr{};
@@ -1305,11 +1305,11 @@ static bool testLiveSocketTransferPipeline() {
     };
 
     // Receiver worker simulating live receiver socket loop
-    auto runReceiverWorker = [&](int listenFd, const std::string& saveDirectory, std::atomic<int>& outStatus) {
+    auto runReceiverWorker = [&](socket_handle_t listenFd, const std::string& saveDirectory, std::atomic<int>& outStatus) {
         sockaddr_in clientAddr{};
         socklen_t cLen = sizeof(clientAddr);
-        int clientFd = accept(listenFd, reinterpret_cast<sockaddr*>(&clientAddr), &cLen);
-        if (clientFd < 0) {
+        socket_handle_t clientFd = accept(listenFd, reinterpret_cast<sockaddr*>(&clientAddr), &cLen);
+        if (!isValidSocket(clientFd)) {
             outStatus.store(-1);
             return;
         }
@@ -1471,7 +1471,7 @@ static bool testLiveSocketTransferPipeline() {
         std::ofstream out(smallFile, std::ios::binary);
         for (int i = 0; i < 512; ++i) out.put(static_cast<char>(i & 0xFF));
     }
-    int listenFd1 = -1;
+    socket_handle_t listenFd1 = INVALID_SOCKET_VALUE;
     uint16_t port1 = 0;
     TEST_ASSERT(bindEphemeral(listenFd1, port1), "Bound ephemeral receiver socket for small file");
     std::atomic<int> rxStatus1{-99};
@@ -1497,7 +1497,7 @@ static bool testLiveSocketTransferPipeline() {
             out.write(block.data(), block.size());
         }
     }
-    int listenFd2 = -1;
+    socket_handle_t listenFd2 = INVALID_SOCKET_VALUE;
     uint16_t port2 = 0;
     TEST_ASSERT(bindEphemeral(listenFd2, port2), "Bound ephemeral receiver socket for 256KB file");
     std::atomic<int> rxStatus2{-99};
@@ -1519,7 +1519,7 @@ static bool testLiveSocketTransferPipeline() {
         std::vector<char> dummy(256 * 1024, 'X');
         out.write(dummy.data(), dummy.size());
     }
-    int listenFd3 = -1;
+    socket_handle_t listenFd3 = INVALID_SOCKET_VALUE;
     uint16_t port3 = 0;
     TEST_ASSERT(bindEphemeral(listenFd3, port3), "Bound ephemeral receiver socket for disconnect test");
     std::atomic<int> rxStatus3{-99};
@@ -1538,7 +1538,7 @@ static bool testLiveSocketTransferPipeline() {
         std::ofstream out(corruptFile);
         out << "Data payload with forged SHA-256 header hash";
     }
-    int listenFd4 = -1;
+    socket_handle_t listenFd4 = INVALID_SOCKET_VALUE;
     uint16_t port4 = 0;
     TEST_ASSERT(bindEphemeral(listenFd4, port4), "Bound ephemeral receiver socket for corrupt hash test");
     std::atomic<int> rxStatus4{-99};
@@ -1554,7 +1554,7 @@ static bool testLiveSocketTransferPipeline() {
     TEST_ASSERT(!std::filesystem::exists(recvDir / "corrupt_candidate.bin.part"), "Corrupt .part file deleted");
 
     // 5. Negative Test 3: Destination file already exists collision
-    int listenFd5 = -1;
+    socket_handle_t listenFd5 = INVALID_SOCKET_VALUE;
     uint16_t port5 = 0;
     TEST_ASSERT(bindEphemeral(listenFd5, port5), "Bound ephemeral receiver socket for existing file test");
     std::atomic<int> rxStatus5{-99};
@@ -1584,9 +1584,9 @@ static bool testTransferEngine() {
     TransferEngine engine;
 
     // Ephemeral port selection
-    int ephemeralFd = socket(AF_INET, SOCK_STREAM, 0);
+    socket_handle_t ephemeralFd = socket(AF_INET, SOCK_STREAM, 0);
     uint16_t listenPort = 0;
-    if (ephemeralFd >= 0) {
+    if (isValidSocket(ephemeralFd)) {
         sockaddr_in a{};
         a.sin_family = AF_INET;
         a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);

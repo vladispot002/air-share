@@ -7,6 +7,7 @@
 #include <functional>
 #include <thread>
 #include "landrop/utils/Types.hpp"
+#include "landrop/utils/SocketCompat.hpp"
 
 namespace landrop {
 
@@ -64,7 +65,7 @@ private:
     std::atomic<size_t> m_beaconsSent{0};
     std::atomic<size_t> m_beaconsReceived{0};
 
-    int m_listenSocketFd{-1};
+    socket_handle_t m_listenSocketFd{INVALID_SOCKET_VALUE};
     std::thread m_listenerThread;
     DiscoveryCallback m_discoveryCallback;
 };

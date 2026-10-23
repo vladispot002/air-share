@@ -37,8 +37,8 @@ NetworkSession::NetworkSession(NetworkSession&& other) noexcept
       m_peerFingerprint(std::move(other.m_peerFingerprint)),
       m_sslCtx(other.m_sslCtx),
       m_ssl(other.m_ssl) {
-    other.m_socketFd = -1;
-    other.m_listenFd = -1;
+    other.m_socketFd = INVALID_SOCKET_VALUE;
+    other.m_listenFd = INVALID_SOCKET_VALUE;
     other.m_sslCtx = nullptr;
     other.m_ssl = nullptr;
     other.m_tlsEnabled = false;
@@ -69,8 +69,8 @@ NetworkSession& NetworkSession::operator=(NetworkSession&& other) noexcept {
         m_sslCtx = other.m_sslCtx;
         m_ssl = other.m_ssl;
 
-        other.m_socketFd = -1;
-        other.m_listenFd = -1;
+        other.m_socketFd = INVALID_SOCKET_VALUE;
+        other.m_listenFd = INVALID_SOCKET_VALUE;
         other.m_sslCtx = nullptr;
         other.m_ssl = nullptr;
         other.m_tlsEnabled = false;
@@ -80,7 +80,7 @@ NetworkSession& NetworkSession::operator=(NetworkSession&& other) noexcept {
     return *this;
 }
 
-bool NetworkSession::attachSocket(int fd, ConnectionState state) {
+bool NetworkSession::attachSocket(socket_handle_t fd, ConnectionState state) {
     closeSession();
     m_socketFd = fd;
     m_state = state;
@@ -97,7 +97,7 @@ bool NetworkSession::enableTls(const TlsConfig& config) {
 }
 
 TlsStatus NetworkSession::performTlsHandshake() {
-    if (m_socketFd < 0) {
+    if (!isValidSocket(m_socketFd)) {
         m_tlsStatus = TlsStatus::SocketError;
         return m_tlsStatus;
     }
@@ -123,7 +123,7 @@ TlsStatus NetworkSession::performTlsHandshake() {
             m_tlsStatus = TlsStatus::HandshakeFailed;
             return m_tlsStatus;
         }
-        SSL_set_fd(m_ssl, m_socketFd);
+        SSL_set_fd(m_ssl, static_cast<int>(m_socketFd));
     }
 
     if (m_tlsConfig.role == TlsRole::Server) {
@@ -218,7 +218,7 @@ bool NetworkSession::connectTo(const std::string& ip, uint16_t port) {
     m_remotePort = port;
 
     m_socketFd = socket(AF_INET, SOCK_STREAM, 0);
-    if (m_socketFd < 0) {
+    if (!isValidSocket(m_socketFd)) {
         m_state = ConnectionState::Disconnected;
         return false;
     }
@@ -254,7 +254,7 @@ bool NetworkSession::connectTo(const std::string& ip, uint16_t port) {
 bool NetworkSession::listenOn(uint16_t port) {
     closeSession();
     m_listenFd = socket(AF_INET, SOCK_STREAM, 0);
-    if (m_listenFd < 0) {
+    if (!isValidSocket(m_listenFd)) {
         return false;
     }
 
@@ -271,13 +271,13 @@ bool NetworkSession::listenOn(uint16_t port) {
 
     if (bind(m_listenFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         closeSocket(m_listenFd);
-        m_listenFd = -1;
+        m_listenFd = INVALID_SOCKET_VALUE;
         return false;
     }
 
     if (listen(m_listenFd, 5) < 0) {
         closeSocket(m_listenFd);
-        m_listenFd = -1;
+        m_listenFd = INVALID_SOCKET_VALUE;
         return false;
     }
 
@@ -286,14 +286,14 @@ bool NetworkSession::listenOn(uint16_t port) {
 }
 
 bool NetworkSession::acceptIncoming() {
-    if (m_listenFd < 0) {
+    if (!isValidSocket(m_listenFd)) {
         return false;
     }
 
     sockaddr_in clientAddr{};
     socklen_t clientLen = sizeof(clientAddr);
     m_socketFd = accept(m_listenFd, reinterpret_cast<sockaddr*>(&clientAddr), &clientLen);
-    if (m_socketFd < 0) {
+    if (!isValidSocket(m_socketFd)) {
         return false;
     }
 
@@ -326,20 +326,20 @@ void NetworkSession::closeSession() {
         SSL_CTX_free(m_sslCtx);
         m_sslCtx = nullptr;
     }
-    if (m_socketFd >= 0) {
+    if (isValidSocket(m_socketFd)) {
         closeSocket(m_socketFd);
-        m_socketFd = -1;
+        m_socketFd = INVALID_SOCKET_VALUE;
     }
-    if (m_listenFd >= 0) {
+    if (isValidSocket(m_listenFd)) {
         closeSocket(m_listenFd);
-        m_listenFd = -1;
+        m_listenFd = INVALID_SOCKET_VALUE;
     }
     m_state = ConnectionState::Terminated;
     m_isEncrypted = false;
 }
 
 bool NetworkSession::sendAll(const uint8_t* data, size_t length) {
-    if (m_socketFd < 0 || m_state != ConnectionState::Connected) {
+    if (!isValidSocket(m_socketFd) || m_state != ConnectionState::Connected) {
         return false;
     }
     size_t total = 0;
@@ -377,7 +377,7 @@ bool NetworkSession::sendData(const std::vector<uint8_t>& data) {
 }
 
 bool NetworkSession::receiveExact(uint8_t* buffer, size_t length) {
-    if (m_socketFd < 0 || m_state != ConnectionState::Connected) {
+    if (!isValidSocket(m_socketFd) || m_state != ConnectionState::Connected) {
         return false;
     }
     size_t total = 0;

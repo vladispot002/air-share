@@ -12,9 +12,9 @@ namespace landrop {
 namespace {
 
 struct SocketGuard {
-    int fd{-1};
+    socket_handle_t fd{INVALID_SOCKET_VALUE};
     ~SocketGuard() {
-        if (fd >= 0) {
+        if (isValidSocket(fd)) {
             closeSocket(fd);
         }
     }
@@ -140,7 +140,7 @@ HttpResponse HttpClient::send(const HttpRequest& request) {
 
     SocketGuard sockGuard;
     sockGuard.fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockGuard.fd < 0) {
+    if (!isValidSocket(sockGuard.fd)) {
         res.success = false;
         res.statusCode = 0;
         res.errorMessage = "Failed to create socket";
@@ -148,11 +148,7 @@ HttpResponse HttpClient::send(const HttpRequest& request) {
     }
 
     int timeoutSec = (request.timeoutSeconds > 0) ? request.timeoutSeconds : 5;
-    struct timeval tv;
-    tv.tv_sec = timeoutSec;
-    tv.tv_usec = 0;
-    setsockopt(sockGuard.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sockGuard.fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setSocketTimeout(sockGuard.fd, timeoutSec);
 
     sockaddr_in serverAddr{};
     serverAddr.sin_family = AF_INET;
@@ -197,7 +193,7 @@ HttpResponse HttpClient::send(const HttpRequest& request) {
             tvConn.tv_sec = timeoutSec;
             tvConn.tv_usec = 0;
 
-            int sel = select(sockGuard.fd + 1, nullptr, &wfds, &efds, &tvConn);
+            int sel = select(static_cast<int>(sockGuard.fd + 1), nullptr, &wfds, &efds, &tvConn);
             if (sel <= 0) {
                 res.success = false;
                 res.statusCode = 0;
@@ -244,7 +240,7 @@ HttpResponse HttpClient::send(const HttpRequest& request) {
             return res;
         }
 
-        SSL_set_fd(sslGuard.ssl, sockGuard.fd);
+        SSL_set_fd(sslGuard.ssl, static_cast<int>(sockGuard.fd));
 
         // Pass SNI (Server Name Indication) - RFC 6066: literal IP addresses must NOT be sent
         sockaddr_in ipCheck{};
