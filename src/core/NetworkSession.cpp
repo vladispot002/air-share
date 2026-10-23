@@ -1,8 +1,5 @@
 #include "landrop/core/NetworkSession.hpp"
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include "landrop/utils/SocketCompat.hpp"
 #include <cstring>
 #include <utility>
 #include <algorithm>
@@ -262,9 +259,9 @@ bool NetworkSession::listenOn(uint16_t port) {
     }
 
     int opt = 1;
-    setsockopt(m_listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(m_listenFd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
 #ifdef SO_REUSEPORT
-    setsockopt(m_listenFd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+    setsockopt(m_listenFd, SOL_SOCKET, SO_REUSEPORT, reinterpret_cast<const char*>(&opt), sizeof(opt));
 #endif
 
     sockaddr_in addr{};
@@ -273,13 +270,13 @@ bool NetworkSession::listenOn(uint16_t port) {
     addr.sin_port = htons(port);
 
     if (bind(m_listenFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        close(m_listenFd);
+        closeSocket(m_listenFd);
         m_listenFd = -1;
         return false;
     }
 
     if (listen(m_listenFd, 5) < 0) {
-        close(m_listenFd);
+        closeSocket(m_listenFd);
         m_listenFd = -1;
         return false;
     }
@@ -330,11 +327,11 @@ void NetworkSession::closeSession() {
         m_sslCtx = nullptr;
     }
     if (m_socketFd >= 0) {
-        close(m_socketFd);
+        closeSocket(m_socketFd);
         m_socketFd = -1;
     }
     if (m_listenFd >= 0) {
-        close(m_listenFd);
+        closeSocket(m_listenFd);
         m_listenFd = -1;
     }
     m_state = ConnectionState::Terminated;
@@ -361,7 +358,8 @@ bool NetworkSession::sendAll(const uint8_t* data, size_t length) {
 #ifdef MSG_NOSIGNAL
             flags |= MSG_NOSIGNAL;
 #endif
-            ssize_t bytes = send(m_socketFd, data + total, length - total, flags);
+            int toSend = static_cast<int>(std::min<size_t>(length - total, 32768));
+            ssize_t bytes = send(m_socketFd, reinterpret_cast<const char*>(data + total), toSend, flags);
             if (bytes <= 0) {
                 closeSession();
                 return false;
@@ -394,7 +392,8 @@ bool NetworkSession::receiveExact(uint8_t* buffer, size_t length) {
             total += static_cast<size_t>(bytes);
             m_bytesReceived += static_cast<uint64_t>(bytes);
         } else {
-            ssize_t bytes = recv(m_socketFd, buffer + total, length - total, 0);
+            int toRead = static_cast<int>(std::min<size_t>(length - total, 32768));
+            ssize_t bytes = recv(m_socketFd, reinterpret_cast<char*>(buffer + total), toRead, 0);
             if (bytes <= 0) {
                 closeSession();
                 return false;
