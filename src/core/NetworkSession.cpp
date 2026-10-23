@@ -263,6 +263,9 @@ bool NetworkSession::listenOn(uint16_t port) {
 
     int opt = 1;
     setsockopt(m_listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+    setsockopt(m_listenFd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;

@@ -197,6 +197,7 @@ if (BUILD_TESTING)
         )
     endif()
     add_test(NAME QtGuiTests COMMAND lan_drop_gui_tests)
+    set_tests_properties(QtGuiTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
 # Installation rules

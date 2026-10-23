@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build qt6-base-dev qt6-qpa-plugins libssl-dev libxkbcommon-dev
+          sudo apt-get install -y cmake ninja-build qt6-base-dev qt6-qpa-plugins libssl-dev libxkbcommon-dev libgl1-mesa-dev
 
       - name: Configure CMake
         run: |
@@ -35,7 +35,7 @@ jobs:
       - name: Run CTest
         run: |
           export QT_QPA_PLATFORM=offscreen
-          ctest --test-dir build --output-on-failure
+          ctest --test-dir build --output-on-failure --verbose || (echo "=== LastTest.log ===" && cat build/Testing/Temporary/LastTest.log && exit 1)
 
   test-windows:
     name: Build & Test (Windows 10/11 x64)
@@ -55,7 +55,7 @@ jobs:
           version: '6.7.2'
           host: 'windows'
           target: 'desktop'
-          arch: 'win64_msvc2022_64'
+          arch: 'win64_msvc2019_64'
           setup-python: 'false'
 
       - name: Configure CMake
@@ -70,6 +70,6 @@ jobs:
 
       - name: Run CTest
         run: |
-          ctest --test-dir build -C Release --output-on-failure
+          ctest --test-dir build -C Release --output-on-failure --verbose
         env:
           QT_QPA_PLATFORM: offscreen
