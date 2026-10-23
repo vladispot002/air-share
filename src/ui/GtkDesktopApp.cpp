@@ -730,9 +730,16 @@ void GtkDesktopApp::buildUi() {
         gtk_window_set_title(GTK_WINDOW(m_mainWindow), "LAN-Drop — AirShare");
         gtk_window_set_default_size(GTK_WINDOW(m_mainWindow), 980, 700);
     }
-    gtk_window_set_position(GTK_WINDOW(m_mainWindow), GTK_WIN_POS_CENTER);
-    if (!gtk_window_set_icon_from_file(GTK_WINDOW(m_mainWindow), "/home/vladis/lan-drop/resources/lan-drop.svg", nullptr)) {
-        gtk_window_set_icon_from_file(GTK_WINDOW(m_mainWindow), "resources/lan-drop.svg", nullptr);
+    const char* gtkIconCandidates[] = {
+        "/usr/share/icons/hicolor/scalable/apps/lan-drop.svg",
+        "/usr/share/landrop/lan-drop.svg",
+        "resources/lan-drop.svg",
+        "../resources/lan-drop.svg"
+    };
+    for (const char* iconPath : gtkIconCandidates) {
+        if (gtk_window_set_icon_from_file(GTK_WINDOW(m_mainWindow), iconPath, nullptr)) {
+            break;
+        }
     }
 
     g_signal_connect(m_mainWindow, "destroy", G_CALLBACK(gtk_main_quit), nullptr);

@@ -19,6 +19,7 @@ public:
     void onSpeedLimitChanged(uint32_t speedKbps);
     void onAutoAcceptToggled(bool autoAccept);
     void onAirDropToggled(bool airdropEnabled);
+    void onDownloadsPathChanged(const std::string& path);
     void onSaveSettingsClicked();
     void onClearLogsClicked();
 
@@ -26,6 +27,8 @@ public:
     uint32_t getSpeedLimitKbps() const { return m_speedLimitKbps; }
     bool isAutoAccept() const { return m_autoAccept; }
     bool isAirDropEnabled() const { return m_airdropEnabled; }
+    const std::string& getDownloadsPath() const { return m_downloadsPath; }
+    void setDownloadsPath(std::string path);
 
     void addLog(const std::string& log);
 
@@ -50,6 +53,7 @@ private:
     uint32_t m_speedLimitKbps{0};
     bool m_autoAccept{true};
     bool m_airdropEnabled{false};
+    std::string m_downloadsPath{"./downloads"};
     std::vector<std::string> m_logs;
 };
 

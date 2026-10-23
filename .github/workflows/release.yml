@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-fedora-rpm:
+    name: Build Fedora RPM & Portable Tarball
+    runs-on: ubuntu-latest
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Install system build dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            cmake gcc-c++ make qt6-qtbase-devel openssl-devel \
+            desktop-file-utils rpm-build rpmdevtools git tar
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Fedora RPM and Portable Tarball
+        run: |
+          chmod +x scripts/package-fedora.sh
+          ./scripts/package-fedora.sh
+
+      - name: Upload Fedora Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fedora-packages
+          path: |
+            dist/rpm/*.rpm
+            dist/*.tar.gz
+
+  build-windows-exe:
+    name: Build Windows 10/11 x64 Installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.*'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          modules: 'qtbase'
+
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup -y --no-progress
+          echo "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build & Package Windows Installer
+        run: |
+          pwsh scripts/package-windows.ps1
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/windows/*.exe
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-fedora-rpm, build-windows-exe]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Organize release files and compute checksums
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name "*.rpm" -o -name "*.tar.gz" -o -name "*.exe" \) -exec cp {} release-assets/ \;
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          ls -la
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false

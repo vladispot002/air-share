@@ -9,8 +9,62 @@
 #include <QMessageBox>
 #include <QDateTime>
 #include <QMetaObject>
+#include <QFileInfo>
+#include <QDir>
+#include <QStandardPaths>
+#include <QCoreApplication>
+#include <QInputDialog>
 
 namespace landrop::ui {
+
+DirectoryValidation QtSettingsWidget::validateWritableDirectory(const QString& rawPath, bool createIfMissing) {
+    QString trimmed = rawPath.trimmed();
+    if (trimmed.isEmpty()) {
+        return {false, "", "Шлях до папки не може бути порожнім."};
+    }
+
+    QFileInfo rawFi(trimmed);
+    if (rawFi.exists() && !rawFi.isDir()) {
+        return {false, trimmed, QString("Вказаний шлях не є каталогом:\n%1").arg(trimmed)};
+    }
+
+    QDir dir(trimmed);
+    if (!dir.exists()) {
+        if (createIfMissing) {
+            if (!dir.mkpath(".")) {
+                return {false, trimmed, QString("Не вдалося створити директорію:\n%1\nПеревірте права доступу до батьківського каталогу.").arg(trimmed)};
+            }
+        } else {
+            return {false, trimmed, QString("Директорія не існує:\n%1").arg(trimmed)};
+        }
+    }
+
+    QString canonical = dir.canonicalPath().isEmpty() ? dir.absolutePath() : dir.canonicalPath();
+    QFileInfo fi(canonical);
+    if (!fi.isDir()) {
+        return {false, canonical, QString("Вказаний шлях не є каталогом:\n%1").arg(canonical)};
+    }
+
+    if (!fi.isReadable()) {
+        return {false, canonical, QString("Каталог недоступний для читання:\n%1").arg(canonical)};
+    }
+
+    if (!fi.isWritable()) {
+        return {false, canonical, QString("Відсутні права на запис у каталог:\n%1").arg(canonical)};
+    }
+
+    // Canary write probe test
+    QString canaryPath = dir.filePath(QString(".landrop_probe_%1.tmp").arg(QCoreApplication::applicationPid()));
+    QFile probe(canaryPath);
+    if (!probe.open(QIODevice::WriteOnly)) {
+        return {false, canonical, QString("Каталог захищений від запису або змонтований у режимі read-only:\n%1").arg(canonical)};
+    }
+    probe.write("canary", 6);
+    probe.close();
+    probe.remove();
+
+    return {true, canonical, ""};
+}
 
 QtSettingsWidget::QtSettingsWidget(QWidget* parent)
     : QWidget(parent) {
@@ -59,18 +113,36 @@ void QtSettingsWidget::setupUi() {
     m_bufferSpin->setValue(64);
     m_bufferSpin->setSuffix(" KB");
 
+    auto* pathContainer = new QVBoxLayout();
+    pathContainer->setSpacing(4);
+
     auto* pathLayout = new QHBoxLayout();
     pathLayout->setSpacing(8);
     m_downloadPathEdit = new QLineEdit("./downloads", netGroup);
-    m_browsePathBtn = new QPushButton("Browse...", netGroup);
+    m_downloadPathEdit->setPlaceholderText("Оберіть або введіть шлях до папки...");
+    connect(m_downloadPathEdit, &QLineEdit::textChanged, this, &QtSettingsWidget::updatePathStatusLabel);
+
+    m_browsePathBtn = new QPushButton("📁 Обрати папку...", netGroup);
+    m_browsePathBtn->setToolTip("Відкрити стандартний діалог вибору папки");
     connect(m_browsePathBtn, &QPushButton::clicked, this, &QtSettingsWidget::onBrowseDownloadPathClicked);
-    pathLayout->addWidget(m_downloadPathEdit);
+
+    m_createFolderBtn = new QPushButton("➕ Створити папку...", netGroup);
+    m_createFolderBtn->setToolTip("Створити нову підпапку для збереження файлів");
+    connect(m_createFolderBtn, &QPushButton::clicked, this, &QtSettingsWidget::onCreateFolderClicked);
+
+    pathLayout->addWidget(m_downloadPathEdit, 1);
     pathLayout->addWidget(m_browsePathBtn);
+    pathLayout->addWidget(m_createFolderBtn);
+    pathContainer->addLayout(pathLayout);
+
+    m_pathStatusLabel = new QLabel(netGroup);
+    m_pathStatusLabel->setStyleSheet("font-size: 11px; margin-left: 2px;");
+    pathContainer->addWidget(m_pathStatusLabel);
 
     netForm->addRow("Listening Port:", m_portSpin);
     netForm->addRow("Transfer Speed Limit:", m_speedLimitSpin);
     netForm->addRow("Chunk Buffer Size:", m_bufferSpin);
-    netForm->addRow("Downloads Path:", pathLayout);
+    netForm->addRow("Папка збереження:", pathContainer);
     topLayout->addWidget(netGroup);
 
     // Group 2: Protocol & Security
@@ -142,6 +214,8 @@ void QtSettingsWidget::setupUi() {
                 QTextStream out(&f);
                 out << m_logViewer->toPlainText();
                 QMessageBox::information(this, "Log Exported", "Diagnostic log saved successfully.");
+            } else {
+                QMessageBox::warning(this, "Export Failed", "Failed to write diagnostic log to: " + file);
             }
         }
     });
@@ -176,12 +250,53 @@ void QtSettingsWidget::showSaveSuccess() {
     }, Qt::QueuedConnection);
 }
 
+void QtSettingsWidget::setDownloadsPath(const std::string& path) {
+    QMetaObject::invokeMethod(this, [this, path]() {
+        if (m_downloadPathEdit) {
+            m_downloadPathEdit->setText(QString::fromStdString(path));
+            updatePathStatusLabel(QString::fromStdString(path));
+        }
+    }, Qt::QueuedConnection);
+}
+
+void QtSettingsWidget::updatePathStatusLabel(const QString& text) {
+    if (!m_pathStatusLabel) return;
+    if (text.trimmed().isEmpty()) {
+        m_pathStatusLabel->setText("<span style='color: #e53935;'>⚠ Шлях до папки не може бути порожнім</span>");
+        return;
+    }
+    auto res = validateWritableDirectory(text, false);
+    if (res.ok) {
+        m_pathStatusLabel->setText("<span style='color: #43a047;'>✓ Папка існує та доступна для запису</span>");
+    } else {
+        QDir dir(text.trimmed());
+        if (!dir.exists()) {
+            m_pathStatusLabel->setText("<span style='color: #fb8c00;'>ℹ Папка буде створена автоматично при збереженні</span>");
+        } else {
+            m_pathStatusLabel->setText(QString("<span style='color: #e53935;'>✗ %1</span>").arg(res.errorMessage));
+        }
+    }
+}
+
 void QtSettingsWidget::onSaveClicked() {
+    QString rawPath = m_downloadPathEdit->text().trimmed();
+    auto val = validateWritableDirectory(rawPath, true);
+    if (!val.ok) {
+        QMessageBox::warning(this, "Помилка каталогу збереження",
+            QString("Неможливо зберегти налаштування:\n%1\nБудь ласка, вкажіть або створіть доступну для запису директорію.").arg(val.errorMessage));
+        return;
+    }
+
+    // Set normalized absolute path back into edit
+    m_downloadPathEdit->setText(val.resolvedPath);
+    updatePathStatusLabel(val.resolvedPath);
+
     if (m_presenter) {
         m_presenter->onPortChanged(static_cast<uint16_t>(m_portSpin->value()));
         m_presenter->onSpeedLimitChanged(static_cast<uint32_t>(m_speedLimitSpin->value()));
         m_presenter->onAutoAcceptToggled(m_autoAcceptCheck->isChecked());
         m_presenter->onAirDropToggled(m_airdropCheck->isChecked());
+        m_presenter->onDownloadsPathChanged(val.resolvedPath.toStdString());
         m_presenter->onSaveSettingsClicked();
     }
 }
@@ -194,10 +309,61 @@ void QtSettingsWidget::onClearLogsClicked() {
 }
 
 void QtSettingsWidget::onBrowseDownloadPathClicked() {
-    QString dir = QFileDialog::getExistingDirectory(this, "Select Download Directory", m_downloadPathEdit->text());
-    if (!dir.isEmpty()) {
-        m_downloadPathEdit->setText(dir);
+    QString current = m_downloadPathEdit->text().trimmed();
+    if (current.isEmpty()) {
+        current = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
     }
+    QString dir = QFileDialog::getExistingDirectory(
+        this,
+        "Оберіть або створіть папку для отриманих файлів",
+        current,
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks
+    );
+    if (!dir.isEmpty()) {
+        auto val = validateWritableDirectory(dir, true);
+        if (!val.ok) {
+            QMessageBox::warning(this, "Помилка каталогу збереження", val.errorMessage);
+            return;
+        }
+        m_downloadPathEdit->setText(val.resolvedPath);
+        updatePathStatusLabel(val.resolvedPath);
+    }
+}
+
+void QtSettingsWidget::onCreateFolderClicked() {
+    QString current = m_downloadPathEdit->text().trimmed();
+    if (current.isEmpty()) {
+        current = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        if (current.isEmpty()) {
+            current = QDir::currentPath();
+        }
+    }
+
+    bool ok = false;
+    QString folderName = QInputDialog::getText(
+        this,
+        "Створити нову папку",
+        "Введіть назву нової папки або відносний шлях:",
+        QLineEdit::Normal,
+        "LAN-Drop-Received",
+        &ok
+    );
+    if (!ok || folderName.trimmed().isEmpty()) return;
+
+    QDir parentDir(current);
+    if (!parentDir.exists()) {
+        parentDir.setPath(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
+    }
+    QString targetPath = parentDir.filePath(folderName.trimmed());
+    auto val = validateWritableDirectory(targetPath, true);
+    if (!val.ok) {
+        QMessageBox::warning(this, "Помилка створення папки", val.errorMessage);
+        return;
+    }
+
+    m_downloadPathEdit->setText(val.resolvedPath);
+    updatePathStatusLabel(val.resolvedPath);
+    QMessageBox::information(this, "Папку створено", QString("Нова папка успішно створена та обрана:\n%1").arg(val.resolvedPath));
 }
 
 void QtSettingsWidget::onThemeComboChanged(int index) {

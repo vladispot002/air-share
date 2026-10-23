@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <cstring>
 
 
 #include "landrop/utils/Types.hpp"
@@ -24,6 +25,7 @@
 #include "landrop/core/NetworkSession.hpp"
 #include "landrop/core/TlsContext.hpp"
 #include "landrop/core/HttpClient.hpp"
+#include "landrop/core/TransferEngine.hpp"
 
 
 #include "landrop/peers/NetworkPeer.hpp"
@@ -223,6 +225,7 @@ static bool testHttpWebTransferTask() {
 static bool testSharedFolderManager() {
     std::string testDir = "./unit_test_shared";
     std::filesystem::remove_all(testDir);
+    std::filesystem::create_directories(testDir);
 
     SharedFolderManager manager(testDir);
     TEST_ASSERT(manager.getRootPath() == testDir, "Root path matches");
@@ -236,11 +239,60 @@ static bool testSharedFolderManager() {
     TEST_ASSERT(manager.getSharedFileCount() == 1, "File count is 1");
     TEST_ASSERT(manager.getTotalSharedBytes() > 0, "Total bytes > 0");
 
+    // Path traversal in findFile must be rejected
+    TEST_ASSERT(!manager.findFile("../../etc/passwd").has_value(), "Rejects parent path traversal in findFile");
+    TEST_ASSERT(!manager.findFile("/etc/shadow").has_value(), "Rejects absolute path traversal in findFile");
+    TEST_ASSERT(manager.findFile("sample.txt").has_value(), "Finds legitimate file sample.txt");
+
+    // Safe file path retrieval
+    auto safePath = manager.getSafeFilePath("sample.txt");
+    TEST_ASSERT(safePath.has_value(), "getSafeFilePath succeeds for valid shared file");
+    TEST_ASSERT(!manager.getSafeFilePath("../../etc/passwd").has_value(), "getSafeFilePath rejects path traversal");
+
+    // Symlink escape test: create target outside sharedDir, symlink inside
+    std::string outsideDir = "./unit_test_outside";
+    std::filesystem::remove_all(outsideDir);
+    std::filesystem::create_directories(outsideDir);
+    std::string secretFile = outsideDir + "/secret.txt";
+    {
+        std::ofstream out(secretFile);
+        out << "top_secret_token_12345";
+    }
+    std::string symlinkPath = testDir + "/symlink_to_secret.txt";
+    std::error_code ec;
+    std::filesystem::create_symlink(std::filesystem::absolute(secretFile), symlinkPath, ec);
+    if (!ec) {
+        manager.scanDirectory();
+        TEST_ASSERT(manager.findFile("symlink_to_secret.txt") == std::nullopt,
+                    "Symlink pointing outside shared root is ignored and excluded from scan");
+        TEST_ASSERT(!manager.addSharedFile(symlinkPath),
+                    "addSharedFile rejects symlink pointing outside root");
+    }
+    std::filesystem::remove_all(outsideDir);
+
+    // Max file size limit test
+    manager.setMaxFileSizeLimit(10); // 10 bytes limit
+    manager.scanDirectory();
+    TEST_ASSERT(manager.getSharedFileCount() == 0, "Files exceeding maxFileSizeLimit are excluded");
+    manager.setMaxFileSizeLimit(10ULL * 1024 * 1024 * 1024);
+    manager.scanDirectory();
+    TEST_ASSERT(manager.getSharedFileCount() == 1, "Restored maxFileSizeLimit includes file again");
+
+    // Password / PIN protection
     TEST_ASSERT(!manager.hasPasswordProtection(), "Starts without password");
     manager.setAccessPassword("9977");
     TEST_ASSERT(manager.hasPasswordProtection(), "Password protection active");
+    TEST_ASSERT(manager.getPasswordHash().find("$pbkdf2-sha256$i=100000$") == 0, "PBKDF2-HMAC-SHA256 format verified");
     TEST_ASSERT(manager.verifyAccessPassword("9977"), "Correct password verified");
     TEST_ASSERT(!manager.verifyAccessPassword("0000"), "Wrong password rejected");
+
+    // Rate-limiting delay test on repeated failed attempts
+    auto tStart = std::chrono::steady_clock::now();
+    for (int i = 0; i < 3; ++i) {
+        manager.verifyAccessPassword("wrong_pin");
+    }
+    auto tElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - tStart).count();
+    TEST_ASSERT(tElapsed >= 30, "Rate-limiting progressive delay verified on failed attempts");
 
     manager.setAccessPassword("");
     TEST_ASSERT(!manager.hasPasswordProtection(), "Password cleared");
@@ -429,7 +481,9 @@ static bool testPresenters() {
     TEST_ASSERT(mock.devices.empty(), "All discovered/paired devices cleaned up");
 
     ui::TransferPresenter trans(&mock);
-    trans.initialize();
+    trans.initialize(false);
+    TEST_ASSERT(trans.getTasks().empty(), "Clean transfer presenter starts with empty queue");
+    trans.loadSampleData();
     TEST_ASSERT(mock.transfers.size() == 6, "Transfer presenter initialized with 6 tasks");
 
     // Test row selection updates details
@@ -467,6 +521,23 @@ static bool testPresenters() {
     }
     TEST_ASSERT(foundCancelled, "T-0039 cancelled");
 
+    // Test speed limit application and ticking
+    trans.setSpeedLimit(500); // 500 KB/s = 512,000 bytes/sec
+    TEST_ASSERT(trans.getSpeedLimit() == 500, "Transfer presenter speed limit set to 500 KB/s");
+    trans.tick();
+    for (const auto& task : trans.getTasks()) {
+        if (task && task->getState() == TransferState::Transferring) {
+            TEST_ASSERT(task->getCurrentSpeedBps() <= 500.0 * 1024.0, "Active transfer speed constrained by speed limit");
+        }
+    }
+
+    // Verify paused task does not advance bytes
+    auto taskToPause = trans.getTasks()[0];
+    taskToPause->setState(TransferState::Paused);
+    uint64_t bytesBefore = taskToPause->getBytesTransferred();
+    trans.tick();
+    TEST_ASSERT(taskToPause->getBytesTransferred() == bytesBefore, "Paused task does not increment bytes transferred on tick");
+
     // Test send missing file error
     trans.onSendFileClicked("peer-macbook", "/path/to/missing/nonexistent_file.xyz");
     TEST_ASSERT(mock.lastError.find("not found") != std::string::npos, "Missing file produces transfer error");
@@ -493,6 +564,30 @@ static bool testPresenters() {
     TEST_ASSERT(sett.getPort() == 9090, "Port updated to 9090");
     sett.onSpeedLimitChanged(30000);
     TEST_ASSERT(sett.getSpeedLimitKbps() == 30000, "Speed limit updated");
+
+    // Test corrupted JSON loading
+    TEST_ASSERT(!sett.loadFromJson("{ corrupted: invalid json ..."), "Rejects corrupted JSON string");
+    TEST_ASSERT(sett.getPort() == 9090, "Retains previous settings on corrupted JSON load");
+
+    // Test legacy JSON keys parsing and downloadsPath
+    std::string legacyJson = R"({
+        "port": "8080",
+        "speed_limit_kbps": 15000,
+        "auto_accept": true,
+        "airdrop_enabled": false,
+        "downloadsPath": "/home/user/CustomDownloads"
+    })";
+    TEST_ASSERT(sett.loadFromJson(legacyJson), "Parses legacy JSON configuration keys successfully");
+    TEST_ASSERT(sett.getPort() == 8080, "Parsed string port '8080' to integer 8080");
+    TEST_ASSERT(sett.getSpeedLimitKbps() == 15000, "Parsed legacy speed_limit_kbps");
+    TEST_ASSERT(sett.isAutoAccept() == true, "Parsed legacy auto_accept");
+    TEST_ASSERT(sett.isAirDropEnabled() == false, "Parsed legacy airdrop_enabled");
+    TEST_ASSERT(sett.getDownloadsPath() == "/home/user/CustomDownloads", "Parsed downloadsPath from JSON");
+
+    sett.onDownloadsPathChanged("/tmp/received_files");
+    TEST_ASSERT(sett.getDownloadsPath() == "/tmp/received_files", "Downloads path updated via presenter");
+    TEST_ASSERT(sett.saveToJson().find("/tmp/received_files") != std::string::npos, "Serialized downloadsPath to JSON");
+
     return true;
 }
 
@@ -1174,6 +1269,504 @@ static bool testHttpClientAndCloudSync() {
     return true;
 }
 
+static bool testLiveSocketTransferPipeline() {
+    std::filesystem::path testRootDir = "./unit_test_socket_transfer_tmp";
+    std::filesystem::remove_all(testRootDir);
+    std::filesystem::create_directories(testRootDir);
+
+    std::filesystem::path sendDir = testRootDir / "sender";
+    std::filesystem::path recvDir = testRootDir / "receiver";
+    std::filesystem::create_directories(sendDir);
+    std::filesystem::create_directories(recvDir);
+
+    FileChunkHasher hasher;
+
+    // Helper to start an ephemeral receiver socket
+    auto bindEphemeral = [](int& listenFd, uint16_t& outPort) -> bool {
+        listenFd = socket(AF_INET, SOCK_STREAM, 0);
+        if (listenFd < 0) return false;
+        int opt = 1;
+        setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        if (bind(listenFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            close(listenFd);
+            return false;
+        }
+        if (listen(listenFd, 2) < 0) {
+            close(listenFd);
+            return false;
+        }
+        socklen_t len = sizeof(addr);
+        if (getsockname(listenFd, reinterpret_cast<sockaddr*>(&addr), &len) < 0) {
+            close(listenFd);
+            return false;
+        }
+        outPort = ntohs(addr.sin_port);
+        return true;
+    };
+
+    // Receiver worker simulating live receiver socket loop
+    auto runReceiverWorker = [&](int listenFd, const std::string& saveDirectory, std::atomic<int>& outStatus) {
+        sockaddr_in clientAddr{};
+        socklen_t cLen = sizeof(clientAddr);
+        int clientFd = accept(listenFd, reinterpret_cast<sockaddr*>(&clientAddr), &cLen);
+        if (clientFd < 0) {
+            outStatus.store(-1);
+            return;
+        }
+
+        NetworkSession session("rx-session", "127.0.0.1", 0);
+        session.attachSocket(clientFd);
+
+        uint32_t nameLen = 0;
+        if (!session.receiveExact(reinterpret_cast<uint8_t*>(&nameLen), sizeof(uint32_t)) || nameLen == 0 || nameLen > 255) {
+            uint8_t nack = 0;
+            session.sendAll(&nack, 1);
+            outStatus.store(1);
+            return;
+        }
+
+        std::string fileName(nameLen, '\0');
+        if (!session.receiveExact(reinterpret_cast<uint8_t*>(fileName.data()), nameLen) || !isSafeFileName(fileName)) {
+            uint8_t nack = 0;
+            session.sendAll(&nack, 1);
+            outStatus.store(2);
+            return;
+        }
+
+        uint64_t fileSize = 0;
+        if (!session.receiveExact(reinterpret_cast<uint8_t*>(&fileSize), sizeof(uint64_t)) || !isValidFileSize(fileSize)) {
+            uint8_t nack = 0;
+            session.sendAll(&nack, 1);
+            outStatus.store(3);
+            return;
+        }
+
+        std::filesystem::path canonicalBase = std::filesystem::weakly_canonical(saveDirectory);
+        std::filesystem::path outPath = canonicalBase / fileName;
+        if (std::filesystem::exists(outPath)) {
+            uint8_t nack = 0;
+            session.sendAll(&nack, 1);
+            outStatus.store(4);
+            return;
+        }
+
+        std::filesystem::path partPath = canonicalBase / (fileName + ".part");
+        std::error_code ec;
+        std::filesystem::remove(partPath, ec);
+
+        std::string expectedHash(64, '\0');
+        if (!session.receiveExact(reinterpret_cast<uint8_t*>(expectedHash.data()), 64)) {
+            uint8_t nack = 0;
+            session.sendAll(&nack, 1);
+            outStatus.store(5);
+            return;
+        }
+
+        std::ofstream outFile(partPath, std::ios::binary);
+        if (!outFile.is_open()) {
+            uint8_t nack = 0;
+            session.sendAll(&nack, 1);
+            outStatus.store(6);
+            return;
+        }
+
+        uint64_t totalReceived = 0;
+        constexpr uint32_t kMaxChunk = 4 * 1024 * 1024;
+        bool aborted = false;
+
+        while (totalReceived < fileSize) {
+            uint32_t chunkSize = 0;
+            if (!session.receiveExact(reinterpret_cast<uint8_t*>(&chunkSize), sizeof(uint32_t)) ||
+                !isValidChunkSize(chunkSize, fileSize, totalReceived, kMaxChunk)) {
+                aborted = true;
+                break;
+            }
+
+            std::vector<uint8_t> buf(chunkSize);
+            if (!session.receiveExact(buf.data(), chunkSize)) {
+                aborted = true;
+                break;
+            }
+
+            outFile.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(chunkSize));
+            totalReceived += chunkSize;
+        }
+
+        outFile.close();
+
+        if (aborted || totalReceived != fileSize) {
+            std::filesystem::remove(partPath, ec);
+            outStatus.store(7); // Aborted / truncated
+            return;
+        }
+
+        FileChunkHasher h;
+        auto actualHashOpt = h.computeFullFileHash(partPath.string());
+        std::string actualHash = actualHashOpt.value_or("");
+        uint8_t ack = (actualHash == expectedHash) ? 1 : 0;
+        session.sendAll(&ack, 1);
+
+        if (ack == 1) {
+            std::filesystem::rename(partPath, outPath, ec);
+            outStatus.store(0); // Success
+        } else {
+            std::filesystem::remove(partPath, ec);
+            outStatus.store(8); // Hash mismatch
+        }
+    };
+
+    // Sender helper executing standard protocol
+    auto sendFileOverSocket = [&](uint16_t port, const std::string& filePath, const std::string& overrideHash, bool simulateDisconnect) -> bool {
+        NetworkSession session("tx-session", "127.0.0.1", port);
+        if (!session.connectTo("127.0.0.1", port)) return false;
+
+        std::filesystem::path p(filePath);
+        std::string fileName = p.filename().string();
+        uint64_t fileSize = std::filesystem::file_size(p);
+        FileChunkHasher h;
+        std::string fileHash = overrideHash.empty() ? h.computeFullFileHash(filePath).value_or("") : overrideHash;
+
+        uint32_t nameLen = static_cast<uint32_t>(fileName.size());
+        std::vector<uint8_t> header(sizeof(uint32_t) + nameLen + sizeof(uint64_t) + 64);
+        uint8_t* ptr = header.data();
+        std::memcpy(ptr, &nameLen, sizeof(uint32_t)); ptr += sizeof(uint32_t);
+        std::memcpy(ptr, fileName.data(), nameLen); ptr += nameLen;
+        std::memcpy(ptr, &fileSize, sizeof(uint64_t)); ptr += sizeof(uint64_t);
+        std::string hashPadded = fileHash; hashPadded.resize(64, '0');
+        std::memcpy(ptr, hashPadded.data(), 64);
+
+        if (!session.sendAll(header.data(), header.size())) return false;
+
+        std::ifstream in(filePath, std::ios::binary);
+        std::vector<uint8_t> buf(64 * 1024);
+        uint64_t sent = 0;
+
+        while (sent < fileSize && in) {
+            in.read(reinterpret_cast<char*>(buf.data()), buf.size());
+            size_t count = static_cast<size_t>(in.gcount());
+            if (count == 0) break;
+
+            if (simulateDisconnect && sent + count >= fileSize / 2) {
+                // Abruptly terminate connection
+                session.closeSession();
+                return false;
+            }
+
+            uint32_t cU32 = static_cast<uint32_t>(count);
+            if (!session.sendAll(reinterpret_cast<const uint8_t*>(&cU32), sizeof(uint32_t))) return false;
+            if (!session.sendAll(buf.data(), count)) return false;
+            sent += count;
+        }
+
+        uint8_t ack = 0;
+        if (session.receiveExact(&ack, 1) && ack == 1) {
+            return true;
+        }
+        return false;
+    };
+
+    // 1. Positive Test: Small 512-byte file transfer
+    std::string smallFile = (sendDir / "small.txt").string();
+    {
+        std::ofstream out(smallFile, std::ios::binary);
+        for (int i = 0; i < 512; ++i) out.put(static_cast<char>(i & 0xFF));
+    }
+    int listenFd1 = -1;
+    uint16_t port1 = 0;
+    TEST_ASSERT(bindEphemeral(listenFd1, port1), "Bound ephemeral receiver socket for small file");
+    std::atomic<int> rxStatus1{-99};
+    std::thread rxTh1([&]() { runReceiverWorker(listenFd1, recvDir.string(), rxStatus1); });
+    bool txOk1 = sendFileOverSocket(port1, smallFile, "", false);
+    rxTh1.join();
+    close(listenFd1);
+
+    TEST_ASSERT(txOk1, "Sender received positive ACK from receiver for small file");
+    TEST_ASSERT(rxStatus1.load() == 0, "Receiver status indicates success for small file");
+    TEST_ASSERT(std::filesystem::exists(recvDir / "small.txt"), "Destination small file created");
+    TEST_ASSERT(!std::filesystem::exists(recvDir / "small.txt.part"), "Temporary .part file cleaned up");
+    TEST_ASSERT(hasher.computeFullFileHash(smallFile) == hasher.computeFullFileHash((recvDir / "small.txt").string()),
+                "Small file SHA-256 matches exactly");
+
+    // 2. Positive Test: Multi-chunk 256 KB file transfer (4 chunks of 64KB)
+    std::string largeFile = (sendDir / "multi_chunk.bin").string();
+    {
+        std::ofstream out(largeFile, std::ios::binary);
+        std::vector<char> block(64 * 1024, 0);
+        for (int i = 0; i < 4; ++i) {
+            std::fill(block.begin(), block.end(), static_cast<char>('A' + i));
+            out.write(block.data(), block.size());
+        }
+    }
+    int listenFd2 = -1;
+    uint16_t port2 = 0;
+    TEST_ASSERT(bindEphemeral(listenFd2, port2), "Bound ephemeral receiver socket for 256KB file");
+    std::atomic<int> rxStatus2{-99};
+    std::thread rxTh2([&]() { runReceiverWorker(listenFd2, recvDir.string(), rxStatus2); });
+    bool txOk2 = sendFileOverSocket(port2, largeFile, "", false);
+    rxTh2.join();
+    close(listenFd2);
+
+    TEST_ASSERT(txOk2, "Sender received positive ACK for multi-chunk file");
+    TEST_ASSERT(rxStatus2.load() == 0, "Receiver status indicates success for multi-chunk file");
+    TEST_ASSERT(std::filesystem::exists(recvDir / "multi_chunk.bin"), "Multi-chunk destination file created");
+    TEST_ASSERT(hasher.computeFullFileHash(largeFile) == hasher.computeFullFileHash((recvDir / "multi_chunk.bin").string()),
+                "Multi-chunk file SHA-256 matches exactly");
+
+    // 3. Negative Test 1: Abrupt disconnect cleans up .part file
+    std::string abortFile = (sendDir / "abort_candidate.bin").string();
+    {
+        std::ofstream out(abortFile, std::ios::binary);
+        std::vector<char> dummy(256 * 1024, 'X');
+        out.write(dummy.data(), dummy.size());
+    }
+    int listenFd3 = -1;
+    uint16_t port3 = 0;
+    TEST_ASSERT(bindEphemeral(listenFd3, port3), "Bound ephemeral receiver socket for disconnect test");
+    std::atomic<int> rxStatus3{-99};
+    std::thread rxTh3([&]() { runReceiverWorker(listenFd3, recvDir.string(), rxStatus3); });
+    bool txOk3 = sendFileOverSocket(port3, abortFile, "", true); // simulate disconnect!
+    rxTh3.join();
+    close(listenFd3);
+
+    TEST_ASSERT(!txOk3, "Sender detected interrupted connection");
+    TEST_ASSERT(rxStatus3.load() == 7, "Receiver correctly caught premature abort/disconnection");
+    TEST_ASSERT(!std::filesystem::exists(recvDir / "abort_candidate.bin.part"), "Temporary .part file deleted on abort");
+
+    // 4. Negative Test 2: Checksum mismatch rejected and .part deleted
+    std::string corruptFile = (sendDir / "corrupt_candidate.bin").string();
+    {
+        std::ofstream out(corruptFile);
+        out << "Data payload with forged SHA-256 header hash";
+    }
+    int listenFd4 = -1;
+    uint16_t port4 = 0;
+    TEST_ASSERT(bindEphemeral(listenFd4, port4), "Bound ephemeral receiver socket for corrupt hash test");
+    std::atomic<int> rxStatus4{-99};
+    std::thread rxTh4([&]() { runReceiverWorker(listenFd4, recvDir.string(), rxStatus4); });
+    std::string forgedHash = "0000000000000000000000000000000000000000000000000000000000000000";
+    bool txOk4 = sendFileOverSocket(port4, corruptFile, forgedHash, false);
+    rxTh4.join();
+    close(listenFd4);
+
+    TEST_ASSERT(!txOk4, "Sender received NACK on hash mismatch");
+    TEST_ASSERT(rxStatus4.load() == 8, "Receiver flagged hash mismatch");
+    TEST_ASSERT(!std::filesystem::exists(recvDir / "corrupt_candidate.bin"), "Corrupt destination file not created");
+    TEST_ASSERT(!std::filesystem::exists(recvDir / "corrupt_candidate.bin.part"), "Corrupt .part file deleted");
+
+    // 5. Negative Test 3: Destination file already exists collision
+    int listenFd5 = -1;
+    uint16_t port5 = 0;
+    TEST_ASSERT(bindEphemeral(listenFd5, port5), "Bound ephemeral receiver socket for existing file test");
+    std::atomic<int> rxStatus5{-99};
+    std::thread rxTh5([&]() { runReceiverWorker(listenFd5, recvDir.string(), rxStatus5); });
+    bool txOk5 = sendFileOverSocket(port5, smallFile, "", false); // small.txt already exists from Test 1!
+    rxTh5.join();
+    close(listenFd5);
+
+    TEST_ASSERT(!txOk5, "Sender rejected when destination file already exists");
+    TEST_ASSERT(rxStatus5.load() == 4, "Receiver detected existing file collision and sent NACK");
+
+    std::filesystem::remove_all(testRootDir);
+    return true;
+}
+
+static bool testTransferEngine() {
+    std::filesystem::path rootDir = "./unit_test_transfer_engine_tmp";
+    std::filesystem::remove_all(rootDir);
+    std::filesystem::create_directories(rootDir);
+
+    std::filesystem::path sendDir = rootDir / "sender";
+    std::filesystem::path recvDir = rootDir / "receiver";
+    std::filesystem::create_directories(sendDir);
+    std::filesystem::create_directories(recvDir);
+
+    FileChunkHasher hasher;
+    TransferEngine engine;
+
+    // Ephemeral port selection
+    int ephemeralFd = socket(AF_INET, SOCK_STREAM, 0);
+    uint16_t listenPort = 0;
+    if (ephemeralFd >= 0) {
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_port = 0;
+        bind(ephemeralFd, reinterpret_cast<sockaddr*>(&a), sizeof(a));
+        socklen_t slen = sizeof(a);
+        getsockname(ephemeralFd, reinterpret_cast<sockaddr*>(&a), &slen);
+        listenPort = ntohs(a.sin_port);
+        close(ephemeralFd);
+    }
+    if (listenPort == 0) listenPort = 9988;
+
+    TransferOptions srvOpts;
+    std::atomic<int> incomingCount{0};
+    std::atomic<int> finishedCount{0};
+
+    bool serverStarted = engine.startServer(
+        listenPort,
+        recvDir.string(),
+        srvOpts,
+        [&](const std::string&, const std::string&, uint64_t, const std::string&) -> bool {
+            incomingCount.fetch_add(1);
+            return true;
+        },
+        nullptr,
+        [&](const std::string&, const std::string&, bool, const std::string&, const std::string&) {
+            finishedCount.fetch_add(1);
+        }
+    );
+    TEST_ASSERT(serverStarted, "TransferEngine server started on ephemeral port");
+    TEST_ASSERT(engine.isServerRunning(), "TransferEngine reports running server");
+
+    // 1. Positive Test: Send small file
+    std::string smallFile = (sendDir / "engine_small.txt").string();
+    {
+        std::ofstream out(smallFile, std::ios::binary);
+        out << "Hello from TransferEngine integration test! Ensuring zero mock data in live path.";
+    }
+    std::string outErr;
+    TransferOptions clientOpts;
+    bool sentSmall = engine.sendFile(
+        "task-engine-1",
+        smallFile,
+        "127.0.0.1",
+        listenPort,
+        clientOpts,
+        nullptr,
+        nullptr,
+        &outErr
+    );
+    TEST_ASSERT(sentSmall, "Small file sent successfully via TransferEngine");
+    TEST_ASSERT(std::filesystem::exists(recvDir / "engine_small.txt"), "Small file exists in receiver directory");
+    TEST_ASSERT(!std::filesystem::exists(recvDir / "engine_small.txt.part"), "Small file .part cleaned up");
+    TEST_ASSERT(hasher.computeFullFileHash(smallFile) == hasher.computeFullFileHash((recvDir / "engine_small.txt").string()),
+                "Small file SHA-256 matches perfectly");
+
+    // 2. Positive Test: Send multi-chunk file (256 KB)
+    std::string multiFile = (sendDir / "engine_multi.bin").string();
+    {
+        std::ofstream out(multiFile, std::ios::binary);
+        std::vector<char> blk(64 * 1024, 'M');
+        for (int i = 0; i < 4; ++i) {
+            std::fill(blk.begin(), blk.end(), static_cast<char>('1' + i));
+            out.write(blk.data(), blk.size());
+        }
+    }
+    bool sentMulti = engine.sendFile(
+        "task-engine-2",
+        multiFile,
+        "127.0.0.1",
+        listenPort,
+        clientOpts,
+        nullptr,
+        nullptr,
+        &outErr
+    );
+    TEST_ASSERT(sentMulti, "Multi-chunk file sent successfully via TransferEngine");
+    TEST_ASSERT(std::filesystem::exists(recvDir / "engine_multi.bin"), "Multi-chunk file exists in receiver directory");
+    TEST_ASSERT(!std::filesystem::exists(recvDir / "engine_multi.bin.part"), "Multi-chunk .part cleaned up");
+    TEST_ASSERT(hasher.computeFullFileHash(multiFile) == hasher.computeFullFileHash((recvDir / "engine_multi.bin").string()),
+                "Multi-chunk file SHA-256 matches perfectly");
+
+    // 3. Negative Test: Send to unreachable port
+    std::string unreachErr;
+    bool sentUnreach = engine.sendFile(
+        "task-engine-unreach",
+        smallFile,
+        "127.0.0.1",
+        59991, // non-listening port
+        clientOpts,
+        nullptr,
+        nullptr,
+        &unreachErr
+    );
+    TEST_ASSERT(!sentUnreach, "Send to unreachable port returns false gracefully");
+    TEST_ASSERT(!unreachErr.empty(), "Unreachable send provides descriptive error message");
+
+    // 4. Cancellation Test: Abort mid-stream
+    std::string cancelFile = (sendDir / "engine_cancel.bin").string();
+    {
+        std::ofstream out(cancelFile, std::ios::binary);
+        std::vector<char> blk(64 * 1024, 'C');
+        for (int i = 0; i < 8; ++i) {
+            out.write(blk.data(), blk.size());
+        }
+    }
+    std::atomic<bool> cancelFlag{false};
+    std::string cancelErr;
+    TransferOptions cancelOpts = clientOpts;
+    cancelOpts.speedLimitKbps = 32;
+    bool sentCancelled = engine.sendFile(
+        "task-engine-cancel",
+        cancelFile,
+        "127.0.0.1",
+        listenPort,
+        cancelOpts,
+        [&](const TransferProgressUpdate& upd) {
+            if (upd.state == TransferState::Connecting || upd.bytesTransferred > 0) {
+                cancelFlag.store(true);
+            }
+        },
+        &cancelFlag,
+        &cancelErr
+    );
+    TEST_ASSERT(!sentCancelled, "Mid-stream cancellation returns false");
+    TEST_ASSERT(!std::filesystem::exists(recvDir / "engine_cancel.bin.part"), "Cancelled transfer cleans up temporary .part file");
+
+    // 5. Duplicate collision rejection test
+    std::string dupErr;
+    bool sentDup = engine.sendFile(
+        "task-engine-dup",
+        smallFile, // engine_small.txt already exists in recvDir
+        "127.0.0.1",
+        listenPort,
+        clientOpts,
+        nullptr,
+        nullptr,
+        &dupErr
+    );
+    TEST_ASSERT(!sentDup, "Duplicate filename rejected by receiver");
+
+    // 6. Duplicate auto-rename test when autoRenameDuplicates is enabled
+    engine.stopServer();
+    TransferOptions autoRenameOpts;
+    autoRenameOpts.autoRenameDuplicates = true;
+    bool restartedServer = engine.startServer(
+        listenPort,
+        recvDir.string(),
+        autoRenameOpts,
+        nullptr,
+        nullptr,
+        nullptr
+    );
+    TEST_ASSERT(restartedServer, "Restarted server with autoRenameDuplicates enabled");
+
+    std::string renameErr;
+    bool sentAutoRename = engine.sendFile(
+        "task-engine-dup-rename",
+        smallFile, // engine_small.txt already exists in recvDir
+        "127.0.0.1",
+        listenPort,
+        clientOpts,
+        nullptr,
+        nullptr,
+        &renameErr
+    );
+    TEST_ASSERT(sentAutoRename, "File sent successfully with autoRenameDuplicates enabled");
+    TEST_ASSERT(std::filesystem::exists(recvDir / "engine_small (1).txt"), "Auto-renamed file engine_small (1).txt created");
+
+    engine.stopServer();
+    TEST_ASSERT(!engine.isServerRunning(), "TransferEngine server stopped cleanly");
+
+    std::filesystem::remove_all(rootDir);
+    return true;
+}
+
 int main() {
     std::cout << "==========================================\n";
     std::cout << "  LAN-Drop: Comprehensive Unit Test Suite \n";
@@ -1201,7 +1794,9 @@ int main() {
         {"Receiver Security & Boundary Validation", testReceiverSecurityValidation},
         {"Third-Party JSON & REST Protocol Parsing", testJsonAndRestSerialization},
         {"OpenSSL TLS Transport & Device Authentication", testTlsTransportAndDeviceAuth},
-        {"REST/HTTP Client & Cloud Quota Synchronization", testHttpClientAndCloudSync}
+        {"REST/HTTP Client & Cloud Quota Synchronization", testHttpClientAndCloudSync},
+        {"Live P2P Socket Pipeline & Error Recovery", testLiveSocketTransferPipeline},
+        {"TransferEngine Core Pipeline & Hardened Security", testTransferEngine}
     };
 
 

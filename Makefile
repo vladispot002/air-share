@@ -62,10 +62,13 @@ web:
 	@cd "Design LAN-Drop macOS UI" && npm run dev -- --host 0.0.0.0 --port 5173
 
 desktop:
-	@cp -f resources/lan-drop.desktop ~/Стільниця/lan-drop.desktop
+	@mkdir -p ~/.local/share/applications ~/.local/share/icons/hicolor/scalable/apps
+	@cp -f resources/lan-drop.svg ~/.local/share/icons/hicolor/scalable/apps/lan-drop.svg 2>/dev/null || true
+	@mkdir -p ~/Стільниця ~/Desktop 2>/dev/null || true
+	@[ -d ~/Стільниця ] && cp -f resources/lan-drop.desktop ~/Стільниця/lan-drop.desktop && chmod +x ~/Стільниця/lan-drop.desktop && gio set ~/Стільниця/lan-drop.desktop metadata::trusted true 2>/dev/null || true
+	@[ -d ~/Desktop ] && cp -f resources/lan-drop.desktop ~/Desktop/lan-drop.desktop && chmod +x ~/Desktop/lan-drop.desktop && gio set ~/Desktop/lan-drop.desktop metadata::trusted true 2>/dev/null || true
 	@cp -f resources/lan-drop.desktop ~/.local/share/applications/lan-drop.desktop
-	@chmod +x ~/Стільниця/lan-drop.desktop ~/.local/share/applications/lan-drop.desktop
-	@gio set ~/Стільниця/lan-drop.desktop metadata::trusted true 2>/dev/null || true
+	@chmod +x ~/.local/share/applications/lan-drop.desktop
 	@update-desktop-database ~/.local/share/applications 2>/dev/null || true
 
 clean:

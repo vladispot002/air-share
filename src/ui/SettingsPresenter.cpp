@@ -50,6 +50,7 @@ void SettingsPresenter::initialize() {
     m_speedLimitKbps = 25000;
     m_autoAccept = false;
     m_airdropEnabled = true;
+    m_downloadsPath = "./downloads";
 
     if (m_configPath.empty()) {
         m_configPath = getDefaultConfigPath();
@@ -70,6 +71,7 @@ void SettingsPresenter::initialize() {
 
     if (m_view) {
         m_view->loadSettings(m_port, m_speedLimitKbps, m_autoAccept, m_airdropEnabled);
+        m_view->setDownloadsPath(m_downloadsPath);
     }
 }
 
@@ -91,6 +93,15 @@ void SettingsPresenter::onAutoAcceptToggled(bool autoAccept) {
 void SettingsPresenter::onAirDropToggled(bool airdropEnabled) {
     m_airdropEnabled = airdropEnabled;
     addLog("Multicast beacon discovery: " + std::string(airdropEnabled ? "Enabled" : "Disabled"));
+}
+
+void SettingsPresenter::onDownloadsPathChanged(const std::string& path) {
+    m_downloadsPath = path;
+    addLog("Downloads directory set to: " + path);
+}
+
+void SettingsPresenter::setDownloadsPath(std::string path) {
+    m_downloadsPath = std::move(path);
 }
 
 void SettingsPresenter::onSaveSettingsClicked() {
@@ -131,20 +142,49 @@ bool SettingsPresenter::loadFromJson(const std::string& jsonStr) {
     }
     try {
         auto j = nlohmann::json::parse(jsonStr);
-        if (j.contains("port") && j["port"].is_number_integer()) {
-            int p = j["port"].get<int>();
-            if (p >= 1 && p <= 65535) {
-                m_port = static_cast<uint16_t>(p);
+        // Port: support integer or string representation
+        if (j.contains("port")) {
+            if (j["port"].is_number_integer()) {
+                int p = j["port"].get<int>();
+                if (p >= 1 && p <= 65535) {
+                    m_port = static_cast<uint16_t>(p);
+                }
+            } else if (j["port"].is_string()) {
+                try {
+                    int p = std::stoi(j["port"].get<std::string>());
+                    if (p >= 1 && p <= 65535) {
+                        m_port = static_cast<uint16_t>(p);
+                    }
+                } catch (...) {}
             }
         }
-        if (j.contains("speedLimitKbps") && j["speedLimitKbps"].is_number_unsigned()) {
+
+        // Speed limit: support speedLimitKbps or legacy speed_limit_kbps
+        if (j.contains("speedLimitKbps") && j["speedLimitKbps"].is_number()) {
             m_speedLimitKbps = j["speedLimitKbps"].get<uint32_t>();
+        } else if (j.contains("speed_limit_kbps") && j["speed_limit_kbps"].is_number()) {
+            m_speedLimitKbps = j["speed_limit_kbps"].get<uint32_t>();
         }
+
+        // Auto accept: support autoAccept or legacy auto_accept
         if (j.contains("autoAccept") && j["autoAccept"].is_boolean()) {
             m_autoAccept = j["autoAccept"].get<bool>();
+        } else if (j.contains("auto_accept") && j["auto_accept"].is_boolean()) {
+            m_autoAccept = j["auto_accept"].get<bool>();
         }
+
+        // Discovery / AirDrop: support airdropEnabled or legacy airdrop_enabled
         if (j.contains("airdropEnabled") && j["airdropEnabled"].is_boolean()) {
             m_airdropEnabled = j["airdropEnabled"].get<bool>();
+        } else if (j.contains("airdrop_enabled") && j["airdrop_enabled"].is_boolean()) {
+            m_airdropEnabled = j["airdrop_enabled"].get<bool>();
+        }
+
+        // Downloads path
+        if (j.contains("downloadsPath") && j["downloadsPath"].is_string()) {
+            m_downloadsPath = j["downloadsPath"].get<std::string>();
+        } else if (j.contains("downloads_path") && j["downloads_path"].is_string()) {
+            m_downloadsPath = j["downloads_path"].get<std::string>();
         }
         return true;
     } catch (const std::exception&) {
@@ -158,6 +198,7 @@ std::string SettingsPresenter::saveToJson() const {
     j["speedLimitKbps"] = m_speedLimitKbps;
     j["autoAccept"] = m_autoAccept;
     j["airdropEnabled"] = m_airdropEnabled;
+    j["downloadsPath"] = m_downloadsPath;
     return j.dump(4);
 }
 

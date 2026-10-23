@@ -9,12 +9,14 @@
 #include <cstring>
 
 #include "landrop/utils/Types.hpp"
+#include "landrop/utils/SocketCompat.hpp"
 #include "landrop/utils/CryptoFallback.hpp"
 #include "landrop/core/ChunkBuffer.hpp"
 #include "landrop/core/FileChunkHasher.hpp"
 #include "landrop/core/NetworkSession.hpp"
 #include "landrop/core/SharedFolderManager.hpp"
 #include "landrop/core/MulticastBeacon.hpp"
+#include "landrop/core/TransferEngine.hpp"
 #include "landrop/peers/NetworkPeer.hpp"
 #include "landrop/peers/LocalPeer.hpp"
 #include "landrop/peers/CloudPeer.hpp"
@@ -49,349 +51,67 @@ static void printUsage(const char* progName) {
 }
 
 static int runSender(const std::string& filePath, const std::string& receiverIp, uint16_t port, bool useTls = false, const std::string& expectedFingerprint = "") {
-    std::filesystem::path p(filePath);
-    if (!std::filesystem::exists(p) || !std::filesystem::is_regular_file(p)) {
-        std::cerr << "Error: file does not exist: " << filePath << "\n";
-        return 1;
-    }
-
-    uint64_t fileSize = std::filesystem::file_size(p);
-    std::string fileName = p.filename().string();
-
-    FileChunkHasher hasher;
-    auto fullHashOpt = hasher.computeFullFileHash(filePath);
-    std::string fileHash = fullHashOpt.value_or("");
-
-    std::cout << "[Sender] File: " << fileName << " (" << fileSize << " bytes)\n";
-    std::cout << "[Sender] SHA-256: " << fileHash << "\n";
-    std::cout << "[Sender] Connecting to " << receiverIp << ":" << port << "...\n";
-
-    NetworkSession session("sender-session", receiverIp, port);
+    std::cout << "[Sender] Starting file transfer: " << filePath << " -> " << receiverIp << ":" << port << "\n";
     if (useTls) {
-        TlsConfig tlsConfig;
-        tlsConfig.role = TlsRole::Client;
-        tlsConfig.verifyMode = TlsVerificationMode::VerifyPinnedFingerprint;
-        tlsConfig.expectedFingerprint = expectedFingerprint;
-        session.enableTls(tlsConfig);
         std::cout << "[Sender] TLS enabled. Pinned fingerprint: "
                   << (expectedFingerprint.empty() ? "(none - self-signed will be rejected)" : expectedFingerprint) << "\n";
     }
 
-    if (!session.connectTo(receiverIp, port)) {
-        if (useTls && session.getTlsStatus() != TlsStatus::Connected && session.getTlsStatus() != TlsStatus::None) {
-            std::cerr << "Error: TLS connection failed: " << TlsHelper::statusToString(session.getTlsStatus()) << "\n";
-        } else {
-            std::cerr << "Error: failed to connect to receiver\n";
+    TransferEngine engine;
+    TransferOptions opts;
+    opts.useTls = useTls;
+    opts.expectedFingerprint = expectedFingerprint;
+
+    std::string error;
+    bool ok = engine.sendFile("cli-tx-01", filePath, receiverIp, port, opts, [](const TransferProgressUpdate& upd) {
+        if (upd.state == TransferState::Connecting) {
+            std::cout << "[Sender] " << upd.message << "\n" << std::flush;
+        } else if (upd.state == TransferState::Transferring) {
+            std::cout << "\r[Sender] Progress: " << upd.bytesTransferred << "/" << upd.totalBytes
+                      << " bytes (" << static_cast<int>(upd.progressPercentage) << "%)" << std::flush;
         }
-        return 1;
-    }
-    std::cout << "[Sender] Connected successfully.\n";
-    if (useTls) {
-        std::cout << "[Sender] TLS Handshake succeeded! Cipher: " << session.getTlsCipherSuite() << "\n";
-        std::cout << "[Sender] Verified Peer Fingerprint: " << session.getPeerFingerprint() << "\n";
-    }
+    }, nullptr, &error);
 
-    P2PTransferTask task("task-upload-01", fileName, fileSize, TransferDirection::Upload, "remote-node");
-    task.initialize();
-
-    uint32_t nameLen = static_cast<uint32_t>(fileName.size());
-    std::vector<uint8_t> header;
-    header.resize(sizeof(uint32_t) + nameLen + sizeof(uint64_t) + 64);
-
-    uint8_t* ptr = header.data();
-    std::memcpy(ptr, &nameLen, sizeof(uint32_t));
-    ptr += sizeof(uint32_t);
-
-    std::memcpy(ptr, fileName.data(), nameLen);
-    ptr += nameLen;
-
-    std::memcpy(ptr, &fileSize, sizeof(uint64_t));
-    ptr += sizeof(uint64_t);
-
-    std::string hashPadded = fileHash;
-    hashPadded.resize(64, '0');
-    std::memcpy(ptr, hashPadded.data(), 64);
-
-    if (!session.sendData(header)) {
-        std::cerr << "Error: failed to send metadata header\n";
-        return 1;
-    }
-
-    std::ifstream inFile(filePath, std::ios::binary);
-    std::vector<uint8_t> chunkBuf(64 * 1024);
-    size_t chunkIndex = 0;
-    uint64_t sentBytes = 0;
-
-    auto startTime = std::chrono::steady_clock::now();
-
-    while (sentBytes < fileSize && inFile) {
-        inFile.read(reinterpret_cast<char*>(chunkBuf.data()), static_cast<std::streamsize>(chunkBuf.size()));
-        size_t count = static_cast<size_t>(inFile.gcount());
-        if (count == 0) {
-            break;
-        }
-
-        uint32_t chunkSizeU32 = static_cast<uint32_t>(count);
-        if (!session.sendAll(reinterpret_cast<const uint8_t*>(&chunkSizeU32), sizeof(uint32_t))) {
-            std::cerr << "Error sending chunk size\n";
-            return 1;
-        }
-
-        if (!session.sendAll(chunkBuf.data(), count)) {
-            std::cerr << "Error sending chunk payload\n";
-            return 1;
-        }
-
-        sentBytes += count;
-        std::vector<uint8_t> chunkSlice(chunkBuf.begin(), chunkBuf.begin() + count);
-        task.processChunk(chunkIndex++, chunkSlice);
-
-        double progress = (static_cast<double>(sentBytes) / static_cast<double>(fileSize)) * 100.0;
-        std::cout << "\r[Sender] Progress: " << sentBytes << "/" << fileSize << " bytes ("
-                  << static_cast<int>(progress) << "%)" << std::flush;
-    }
     std::cout << "\n";
-
-    uint8_t ack = 0;
-    if (session.receiveExact(&ack, 1) && ack == 1) {
-        std::cout << "[Sender] Transfer verified and confirmed by receiver.\n";
-    } else {
-        std::cerr << "[Sender] Warning: did not receive positive confirmation.\n";
+    if (!ok) {
+        std::cerr << "Error: " << error << "\n";
+        return 1;
     }
-
-    auto endTime = std::chrono::steady_clock::now();
-    double duration = std::chrono::duration<double>(endTime - startTime).count();
-    std::cout << "[Sender] Finished in " << duration << " seconds.\n";
+    std::cout << "[Sender] Transfer verified and confirmed by receiver.\n";
     return 0;
 }
 
 static int runReceiver(uint16_t port, const std::string& saveDir, bool useTls = false) {
-    std::filesystem::create_directories(saveDir);
-
     std::cout << "[Receiver] Listening on port " << port << "...\n" << std::flush;
     std::cout << "[Receiver] Save directory: " << saveDir << "\n" << std::flush;
-
-    NetworkSession session("receiver-session", "0.0.0.0", port);
     if (useTls) {
-        TlsCertificate cert = TlsHelper::generateCertificate("LAN-Drop-Receiver");
-        std::cout << "[Receiver] TLS enabled. Device Fingerprint (SHA-256): " << cert.fingerprintSha256 << "\n" << std::flush;
-        TlsConfig tlsConfig;
-        tlsConfig.role = TlsRole::Server;
-        tlsConfig.certPem = cert.certPem;
-        tlsConfig.keyPem = cert.keyPem;
-        session.enableTls(tlsConfig);
+        std::cout << "[Receiver] TLS enabled.\n" << std::flush;
     }
 
+    TransferEngine engine;
+    TransferOptions opts;
+    opts.useTls = useTls;
+    opts.autoRenameDuplicates = true;
 
-    if (!session.listenOn(port)) {
-        std::cerr << "Error: failed to bind and listen on port " << port << "\n";
-        return 1;
-    }
-
-    if (!session.acceptIncoming()) {
-        if (useTls && session.getTlsStatus() != TlsStatus::Connected && session.getTlsStatus() != TlsStatus::None) {
-            std::cerr << "Error: TLS incoming connection failed: " << TlsHelper::statusToString(session.getTlsStatus()) << "\n";
-        } else {
-            std::cerr << "Error: failed to accept incoming connection\n";
+    std::string error;
+    bool ok = engine.receiveFileOnce("cli-rx-01", port, saveDir, opts, [](const TransferProgressUpdate& upd) {
+        if (upd.state == TransferState::Connecting) {
+            std::cout << "[Receiver] " << upd.message << "\n" << std::flush;
+        } else if (upd.state == TransferState::Transferring) {
+            std::cout << "\r[Receiver] Progress: " << upd.bytesTransferred << "/" << upd.totalBytes
+                      << " bytes (" << static_cast<int>(upd.progressPercentage) << "%)" << std::flush;
         }
-        return 1;
-    }
+    }, nullptr, &error);
 
-    std::cout << "[Receiver] Connection accepted from " << session.getRemoteIp() << ":" << session.getRemotePort() << "\n";
-    if (useTls) {
-        std::cout << "[Receiver] TLS Handshake succeeded! Cipher: " << session.getTlsCipherSuite() << "\n";
-    }
-
-    uint32_t nameLen = 0;
-    if (!session.receiveExact(reinterpret_cast<uint8_t*>(&nameLen), sizeof(uint32_t))) {
-        std::cerr << "Error receiving name length\n";
-        return 1;
-    }
-
-    if (nameLen == 0 || nameLen > 255) {
-        std::cerr << "Error: invalid file name length: " << nameLen << "\n";
-        uint8_t nack = 0;
-        session.sendAll(&nack, 1);
-        return 1;
-    }
-
-    std::string fileName(nameLen, '\0');
-    if (!session.receiveExact(reinterpret_cast<uint8_t*>(fileName.data()), nameLen)) {
-        std::cerr << "Error receiving file name\n";
-        return 1;
-    }
-
-    if (!isSafeFileName(fileName)) {
-        std::cerr << "Error: unsafe or invalid file name rejected: " << fileName << "\n";
-        uint8_t nack = 0;
-        session.sendAll(&nack, 1);
-        return 1;
-    }
-
-    std::filesystem::path cleanName = std::filesystem::path(fileName).filename();
-    if (cleanName.empty() || cleanName.string() != fileName) {
-        std::cerr << "Error: file name contains path elements: " << fileName << "\n";
-        uint8_t nack = 0;
-        session.sendAll(&nack, 1);
-        return 1;
-    }
-
-    std::filesystem::path canonicalBase = std::filesystem::weakly_canonical(std::filesystem::path(saveDir));
-    std::filesystem::path outPath = canonicalBase / cleanName;
-    std::filesystem::path canonicalOut = std::filesystem::weakly_canonical(outPath);
-
-    auto rel = std::filesystem::relative(canonicalOut, canonicalBase);
-    if (rel.empty() || rel.string().rfind("..", 0) == 0 || canonicalOut == canonicalBase) {
-        std::cerr << "Error: path traversal attempt detected for: " << fileName << "\n";
-        uint8_t nack = 0;
-        session.sendAll(&nack, 1);
-        return 1;
-    }
-
-    uint64_t fileSize = 0;
-    if (!session.receiveExact(reinterpret_cast<uint8_t*>(&fileSize), sizeof(uint64_t))) {
-        std::cerr << "Error receiving file size\n";
-        return 1;
-    }
-
-    if (!isValidFileSize(fileSize)) {
-        std::cerr << "Error: invalid or excessive file size: " << fileSize << "\n";
-        uint8_t nack = 0;
-        session.sendAll(&nack, 1);
-        return 1;
-    }
-
-    std::error_code ec;
-    auto space = std::filesystem::space(canonicalBase, ec);
-    if (!ec && space.available < fileSize) {
-        std::cerr << "Error: insufficient disk space: available=" << space.available
-                  << ", required=" << fileSize << "\n";
-        uint8_t nack = 0;
-        session.sendAll(&nack, 1);
-        return 1;
-    }
-
-    if (std::filesystem::is_symlink(std::filesystem::symlink_status(outPath))) {
-        std::cerr << "Error: destination path is a symlink: " << outPath.string() << "\n";
-        uint8_t nack = 0;
-        session.sendAll(&nack, 1);
-        return 1;
-    }
-
-    if (std::filesystem::exists(outPath)) {
-        std::cerr << "Error: destination file already exists: " << outPath.string() << "\n";
-        uint8_t nack = 0;
-        session.sendAll(&nack, 1);
-        return 1;
-    }
-
-    std::filesystem::path partPath = canonicalBase / (cleanName.string() + ".part");
-    if (std::filesystem::is_symlink(std::filesystem::symlink_status(partPath))) {
-        std::cerr << "Error: temporary part path is a symlink: " << partPath.string() << "\n";
-        uint8_t nack = 0;
-        session.sendAll(&nack, 1);
-        return 1;
-    }
-    std::filesystem::remove(partPath, ec);
-
-    std::string expectedHash(64, '\0');
-    if (!session.receiveExact(reinterpret_cast<uint8_t*>(expectedHash.data()), 64)) {
-        std::cerr << "Error receiving expected hash\n";
-        return 1;
-    }
-
-    std::cout << "[Receiver] Incoming file: " << fileName << " (" << fileSize << " bytes)\n";
-    std::cout << "[Receiver] Expected SHA-256: " << expectedHash << "\n";
-
-    std::ofstream outFile(partPath, std::ios::binary);
-    if (!outFile.is_open()) {
-        std::cerr << "Error creating output part file: " << partPath.string() << "\n";
-        uint8_t nack = 0;
-        session.sendAll(&nack, 1);
-        return 1;
-    }
-
-    P2PTransferTask task("task-download-01", fileName, fileSize, TransferDirection::Download, "sender-node");
-    task.initialize();
-
-    uint64_t totalReceived = 0;
-    size_t chunkIndex = 0;
-    std::vector<uint8_t> chunkBuf;
-
-    constexpr uint32_t kMaxChunkSize = 4 * 1024 * 1024; // 4 MB safety bound
-
-    while (totalReceived < fileSize) {
-        uint32_t chunkSize = 0;
-        if (!session.receiveExact(reinterpret_cast<uint8_t*>(&chunkSize), sizeof(uint32_t))) {
-            std::cerr << "Error receiving chunk size\n";
-            outFile.close();
-            std::filesystem::remove(partPath, ec);
-            return 1;
-        }
-
-        if (!isValidChunkSize(chunkSize, fileSize, totalReceived, kMaxChunkSize)) {
-            std::cerr << "Error: invalid or bounded chunk size rejected: " << chunkSize
-                      << " (totalReceived=" << totalReceived << ", fileSize=" << fileSize << ")\n";
-            outFile.close();
-            std::filesystem::remove(partPath, ec);
-            uint8_t nack = 0;
-            session.sendAll(&nack, 1);
-            return 1;
-        }
-
-        try {
-            chunkBuf.resize(chunkSize);
-        } catch (const std::bad_alloc&) {
-            std::cerr << "Error: memory allocation failure for chunk size: " << chunkSize << "\n";
-            outFile.close();
-            std::filesystem::remove(partPath, ec);
-            uint8_t nack = 0;
-            session.sendAll(&nack, 1);
-            return 1;
-        }
-
-        if (!session.receiveExact(chunkBuf.data(), chunkSize)) {
-            std::cerr << "Error receiving chunk data\n";
-            outFile.close();
-            std::filesystem::remove(partPath, ec);
-            return 1;
-        }
-
-        outFile.write(reinterpret_cast<const char*>(chunkBuf.data()), static_cast<std::streamsize>(chunkSize));
-        totalReceived += chunkSize;
-        task.processChunk(chunkIndex++, chunkBuf);
-
-        double progress = (static_cast<double>(totalReceived) / static_cast<double>(fileSize)) * 100.0;
-        std::cout << "\r[Receiver] Progress: " << totalReceived << "/" << fileSize << " bytes ("
-                  << static_cast<int>(progress) << "%)" << std::flush;
-    }
     std::cout << "\n";
-    outFile.close();
-
-    FileChunkHasher hasher;
-    auto actualHashOpt = hasher.computeFullFileHash(partPath.string());
-    std::string actualHash = actualHashOpt.value_or("");
-
-    std::cout << "[Receiver] Actual SHA-256:   " << actualHash << "\n";
-    uint8_t ack = (actualHash == expectedHash) ? 1 : 0;
-    session.sendAll(&ack, 1);
-
-    if (ack == 1) {
-        std::error_code renameEc;
-        std::filesystem::rename(partPath, outPath, renameEc);
-        if (renameEc) {
-            std::cerr << "Error renaming temporary file to destination: " << renameEc.message() << "\n";
-            std::filesystem::remove(partPath, ec);
-            return 1;
-        }
-        std::cout << "[Receiver] File verified successfully: " << outPath.string() << "\n";
-        return 0;
-    } else {
-        std::cerr << "[Receiver] Hash mismatch! File may be corrupted.\n";
-        std::filesystem::remove(partPath, ec);
-        return 2;
+    if (!ok) {
+        std::cerr << "Error: " << error << "\n";
+        return 1;
     }
+    std::cout << "[Receiver] File verified successfully.\n";
+    return 0;
 }
+
 
 static int runGui(int argc, char* argv[], bool isMobile = false) {
 #if defined(LANDROP_BUILD_QT)
@@ -564,69 +284,65 @@ static int runDemo() {
 }
 
 int main(int argc, char* argv[]) {
+    initSocketSubsystem();
+
+    int exitCode = 0;
     if (argc == 1) {
-        return runGui(argc, argv, false);
-    }
-
-    std::string mode = argv[1];
-    if (mode == "demo") {
-        return runDemo();
-    }
-
-    if (mode == "gui" || mode == "desktop-gui") {
-        return runGui(argc, argv, false);
-    }
-
-    if (mode == "mobile-gui" || mode == "--mobile" || mode == "-m") {
-        return runGui(argc, argv, true);
-    }
-
-    if (mode == "mobile-test") {
-        return runMobileTest();
-    }
-
-    if (mode == "send") {
-        if (argc < 4) {
-            printUsage(argv[0]);
-            return 1;
-        }
-        std::string filePath = argv[2];
-        std::string ip = argv[3];
-        uint16_t port = 8848;
-        bool useTls = false;
-        std::string expectedFingerprint;
-        for (int i = 4; i < argc; ++i) {
-            std::string arg = argv[i];
-            if (arg == "--tls") {
-                useTls = true;
-                if (i + 1 < argc && argv[i + 1][0] != '-') {
-                    expectedFingerprint = argv[++i];
-                }
-            } else if (!arg.empty() && std::isdigit(static_cast<unsigned char>(arg[0]))) {
-                port = static_cast<uint16_t>(std::stoi(arg));
-            }
-        }
-        return runSender(filePath, ip, port, useTls, expectedFingerprint);
-    }
-
-    if (mode == "receive") {
-        uint16_t port = 8848;
-        std::string saveDir = "./downloads";
-        bool useTls = false;
-        for (int i = 2; i < argc; ++i) {
-            std::string arg = argv[i];
-            if (arg == "--tls") {
-                useTls = true;
-            } else if (!arg.empty() && std::isdigit(static_cast<unsigned char>(arg[0]))) {
-                port = static_cast<uint16_t>(std::stoi(arg));
+        exitCode = runGui(argc, argv, false);
+    } else {
+        std::string mode = argv[1];
+        if (mode == "demo") {
+            exitCode = runDemo();
+        } else if (mode == "gui" || mode == "desktop-gui") {
+            exitCode = runGui(argc, argv, false);
+        } else if (mode == "mobile-gui" || mode == "--mobile" || mode == "-m") {
+            exitCode = runGui(argc, argv, true);
+        } else if (mode == "mobile-test") {
+            exitCode = runMobileTest();
+        } else if (mode == "send") {
+            if (argc < 4) {
+                printUsage(argv[0]);
+                exitCode = 1;
             } else {
-                saveDir = arg;
+                std::string filePath = argv[2];
+                std::string ip = argv[3];
+                uint16_t port = 8848;
+                bool useTls = false;
+                std::string expectedFingerprint;
+                for (int i = 4; i < argc; ++i) {
+                    std::string arg = argv[i];
+                    if (arg == "--tls") {
+                        useTls = true;
+                        if (i + 1 < argc && argv[i + 1][0] != '-') {
+                            expectedFingerprint = argv[++i];
+                        }
+                    } else if (!arg.empty() && std::isdigit(static_cast<unsigned char>(arg[0]))) {
+                        port = static_cast<uint16_t>(std::stoi(arg));
+                    }
+                }
+                exitCode = runSender(filePath, ip, port, useTls, expectedFingerprint);
             }
+        } else if (mode == "receive") {
+            uint16_t port = 8848;
+            std::string saveDir = "./downloads";
+            bool useTls = false;
+            for (int i = 2; i < argc; ++i) {
+                std::string arg = argv[i];
+                if (arg == "--tls") {
+                    useTls = true;
+                } else if (!arg.empty() && std::isdigit(static_cast<unsigned char>(arg[0]))) {
+                    port = static_cast<uint16_t>(std::stoi(arg));
+                } else {
+                    saveDir = arg;
+                }
+            }
+            exitCode = runReceiver(port, saveDir, useTls);
+        } else {
+            printUsage(argv[0]);
+            exitCode = 1;
         }
-        return runReceiver(port, saveDir, useTls);
     }
 
-
-    printUsage(argv[0]);
-    return 1;
+    cleanupSocketSubsystem();
+    return exitCode;
 }

@@ -12,7 +12,17 @@ void TransferPresenter::setView(ITransferView* view) {
     m_view = view;
 }
 
-void TransferPresenter::initialize() {
+void TransferPresenter::initialize(bool populateSampleData) {
+    m_tasks.clear();
+    m_realTaskIds.clear();
+    m_selectedIndex = 0;
+    if (populateSampleData) {
+        loadSampleData();
+    }
+    refreshView();
+}
+
+void TransferPresenter::loadSampleData() {
     auto task1 = std::make_shared<P2PTransferTask>("T-0042", "project-assets.zip", 248ULL * 1024 * 1024, TransferDirection::Upload, "peer-thinkpad");
     task1->initialize();
     task1->setState(TransferState::Transferring);
@@ -72,9 +82,14 @@ void TransferPresenter::onSendFileClicked(const std::string& targetPeerId, const
     std::string taskId = "T-" + std::to_string(m_nextTaskNumber++);
     auto task = std::make_shared<P2PTransferTask>(taskId, p.filename().string(), size, TransferDirection::Upload, targetPeerId);
     task->initialize();
+    m_realTaskIds.insert(taskId);
     m_tasks.push_back(task);
     m_selectedIndex = m_tasks.size() - 1;
     refreshView();
+
+    if (m_sendFileCallback) {
+        m_sendFileCallback(taskId, targetPeerId, filePath);
+    }
 }
 
 void TransferPresenter::onPauseTransferClicked(const std::string& taskId) {
@@ -97,6 +112,9 @@ void TransferPresenter::onCancelTransferClicked(const std::string& taskId) {
     auto task = findTask(taskId);
     if (task && task->getState() != TransferState::Completed) {
         task->cancel();
+        if (m_cancelCallback) {
+            m_cancelCallback(taskId);
+        }
         refreshView();
     }
 }
@@ -134,21 +152,55 @@ void TransferPresenter::addTask(const std::shared_ptr<TransferTask>& task) {
     refreshView();
 }
 
+void TransferPresenter::addRealTask(const std::shared_ptr<TransferTask>& task) {
+    if (!task) return;
+    m_realTaskIds.insert(task->getTaskId());
+    m_tasks.push_back(task);
+    m_selectedIndex = m_tasks.size() - 1;
+    refreshView();
+}
+
+void TransferPresenter::updateTaskProgress(
+    const std::string& taskId,
+    uint64_t bytesTransferred,
+    double speedBytesPerSec,
+    TransferState state,
+    const std::string& /*message*/
+) {
+    auto task = findTask(taskId);
+    if (!task) return;
+    task->setBytesTransferred(bytesTransferred);
+    task->setState(state);
+    task->updateSpeed(static_cast<uint64_t>(speedBytesPerSec), 1.0);
+    refreshView();
+}
+
 void TransferPresenter::tick() {
     constexpr double kTickSeconds = 0.3;
     constexpr double kDefaultSpeed = 8.0 * 1024 * 1024;
     for (auto& task : m_tasks) {
+        if (!task) continue;
+        if (m_realTaskIds.find(task->getTaskId()) != m_realTaskIds.end()) {
+            continue; // Real socket transfers manage their own progress directly
+        }
+
         if (task->getState() == TransferState::Connecting) {
             task->setState(TransferState::Transferring);
         }
         if (task->getState() != TransferState::Transferring) {
+            // Paused, Completed, Cancelled, Failed -> do not tick bytes
             continue;
         }
         double speed = task->getCurrentSpeedBps();
         if (speed <= 0.0) {
             speed = kDefaultSpeed;
-            task->updateSpeed(static_cast<uint64_t>(speed), 1.0);
         }
+        if (m_speedLimitKbps > 0) {
+            double maxSpeedBps = static_cast<double>(m_speedLimitKbps) * 1024.0;
+            speed = std::min(speed, maxSpeedBps);
+        }
+        task->updateSpeed(static_cast<uint64_t>(speed), 1.0);
+
         uint64_t step = static_cast<uint64_t>(speed * kTickSeconds);
         uint64_t total = task->getFileSize();
         uint64_t next = std::min(total, task->getBytesTransferred() + step);

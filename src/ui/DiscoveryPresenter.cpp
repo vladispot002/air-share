@@ -332,7 +332,11 @@ std::string DiscoveryPresenter::getLocalDeviceIp() const {
 }
 
 uint16_t DiscoveryPresenter::getLocalDevicePort() const {
-    return 8848;
+    return m_beacon.getListenPort();
+}
+
+void DiscoveryPresenter::setLocalDevicePort(uint16_t port) {
+    m_beacon.setListenPort(port);
 }
 
 }

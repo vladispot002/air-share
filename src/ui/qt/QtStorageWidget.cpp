@@ -177,8 +177,13 @@ void QtStorageWidget::onRemoveFolderClicked() {
 
 void QtStorageWidget::onSetPinClicked() {
     bool ok = false;
-    QString pin = QInputDialog::getText(this, "Set Access PIN", "Enter PIN (4-16 characters):", QLineEdit::Password, "", &ok);
+    QString pin = QInputDialog::getText(this, "Set Access PIN", "Enter PIN (4-32 characters):", QLineEdit::Password, "", &ok);
     if (!ok || pin.isEmpty()) return;
+
+    if (pin.length() < 4 || pin.length() > 32) {
+        QMessageBox::warning(this, "Invalid PIN", "Access PIN must be between 4 and 32 characters.");
+        return;
+    }
 
     if (m_presenter) {
         m_presenter->onSetPasswordClicked(pin.toStdString());
@@ -186,9 +191,18 @@ void QtStorageWidget::onSetPinClicked() {
 }
 
 void QtStorageWidget::onClearPinClicked() {
-    if (m_presenter) {
-        m_presenter->onClearPasswordClicked();
+    if (!m_presenter) return;
+
+    bool ok = false;
+    QString pin = QInputDialog::getText(this, "Clear Access PIN", "Enter current PIN to confirm removal:", QLineEdit::Password, "", &ok);
+    if (!ok || pin.isEmpty()) return;
+
+    if (!m_presenter->getManager().verifyAccessPassword(pin.toStdString())) {
+        QMessageBox::critical(this, "Access Denied", "Incorrect PIN. Cannot clear protection.");
+        return;
     }
+
+    m_presenter->onClearPasswordClicked();
 }
 
 void QtStorageWidget::onRescanClicked() {

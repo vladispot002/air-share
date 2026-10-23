@@ -4,12 +4,14 @@
 #include <QStackedWidget>
 #include <QListWidget>
 #include <QStatusBar>
+#include <QTimer>
 #include <memory>
 
 #include "landrop/ui/DiscoveryPresenter.hpp"
 #include "landrop/ui/TransferPresenter.hpp"
 #include "landrop/ui/StoragePresenter.hpp"
 #include "landrop/ui/SettingsPresenter.hpp"
+#include "landrop/core/TransferEngine.hpp"
 
 namespace landrop::ui {
 
@@ -33,10 +35,17 @@ public:
     QtStorageWidget* getStorageWidget() const { return m_storageWidget; }
     QtSettingsWidget* getSettingsWidget() const { return m_settingsWidget; }
     DiscoveryPresenter* getDiscoveryPresenter() const { return m_discoveryPresenter.get(); }
+    TransferPresenter* getTransferPresenter() const { return m_transferPresenter.get(); }
+    StoragePresenter* getStoragePresenter() const { return m_storagePresenter.get(); }
     SettingsPresenter* getSettingsPresenter() const { return m_settingsPresenter.get(); }
+    TransferEngine* getTransferEngine() const { return m_transferEngine.get(); }
+    QTimer* getTransferTickTimer() const { return m_transferTickTimer; }
+    const std::string& getDownloadsDirectory() const { return m_downloadsDirectory; }
+
+    void startBackgroundTransferServer();
+    void handleSendFile(const std::string& taskId, const std::string& targetPeerId, const std::string& filePath);
 
 public slots:
-
     void applyTheme(const QString& themeName);
 
 private slots:
@@ -55,6 +64,10 @@ private:
     std::unique_ptr<TransferPresenter> m_transferPresenter;
     std::unique_ptr<StoragePresenter> m_storagePresenter;
     std::unique_ptr<SettingsPresenter> m_settingsPresenter;
+    std::unique_ptr<TransferEngine> m_transferEngine;
+
+    std::string m_downloadsDirectory;
+    QTimer* m_transferTickTimer{nullptr};
 
     void setupUi();
     void setupPresenters();

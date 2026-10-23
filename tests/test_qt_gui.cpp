@@ -15,6 +15,7 @@
 #include "landrop/ui/qt/QtStorageWidget.hpp"
 #include "landrop/ui/qt/QtSettingsWidget.hpp"
 
+using namespace landrop;
 using namespace landrop::ui;
 
 class TestQtGui : public QObject {
@@ -30,6 +31,11 @@ private slots:
     void testStoragePinStateAndFormat();
     void testSettingsSpeedLimitAndAmpersands();
     void testWindowResizeResponsiveness();
+    void testTransferEngineTickTimer();
+    void testSpeedLimitPropagation();
+    void testPeerProviderIntegration();
+    void testDirectoryValidationLogic();
+    void testDownloadsPathGuiSelectionAndSync();
 };
 
 void TestQtGui::testAppInitialization() {
@@ -190,9 +196,16 @@ void TestQtGui::testTransferButtonStatesAndActiveCount() {
 
     auto* transfer = app.getTransferWidget();
     QVERIFY(transfer != nullptr);
+    auto* presenter = app.getTransferPresenter();
+    QVERIFY(presenter != nullptr);
+    // Real desktop startup must start with a clean empty transfer queue
+    QVERIFY(presenter->getTasks().empty());
+
+    // Explicitly load sample data to test UI button states and table bindings
+    presenter->loadSampleData();
     QCoreApplication::processEvents();
 
-    // Verify active count: 3 items in default sample data are Transferring (T-0042, T-0039, T-0037)
+    // Verify active count: 3 items in sample data are Transferring (T-0042, T-0039, T-0037)
     QLabel* speedSummary = transfer->getSpeedSummaryLabel();
     QVERIFY(speedSummary != nullptr);
     QVERIFY(speedSummary->text().contains("Active: 3"));
@@ -212,7 +225,9 @@ void TestQtGui::testTransferButtonStatesAndActiveCount() {
     emit table->cellClicked(0, 0);
     QCoreApplication::processEvents();
 
-    QVERIFY(pauseBtn->isEnabled());
+    // Direct TCP streaming does not fake pause/resume; buttons remain disabled with explanatory tooltips
+    QVERIFY(!pauseBtn->isEnabled());
+    QVERIFY(pauseBtn->toolTip().contains("does not support pause"));
     QVERIFY(!resumeBtn->isEnabled());
     QVERIFY(cancelBtn->isEnabled());
 
@@ -297,6 +312,153 @@ void TestQtGui::testWindowResizeResponsiveness() {
     QCoreApplication::processEvents();
     QCOMPARE(app.width(), 1920);
     QCOMPARE(app.height(), 1080);
+}
+
+void TestQtGui::testTransferEngineTickTimer() {
+    QtDesktopApp app;
+    app.initialize();
+
+    auto* timer = app.getTransferTickTimer();
+    QVERIFY(timer != nullptr);
+    QVERIFY(timer->isActive());
+    QCOMPARE(timer->interval(), 300);
+
+    auto* presenter = app.getTransferPresenter();
+    QVERIFY(presenter != nullptr);
+    presenter->loadSampleData();
+    QVERIFY(!presenter->getTasks().empty());
+
+    auto task = presenter->getTasks()[0];
+    task->setState(TransferState::Transferring);
+    uint64_t before = task->getBytesTransferred();
+    presenter->tick();
+    uint64_t after = task->getBytesTransferred();
+    QVERIFY(after > before);
+}
+
+void TestQtGui::testSpeedLimitPropagation() {
+    QtDesktopApp app;
+    app.initialize();
+
+    auto* settings = app.getSettingsWidget();
+    auto* presenter = app.getTransferPresenter();
+    QVERIFY(settings != nullptr && presenter != nullptr);
+
+    settings->getSpeedLimitSpin()->setValue(18500);
+
+    QTimer::singleShot(50, []() {
+        for (QWidget* w : QApplication::topLevelWidgets()) {
+            if (auto* mb = qobject_cast<QMessageBox*>(w)) {
+                mb->accept();
+            }
+        }
+    });
+    QTest::mouseClick(settings->getSaveBtn(), Qt::LeftButton);
+    QCoreApplication::processEvents();
+
+    QCOMPARE(presenter->getSpeedLimit(), 18500u);
+}
+
+void TestQtGui::testPeerProviderIntegration() {
+    QtDesktopApp app;
+    app.initialize();
+
+    auto* discovery = app.getDiscoveryPresenter();
+    QVERIFY(discovery != nullptr);
+    discovery->onDirectConnectRequested("10.10.10.50", 8848);
+    QCoreApplication::processEvents();
+
+    auto* transfer = app.getTransferWidget();
+    QVERIFY(transfer != nullptr);
+    QVERIFY(transfer->getSendFileBtn() != nullptr);
+    QVERIFY(transfer->getSendFileBtn()->isEnabled());
+}
+
+void TestQtGui::testDirectoryValidationLogic() {
+    // 1. Empty path should fail
+    auto res1 = QtSettingsWidget::validateWritableDirectory("", false);
+    QVERIFY(!res1.ok);
+    QVERIFY(res1.errorMessage.contains("порожнім"));
+
+    // 2. Non-existent path without create should fail
+    QString nonExistent = "/tmp/landrop_test_nonexistent_" + QString::number(QCoreApplication::applicationPid());
+    QDir(nonExistent).removeRecursively();
+    auto res2 = QtSettingsWidget::validateWritableDirectory(nonExistent, false);
+    QVERIFY(!res2.ok);
+    QVERIFY(res2.errorMessage.contains("не існує"));
+
+    // 3. Non-existent path WITH create should succeed in writable tmp
+    auto res3 = QtSettingsWidget::validateWritableDirectory(nonExistent, true);
+    QVERIFY(res3.ok);
+    QVERIFY(QDir(nonExistent).exists());
+    QDir(nonExistent).removeRecursively();
+
+    // 4. File path (not directory) should fail
+    QString filePath = "/tmp/landrop_test_file_" + QString::number(QCoreApplication::applicationPid()) + ".txt";
+    QFile f(filePath);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write("hello", 5);
+    f.close();
+    auto res4 = QtSettingsWidget::validateWritableDirectory(filePath, false);
+    QVERIFY(!res4.ok);
+    QVERIFY(res4.errorMessage.contains("не є каталогом"));
+    QFile::remove(filePath);
+
+    // 5. System read-only or inaccessible path should fail write check
+    auto res5 = QtSettingsWidget::validateWritableDirectory("/proc", false);
+    QVERIFY(!res5.ok);
+}
+
+void TestQtGui::testDownloadsPathGuiSelectionAndSync() {
+    QtDesktopApp app;
+    app.initialize();
+
+    auto* settings = app.getSettingsWidget();
+    auto* transfer = app.getTransferWidget();
+    auto* engine = app.getTransferEngine();
+    QVERIFY(settings != nullptr && transfer != nullptr && engine != nullptr);
+
+    // Verify initial display is not empty
+    QVERIFY(settings->getDownloadPathEdit() != nullptr);
+    QVERIFY(!settings->getDownloadPathEdit()->text().isEmpty());
+    QVERIFY(transfer->getDownloadsPathDisplay() != nullptr);
+    QVERIFY(!transfer->getDownloadsPathDisplay()->text().isEmpty());
+
+    // Create a custom test directory
+    QString customDir = "/tmp/landrop_custom_recv_" + QString::number(QCoreApplication::applicationPid());
+    QDir().mkpath(customDir);
+
+    // Change path in settings edit and save
+    settings->getDownloadPathEdit()->setText(customDir);
+    QTimer::singleShot(50, []() {
+        for (QWidget* w : QApplication::topLevelWidgets()) {
+            if (auto* mb = qobject_cast<QMessageBox*>(w)) {
+                mb->accept();
+            }
+        }
+    });
+    QTest::mouseClick(settings->getSaveBtn(), Qt::LeftButton);
+    QCoreApplication::processEvents();
+
+    // Verify propagation
+    QCOMPARE(app.getDownloadsDirectory(), customDir.toStdString());
+    QCOMPARE(transfer->getDownloadsDirectory(), customDir.toStdString());
+    QCOMPARE(engine->getSaveDirectory(), customDir.toStdString());
+    QVERIFY(transfer->getDownloadsPathDisplay()->text().contains(customDir));
+
+    // Test signal from TransferWidget
+    QString anotherDir = "/tmp/landrop_another_recv_" + QString::number(QCoreApplication::applicationPid());
+    QDir().mkpath(anotherDir);
+    emit transfer->downloadsDirectoryChanged(anotherDir);
+    QCoreApplication::processEvents();
+
+    QCOMPARE(app.getDownloadsDirectory(), anotherDir.toStdString());
+    QCOMPARE(settings->getDownloadPathEdit()->text(), anotherDir);
+    QCOMPARE(engine->getSaveDirectory(), anotherDir.toStdString());
+
+    // Clean up
+    QDir(customDir).removeRecursively();
+    QDir(anotherDir).removeRecursively();
 }
 
 int main(int argc, char* argv[]) {

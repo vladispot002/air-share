@@ -1,0 +1,7 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/resources">
+        <file alias="styles.qss">styles.qss</file>
+        <file alias="lan-drop.svg">lan-drop.svg</file>
+    </qresource>
+</RCC>

@@ -59,6 +59,7 @@ public:
     virtual void loadSettings(uint16_t port, uint32_t speedLimitKbps, bool autoAccept, bool airdropEnabled) = 0;
     virtual void appendDiagnosticLog(const std::string& logLine) = 0;
     virtual void showSaveSuccess() = 0;
+    virtual void setDownloadsPath(const std::string& /*path*/) {}
 };
 
 }

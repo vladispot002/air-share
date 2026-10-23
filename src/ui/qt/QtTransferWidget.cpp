@@ -5,12 +5,16 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QFileDialog>
+#include <QInputDialog>
 #include <QMessageBox>
 #include <QDesktopServices>
 #include <QUrl>
 #include <QMetaObject>
 #include <QDir>
+#include <QStandardPaths>
+#include <QFrame>
 #include <algorithm>
+#include "landrop/ui/qt/QtSettingsWidget.hpp"
 
 namespace landrop::ui {
 
@@ -54,6 +58,36 @@ void QtTransferWidget::setupUi() {
     headerLayout->addWidget(m_speedSummaryLabel);
     mainLayout->addLayout(headerLayout);
 
+    // Location panel: displays and manages save directory
+    auto* locationFrame = new QFrame(this);
+    locationFrame->setObjectName("card");
+    auto* locationLayout = new QHBoxLayout(locationFrame);
+    locationLayout->setContentsMargins(14, 8, 14, 8);
+    locationLayout->setSpacing(10);
+
+    auto* locTitle = new QLabel("📥 Папка для отриманих файлів:", locationFrame);
+    locTitle->setStyleSheet("font-weight: 600;");
+
+    m_downloadsPathDisplay = new QLabel(locationFrame);
+    m_downloadsPathDisplay->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_downloadsPathDisplay->setStyleSheet("font-family: monospace; color: #007aff;");
+
+    m_selectFolderBtn = new QPushButton("📁 Обрати папку...", locationFrame);
+    m_selectFolderBtn->setToolTip("Змінити або створити папку для збереження отриманих файлів");
+    connect(m_selectFolderBtn, &QPushButton::clicked, this, &QtTransferWidget::onSelectFolderClicked);
+
+    m_openFolderBtn = new QPushButton("📂 Відкрити папку", locationFrame);
+    m_openFolderBtn->setToolTip("Відкрити папку у системному менеджері файлів");
+    connect(m_openFolderBtn, &QPushButton::clicked, this, &QtTransferWidget::onOpenFolderClicked);
+
+    locationLayout->addWidget(locTitle);
+    locationLayout->addWidget(m_downloadsPathDisplay, 1);
+    locationLayout->addWidget(m_selectFolderBtn);
+    locationLayout->addWidget(m_openFolderBtn);
+    mainLayout->addWidget(locationFrame);
+
+    updateLocationBar();
+
     // Actions bar
     auto* actionsLayout = new QHBoxLayout();
     actionsLayout->setSpacing(10);
@@ -63,10 +97,12 @@ void QtTransferWidget::setupUi() {
 
     m_pauseBtn = new QPushButton("⏸ Pause", this);
     m_pauseBtn->setEnabled(false);
+    m_pauseBtn->setToolTip("Direct TCP streaming does not support pause. Use Cancel instead.");
     connect(m_pauseBtn, &QPushButton::clicked, this, &QtTransferWidget::onPauseClicked);
 
     m_resumeBtn = new QPushButton("▶ Resume", this);
     m_resumeBtn->setEnabled(false);
+    m_resumeBtn->setToolTip("Direct TCP streaming does not support resume. Restart the transfer instead.");
     connect(m_resumeBtn, &QPushButton::clicked, this, &QtTransferWidget::onResumeClicked);
 
     m_cancelBtn = new QPushButton("⏹ Cancel", this);
@@ -77,16 +113,12 @@ void QtTransferWidget::setupUi() {
     m_clearBtn = new QPushButton("Clear Finished", this);
     connect(m_clearBtn, &QPushButton::clicked, this, &QtTransferWidget::onClearClicked);
 
-    m_openFolderBtn = new QPushButton("📂 Open Downloads", this);
-    connect(m_openFolderBtn, &QPushButton::clicked, this, &QtTransferWidget::onOpenFolderClicked);
-
     actionsLayout->addWidget(m_sendFileBtn);
     actionsLayout->addWidget(m_pauseBtn);
     actionsLayout->addWidget(m_resumeBtn);
     actionsLayout->addWidget(m_cancelBtn);
     actionsLayout->addWidget(m_clearBtn);
     actionsLayout->addStretch();
-    actionsLayout->addWidget(m_openFolderBtn);
     mainLayout->addLayout(actionsLayout);
 
     // Table
@@ -132,20 +164,15 @@ void QtTransferWidget::updateActionButtons() {
     }
 
     const std::string& st = it->stateStr;
-    if (st == "Transferring" || st == "Connecting") {
-        m_pauseBtn->setEnabled(true);
-        m_resumeBtn->setEnabled(false);
-        m_cancelBtn->setEnabled(true);
-    } else if (st == "Paused") {
-        m_pauseBtn->setEnabled(false);
-        m_resumeBtn->setEnabled(true);
-        m_cancelBtn->setEnabled(true);
-    } else {
-        // Completed, Failed, Cancelled
-        m_pauseBtn->setEnabled(false);
-        m_resumeBtn->setEnabled(false);
-        m_cancelBtn->setEnabled(false);
-    }
+    bool isActive = (st == "Transferring" || st == "Connecting" || st == "Running" || st == "Active");
+
+    // Direct TCP streaming lacks byte-offset resume support; keep pause/resume disabled
+    m_pauseBtn->setEnabled(false);
+    m_pauseBtn->setToolTip("Direct TCP streaming does not support pause. Use Cancel instead.");
+    m_resumeBtn->setEnabled(false);
+    m_resumeBtn->setToolTip("Direct TCP streaming does not support resume. Restart the transfer instead.");
+
+    m_cancelBtn->setEnabled(isActive);
 }
 
 void QtTransferWidget::updateTransferTable(const std::vector<TransferViewModel>& transfers) {
@@ -260,13 +287,94 @@ void QtTransferWidget::onSendFileClicked() {
     QString filePath = QFileDialog::getOpenFileName(this, "Select File to Send via LAN-Drop");
     if (filePath.isEmpty()) return;
 
+    std::string targetPeer = "local-loopback";
+    std::vector<std::pair<std::string, std::string>> peers;
+    if (m_peerProvider) {
+        peers = m_peerProvider();
+    }
+
+    QStringList items;
+    for (const auto& [id, name] : peers) {
+        items << QString::fromStdString(name);
+    }
+    items << "💻 Local Loopback (127.0.0.1:8848)";
+    items << "🌐 Enter Custom IP / Port...";
+
+    bool ok = false;
+    QString chosen = QInputDialog::getItem(this, "Select Target Peer", "Choose device to send file to:", items, 0, false, &ok);
+    if (!ok) return;
+
+    if (chosen == "🌐 Enter Custom IP / Port...") {
+        QString ip = QInputDialog::getText(this, "Target Device IP", "Enter destination IP address:", QLineEdit::Normal, "192.168.1.100", &ok);
+        if (!ok || ip.trimmed().isEmpty()) return;
+        int port = QInputDialog::getInt(this, "Target Device Port", "Enter destination port:", 8848, 1024, 65535, 1, &ok);
+        if (!ok) return;
+        targetPeer = "direct:" + ip.trimmed().toStdString() + ":" + std::to_string(port);
+    } else if (chosen == "💻 Local Loopback (127.0.0.1:8848)") {
+        targetPeer = "local-loopback";
+    } else {
+        for (size_t i = 0; i < peers.size(); ++i) {
+            if (chosen == QString::fromStdString(peers[i].second)) {
+                targetPeer = peers[i].first;
+                break;
+            }
+        }
+    }
+
     if (m_presenter) {
-        m_presenter->onSendFileClicked("local-loopback", filePath.toStdString());
+        m_presenter->onSendFileClicked(targetPeer, filePath.toStdString());
     }
 }
 
+void QtTransferWidget::setDownloadsDirectory(std::string path) {
+    m_downloadsDirectory = std::move(path);
+    updateLocationBar();
+}
+
+void QtTransferWidget::updateLocationBar() {
+    if (!m_downloadsPathDisplay) return;
+    QString display = QString::fromStdString(m_downloadsDirectory);
+    if (display.isEmpty()) {
+        display = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        if (display.isEmpty()) {
+            display = QDir::currentPath() + "/downloads";
+        }
+    }
+    m_downloadsPathDisplay->setText(display);
+    m_downloadsPathDisplay->setToolTip(QString("Повний шлях до папки завантажень:\n%1").arg(display));
+}
+
+void QtTransferWidget::onSelectFolderClicked() {
+    QString current = QString::fromStdString(m_downloadsDirectory);
+    if (current.isEmpty()) {
+        current = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    }
+    QString dir = QFileDialog::getExistingDirectory(
+        this,
+        "Оберіть або створіть папку для отриманих файлів",
+        current,
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks
+    );
+    if (dir.isEmpty()) return;
+
+    auto val = QtSettingsWidget::validateWritableDirectory(dir, true);
+    if (!val.ok) {
+        QMessageBox::warning(this, "Помилка каталогу збереження", val.errorMessage);
+        return;
+    }
+
+    setDownloadsDirectory(val.resolvedPath.toStdString());
+    emit downloadsDirectoryChanged(val.resolvedPath);
+}
+
 void QtTransferWidget::onOpenFolderClicked() {
-    QString path = QDir::currentPath() + "/downloads";
+    QString path = QString::fromStdString(m_downloadsDirectory);
+    if (path.isEmpty()) {
+        path = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        if (path.isEmpty()) {
+            path = QDir::currentPath() + "/downloads";
+        }
+    }
     QDir().mkpath(path);
     QDesktopServices::openUrl(QUrl::fromLocalFile(path));
 }

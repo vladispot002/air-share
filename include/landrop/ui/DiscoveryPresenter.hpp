@@ -29,6 +29,7 @@ public:
     std::string getLocalDeviceName() const;
     std::string getLocalDeviceIp() const;
     uint16_t getLocalDevicePort() const;
+    void setLocalDevicePort(uint16_t port);
 
     void registerPeer(const std::shared_ptr<NetworkPeer>& peer);
     std::shared_ptr<NetworkPeer> getSelectedPeer() const;

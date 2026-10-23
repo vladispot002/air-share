@@ -46,6 +46,8 @@ public:
 
     const std::string& getMulticastGroup() const { return m_multicastGroup; }
     uint16_t getBeaconPort() const { return m_beaconPort; }
+    uint16_t getListenPort() const { return m_listenPort; }
+    void setListenPort(uint16_t port) { m_listenPort = port; }
     uint32_t getIntervalMs() const { return m_intervalMs; }
     void setIntervalMs(uint32_t ms) { m_intervalMs = ms; }
 
