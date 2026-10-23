@@ -263,8 +263,9 @@ static bool testSharedFolderManager() {
                     "Symlink pointing outside shared root is ignored and excluded from scan");
         TEST_ASSERT(!manager.addSharedFile(symlinkPath),
                     "addSharedFile rejects symlink pointing outside root");
+        std::filesystem::remove(symlinkPath, ec);
     }
-    std::filesystem::remove_all(outsideDir);
+    std::filesystem::remove_all(outsideDir, ec);
 
     // Max file size limit test
     manager.setMaxFileSizeLimit(10); // 10 bytes limit

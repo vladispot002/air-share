@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [string]$BuildType = "Release",
-    [string]$QtDir = $env:QT_DIR
+    [string]$QtDir = $env:QT_DIR,
+    [switch]$RunTests = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,11 +27,12 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
 Write-Host "==> [1/4] Configuring with CMake..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
+$TestingFlag = if ($RunTests) { "ON" } else { "OFF" }
 $CmakeArgs = @(
     "-B", $BuildDir,
     "-S", $RootDir,
     "-DCMAKE_BUILD_TYPE=$BuildType",
-    "-DBUILD_TESTING=OFF"
+    "-DBUILD_TESTING=$TestingFlag"
 )
 
 $VcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
@@ -46,9 +48,16 @@ if ($VcpkgRoot -and (Test-Path "$VcpkgRoot\scripts\buildsystems\vcpkg.cmake")) {
 cmake @CmakeArgs
 if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed." }
 
-Write-Host "==> [2/4] Building lan_drop executable..." -ForegroundColor Yellow
-cmake --build $BuildDir --config $BuildType --target lan_drop --parallel
+Write-Host "==> [2/4] Building targets..." -ForegroundColor Yellow
+cmake --build $BuildDir --config $BuildType --parallel
 if ($LASTEXITCODE -ne 0) { throw "Build failed." }
+
+if ($RunTests) {
+    Write-Host "==> Running automated test suite before packaging..." -ForegroundColor Yellow
+    $env:QT_QPA_PLATFORM = "offscreen"
+    ctest --test-dir $BuildDir -C $BuildType --output-on-failure --verbose
+    if ($LASTEXITCODE -ne 0) { throw "Tests failed. Packaging aborted." }
+}
 
 $ExePath = Join-Path $BuildDir "$BuildType\lan_drop.exe"
 if (-not (Test-Path $ExePath)) {
@@ -67,11 +76,19 @@ Copy-Item -Path $ExePath -Destination $DeployDir -Force
 
 # Run windeployqt
 $WinDeployQt = Get-Command windeployqt -ErrorAction SilentlyContinue
+if (-not $WinDeployQt -and $QtDir -and (Test-Path (Join-Path $QtDir "bin\windeployqt.exe"))) {
+    $WinDeployQt = (Join-Path $QtDir "bin\windeployqt.exe")
+}
+if (-not $WinDeployQt -and $env:QT_DIR -and (Test-Path (Join-Path $env:QT_DIR "bin\windeployqt.exe"))) {
+    $WinDeployQt = (Join-Path $env:QT_DIR "bin\windeployqt.exe")
+}
+
 if ($WinDeployQt) {
-    Write-Host "    Running windeployqt..."
-    & $WinDeployQt.Source --release --compiler-runtime --no-translations --dir $DeployDir (Join-Path $DeployDir "lan_drop.exe")
+    $WinDeployCmd = if ($WinDeployQt -is [System.Management.Automation.CommandInfo]) { $WinDeployQt.Source } else { $WinDeployQt }
+    Write-Host "    Running windeployqt ($WinDeployCmd)..."
+    & $WinDeployCmd --release --compiler-runtime --no-translations --dir $DeployDir (Join-Path $DeployDir "lan_drop.exe")
 } else {
-    Write-Warning "windeployqt not found in PATH. Make sure Qt bin directory is in PATH."
+    throw "windeployqt not found. Make sure Qt bin directory is in PATH or QT_DIR is set."
 }
 
 # Copy OpenSSL runtime DLLs from vcpkg if present

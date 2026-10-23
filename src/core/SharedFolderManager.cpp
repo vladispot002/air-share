@@ -53,73 +53,86 @@ size_t SharedFolderManager::scanDirectory() {
     m_sharedFiles.clear();
     m_totalSharedBytes = 0;
 
-    std::error_code dirEc;
-    if (!std::filesystem::exists(m_rootSharedPath, dirEc)) {
-        return 0;
-    }
-
-    std::filesystem::path canonicalRoot = std::filesystem::weakly_canonical(m_rootSharedPath, dirEc);
-
-    FileChunkHasher hasher;
-    auto iter = std::filesystem::directory_iterator(
-        m_rootSharedPath,
-        std::filesystem::directory_options::skip_permission_denied,
-        dirEc
-    );
-
-    while (!dirEc && iter != std::filesystem::directory_iterator()) {
-        std::error_code entryEc;
-        const auto& entry = *iter;
-
-        // Security check: Ignore symlinks pointing outside the shared directory or dangling
-        bool isSym = entry.is_symlink(entryEc);
-        if (entryEc) {
-            entryEc.clear();
-            iter.increment(dirEc);
-            continue;
+    try {
+        std::error_code rootEc;
+        if (!std::filesystem::exists(m_rootSharedPath, rootEc) || rootEc) {
+            return 0;
         }
 
-        if (isSym) {
-            auto symTarget = std::filesystem::weakly_canonical(entry.path(), entryEc);
+        std::filesystem::path canonicalRoot = std::filesystem::weakly_canonical(m_rootSharedPath, rootEc);
+        if (rootEc) {
+            rootEc.clear();
+            canonicalRoot = std::filesystem::absolute(m_rootSharedPath, rootEc);
+        }
+
+        FileChunkHasher hasher;
+        std::error_code iterEc;
+        auto iter = std::filesystem::directory_iterator(
+            m_rootSharedPath,
+            std::filesystem::directory_options::skip_permission_denied,
+            iterEc
+        );
+
+        if (iterEc) {
+            return 0;
+        }
+
+        while (!iterEc && iter != std::filesystem::directory_iterator()) {
+            std::error_code entryEc;
+            const auto& entry = *iter;
+
+            // Security check: Ignore symlinks pointing outside the shared directory or dangling
+            bool isSym = entry.is_symlink(entryEc);
             if (entryEc) {
                 entryEc.clear();
-                iter.increment(dirEc);
-                continue;
-            }
-            auto rel = std::filesystem::relative(symTarget, canonicalRoot, entryEc);
-            if (entryEc || rel.empty() || rel.string().rfind("..", 0) == 0 || symTarget == canonicalRoot) {
-                iter.increment(dirEc);
-                continue;
-            }
-        }
-
-        bool isReg = entry.is_regular_file(entryEc);
-        if (entryEc || !isReg) {
-            iter.increment(dirEc);
-            continue;
-        }
-
-        if (m_sharedFiles.size() < m_maxFilesLimit) {
-            uint64_t fsize = entry.file_size(entryEc);
-            if (entryEc || fsize > m_maxFileSizeLimit) {
-                iter.increment(dirEc);
+                iter.increment(iterEc);
                 continue;
             }
 
-            FileMetadata meta;
-            meta.fileName = entry.path().filename().string();
-            meta.fileSize = fsize;
-            meta.chunkSize = 64 * 1024;
-            meta.totalChunks = (meta.fileSize + meta.chunkSize - 1) / meta.chunkSize;
-            
-            auto fullHash = hasher.computeFullFileHash(entry.path().string());
-            meta.fileSha256 = fullHash.value_or("");
+            if (isSym) {
+                auto symTarget = std::filesystem::weakly_canonical(entry.path(), entryEc);
+                if (entryEc) {
+                    entryEc.clear();
+                    iter.increment(iterEc);
+                    continue;
+                }
+                auto rel = std::filesystem::relative(symTarget, canonicalRoot, entryEc);
+                if (entryEc || rel.empty() || rel.string().rfind("..", 0) == 0 || symTarget == canonicalRoot) {
+                    iter.increment(iterEc);
+                    continue;
+                }
+            }
 
-            m_totalSharedBytes += meta.fileSize;
-            m_sharedFiles.push_back(std::move(meta));
+            bool isReg = entry.is_regular_file(entryEc);
+            if (entryEc || !isReg) {
+                iter.increment(iterEc);
+                continue;
+            }
+
+            if (m_sharedFiles.size() < m_maxFilesLimit) {
+                uint64_t fsize = entry.file_size(entryEc);
+                if (entryEc || fsize > m_maxFileSizeLimit) {
+                    iter.increment(iterEc);
+                    continue;
+                }
+
+                FileMetadata meta;
+                meta.fileName = entry.path().filename().string();
+                meta.fileSize = fsize;
+                meta.chunkSize = 64 * 1024;
+                meta.totalChunks = (meta.fileSize + meta.chunkSize - 1) / meta.chunkSize;
+                
+                auto fullHash = hasher.computeFullFileHash(entry.path().string());
+                meta.fileSha256 = fullHash.value_or("");
+
+                m_totalSharedBytes += meta.fileSize;
+                m_sharedFiles.push_back(std::move(meta));
+            }
+
+            iter.increment(iterEc);
         }
-
-        iter.increment(dirEc);
+    } catch (...) {
+        return m_sharedFiles.size();
     }
     return m_sharedFiles.size();
 }

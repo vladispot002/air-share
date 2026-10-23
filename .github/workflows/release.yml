@@ -68,9 +68,11 @@ jobs:
           choco install innosetup -y --no-progress
           echo "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Build & Package Windows Installer
+      - name: Build, Test & Package Windows Installer
         run: |
-          pwsh scripts/package-windows.ps1
+          pwsh scripts/package-windows.ps1 -RunTests
+        env:
+          QT_QPA_PLATFORM: offscreen
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4

@@ -30,10 +30,14 @@ tar --exclude-vcs \
 cp -f "${DIST_DIR}/landrop-${VERSION}.tar.gz" "${RPMBUILD_DIR}/SOURCES/"
 cp -f "${ROOT_DIR}/packaging/fedora/landrop.spec" "${RPMBUILD_DIR}/SPECS/"
 
-echo "==> [2/4] Building portable Linux binary archive..."
+echo "==> [2/4] Building and testing portable Linux binary..."
 BUILD_DIR="${ROOT_DIR}/build-package"
-cmake -B "${BUILD_DIR}" -S "${ROOT_DIR}" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-cmake --build "${BUILD_DIR}" --target lan_drop --parallel "$(nproc || echo 4)"
+cmake -B "${BUILD_DIR}" -S "${ROOT_DIR}" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build "${BUILD_DIR}" --parallel "$(nproc || echo 4)"
+
+echo "==> Running automated test suite before packaging portable archive..."
+export QT_QPA_PLATFORM=offscreen
+ctest --test-dir "${BUILD_DIR}" --output-on-failure --verbose
 
 PORTABLE_STAGING="${DIST_DIR}/landrop-${VERSION}-linux-x86_64"
 rm -rf "${PORTABLE_STAGING}"
