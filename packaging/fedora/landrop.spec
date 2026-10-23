@@ -1,5 +1,5 @@
 Name:           landrop
-Version:        1.0.0
+Version:        1.0.1
 Release:        1%{?dist}
 Summary:        Cross-Platform P2P and Hybrid Cloud File Transfer
 
@@ -49,5 +49,8 @@ export QT_QPA_PLATFORM=offscreen
 %{_datadir}/landrop/lan-drop.svg
 
 %changelog
+* Fri Oct 23 2026 LAN-Drop Team <vladis@localhost> - 1.0.1-1
+- Fix desktop application launcher, path permissions, and release packaging
+
 * Fri Oct 23 2026 LAN-Drop Team <vladis@localhost> - 1.0.0-1
 - Initial release of LAN-Drop Qt 6 for Fedora Linux

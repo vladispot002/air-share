@@ -9,7 +9,7 @@ namespace landrop::ui {
 
 class StoragePresenter {
 public:
-    explicit StoragePresenter(IStorageView* view);
+    explicit StoragePresenter(IStorageView* view, std::string rootPath = "");
     ~StoragePresenter() = default;
 
     void setView(IStorageView* view);

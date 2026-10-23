@@ -37,11 +37,13 @@ static std::vector<uint8_t> hexToBytes(const std::string& hex) {
 
 SharedFolderManager::SharedFolderManager(std::string rootPath)
     : m_rootSharedPath(std::move(rootPath)) {
-    std::filesystem::create_directories(m_rootSharedPath);
+    std::error_code ec;
+    std::filesystem::create_directories(m_rootSharedPath, ec);
 }
 
 bool SharedFolderManager::setRootPath(const std::string& newPath) {
-    if (std::filesystem::exists(newPath) || std::filesystem::create_directories(newPath)) {
+    std::error_code ec;
+    if (std::filesystem::exists(newPath, ec) || std::filesystem::create_directories(newPath, ec)) {
         m_rootSharedPath = newPath;
         scanDirectory();
         return true;

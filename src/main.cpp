@@ -113,23 +113,89 @@ static int runReceiver(uint16_t port, const std::string& saveDir, bool useTls = 
 }
 
 
-static int runGui(int argc, char* argv[], bool isMobile = false) {
-#if defined(LANDROP_BUILD_QT)
-    (void)isMobile;
-    QApplication qtApp(argc, argv);
-    ui::QtDesktopApp mainWindow;
-    mainWindow.show();
-    return qtApp.exec();
-#elif defined(LANDROP_BUILD_GTK) || !defined(LANDROP_BUILD_QT)
-    ui::GtkDesktopApp app(isMobile);
-    return app.run(argc, argv);
+static void logStartupMessage(const std::string& message) {
+    std::string logDir;
+#if defined(_WIN32)
+    const char* localAppData = std::getenv("LOCALAPPDATA");
+    if (localAppData && localAppData[0] != '\0') {
+        logDir = std::string(localAppData) + "\\lan-drop";
+    } else {
+        const char* userProfile = std::getenv("USERPROFILE");
+        if (userProfile && userProfile[0] != '\0') {
+            logDir = std::string(userProfile) + "\\AppData\\Local\\lan-drop";
+        }
+    }
 #else
-    (void)argc;
-    (void)argv;
-    (void)isMobile;
-    std::cerr << "Error: No GUI backend compiled in.\n";
-    return 1;
+    const char* xdgState = std::getenv("XDG_STATE_HOME");
+    if (xdgState && xdgState[0] != '\0') {
+        logDir = std::string(xdgState) + "/lan-drop";
+    } else {
+        const char* home = std::getenv("HOME");
+        if (home && home[0] != '\0') {
+            logDir = std::string(home) + "/.local/share/lan-drop";
+        }
+    }
 #endif
+    if (logDir.empty()) {
+        std::error_code ec;
+        auto tempP = std::filesystem::temp_directory_path(ec);
+        if (!ec) {
+            logDir = tempP.string();
+        }
+    }
+
+    if (!logDir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(logDir, ec);
+        std::filesystem::path logFile = std::filesystem::path(logDir) / "startup.log";
+        std::ofstream out(logFile, std::ios::app);
+        if (out.is_open()) {
+            auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+            char buf[64] = {0};
+#if defined(_WIN32)
+            ctime_s(buf, sizeof(buf), &now);
+#else
+            ctime_r(&now, buf);
+#endif
+            std::string timeStr = buf;
+            if (!timeStr.empty() && timeStr.back() == '\n') timeStr.pop_back();
+            out << "[" << timeStr << "] " << message << "\n";
+        }
+    }
+}
+
+static int runGui(int argc, char* argv[], bool isMobile = false) {
+    logStartupMessage("Starting LAN-Drop GUI...");
+    try {
+#if defined(LANDROP_BUILD_QT)
+        (void)isMobile;
+        QApplication qtApp(argc, argv);
+        ui::QtDesktopApp mainWindow;
+        mainWindow.show();
+        logStartupMessage("LAN-Drop GUI initialized and window shown successfully.");
+        return qtApp.exec();
+#elif defined(LANDROP_BUILD_GTK) || !defined(LANDROP_BUILD_QT)
+        ui::GtkDesktopApp app(isMobile);
+        return app.run(argc, argv);
+#else
+        (void)argc;
+        (void)argv;
+        (void)isMobile;
+        std::cerr << "Error: No GUI backend compiled in.\n";
+        logStartupMessage("Error: No GUI backend compiled in.");
+        return 1;
+#endif
+    } catch (const std::exception& e) {
+        std::string err = "Fatal unhandled exception in GUI: " + std::string(e.what());
+        std::cerr << err << "\n";
+        logStartupMessage(err);
+        return 1;
+    } catch (...) {
+        std::string err = "Fatal unknown exception occurred in GUI";
+        std::cerr << err << "\n";
+        logStartupMessage(err);
+        return 1;
+    }
 }
 
 static int runMobileTest() {
@@ -286,12 +352,21 @@ static int runDemo() {
 int main(int argc, char* argv[]) {
     initSocketSubsystem();
 
+    std::string argSummary = "LAN-Drop started with argc=" + std::to_string(argc);
+    for (int i = 0; i < argc; ++i) {
+        argSummary += " [" + std::string(argv[i]) + "]";
+    }
+    logStartupMessage(argSummary);
+
     int exitCode = 0;
     if (argc == 1) {
         exitCode = runGui(argc, argv, false);
     } else {
         std::string mode = argv[1];
-        if (mode == "demo") {
+        if (mode == "--help" || mode == "-h" || mode == "help") {
+            printUsage(argv[0]);
+            exitCode = 0;
+        } else if (mode == "demo") {
             exitCode = runDemo();
         } else if (mode == "gui" || mode == "desktop-gui") {
             exitCode = runGui(argc, argv, false);
@@ -338,8 +413,9 @@ int main(int argc, char* argv[]) {
             }
             exitCode = runReceiver(port, saveDir, useTls);
         } else {
-            printUsage(argv[0]);
-            exitCode = 1;
+            // Unrecognized or GUI parameters (e.g. desktop launcher %U, Qt flags -platform, -style, etc.)
+            // Launch GUI application and let Qt parse framework arguments
+            exitCode = runGui(argc, argv, false);
         }
     }
 

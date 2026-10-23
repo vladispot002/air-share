@@ -107,8 +107,18 @@ void QtDesktopApp::setupPresenters() {
     m_transferPresenter = std::make_unique<TransferPresenter>(m_transferWidget);
     m_transferWidget->setPresenter(m_transferPresenter.get());
 
-    m_storagePresenter = std::make_unique<StoragePresenter>(m_storageWidget);
+    QString standardShared = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + "/LAN-Drop-Shared";
+    if (standardShared.isEmpty()) {
+        standardShared = QStandardPaths::writableLocation(QStandardPaths::HomeLocation) + "/LAN-Drop-Shared";
+    }
+    if (standardShared.isEmpty()) {
+        standardShared = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/shared_drop";
+    }
+    QDir().mkpath(standardShared);
+
+    m_storagePresenter = std::make_unique<StoragePresenter>(m_storageWidget, standardShared.toStdString());
     m_storageWidget->setPresenter(m_storagePresenter.get());
+    m_storageWidget->setSharedPath(standardShared.toStdString());
 
     m_settingsPresenter = std::make_unique<SettingsPresenter>(m_settingsWidget);
     m_settingsWidget->setPresenter(m_settingsPresenter.get());
@@ -123,21 +133,25 @@ void QtDesktopApp::setupPresenters() {
     m_settingsPresenter->initialize();
 
     // Sync download directory from settings
+    QString defaultDownloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    if (defaultDownloads.isEmpty()) {
+        defaultDownloads = QStandardPaths::writableLocation(QStandardPaths::HomeLocation) + "/Downloads";
+    }
+    if (defaultDownloads.isEmpty()) {
+        defaultDownloads = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/downloads";
+    }
+    QDir().mkpath(defaultDownloads);
+
     if (m_settingsPresenter) {
         std::string cfgDl = m_settingsPresenter->getDownloadsPath();
         if (cfgDl.empty() || cfgDl == "./downloads") {
-            QString standardDl = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-            if (!standardDl.isEmpty()) {
-                m_downloadsDirectory = standardDl.toStdString();
-                m_settingsPresenter->setDownloadsPath(m_downloadsDirectory);
-            } else {
-                m_downloadsDirectory = QDir::currentPath().toStdString() + "/downloads";
-            }
+            m_downloadsDirectory = defaultDownloads.toStdString();
+            m_settingsPresenter->setDownloadsPath(m_downloadsDirectory);
         } else {
             m_downloadsDirectory = cfgDl;
         }
     } else {
-        m_downloadsDirectory = QDir::currentPath().toStdString() + "/downloads";
+        m_downloadsDirectory = defaultDownloads.toStdString();
     }
 
     if (m_transferWidget) {
@@ -294,7 +308,10 @@ void QtDesktopApp::startBackgroundTransferServer() {
     if (m_downloadsDirectory.empty()) {
         QString dlPath = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
         if (dlPath.isEmpty()) {
-            dlPath = QDir::currentPath() + "/downloads";
+            dlPath = QStandardPaths::writableLocation(QStandardPaths::HomeLocation) + "/Downloads";
+        }
+        if (dlPath.isEmpty()) {
+            dlPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/downloads";
         }
         m_downloadsDirectory = dlPath.toStdString();
     }

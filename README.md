@@ -69,7 +69,7 @@ make desktop
 ./scripts/package-fedora.sh
 
 # Встановлення створеного RPM:
-sudo dnf install ./dist/rpm/landrop-1.0.0-1.fc44.x86_64.rpm
+sudo dnf install ./dist/rpm/landrop-1.0.1-1.fc44.x86_64.rpm
 
 # Або пряме системне встановлення через CMake:
 sudo cmake --install build
@@ -79,7 +79,7 @@ sudo cmake --install build
 ```powershell
 # Збирання, розгортання бібліотек Qt через windeployqt та генерація EXE інсталятора:
 pwsh .\scripts\package-windows.ps1
-# Результат: dist\windows\LAN-Drop-Setup-1.0.0-x64.exe
+# Результат: dist\windows\LAN-Drop-Setup-1.0.1-x64.exe
 ```
 
 ---

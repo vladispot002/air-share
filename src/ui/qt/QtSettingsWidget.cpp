@@ -118,7 +118,11 @@ void QtSettingsWidget::setupUi() {
 
     auto* pathLayout = new QHBoxLayout();
     pathLayout->setSpacing(8);
-    m_downloadPathEdit = new QLineEdit("./downloads", netGroup);
+    QString initialDl = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    if (initialDl.isEmpty()) {
+        initialDl = QStandardPaths::writableLocation(QStandardPaths::HomeLocation) + "/Downloads";
+    }
+    m_downloadPathEdit = new QLineEdit(initialDl.isEmpty() ? "./downloads" : initialDl, netGroup);
     m_downloadPathEdit->setPlaceholderText("Оберіть або введіть шлях до папки...");
     connect(m_downloadPathEdit, &QLineEdit::textChanged, this, &QtSettingsWidget::updatePathStatusLabel);
 

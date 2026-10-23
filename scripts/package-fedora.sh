@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
 RPMBUILD_DIR="${DIST_DIR}/rpmbuild"
-VERSION="1.0.0"
+VERSION="1.0.1"
 
 echo "=================================================="
 echo "  [LAN-Drop] Packaging for Fedora Linux x86_64    "
@@ -58,6 +58,53 @@ exec "${SCRIPT_DIR}/bin/lan_drop" "$@"
 EOF
 chmod +x "${PORTABLE_STAGING}/run-landrop.sh" "${PORTABLE_STAGING}/bin/lan_drop"
 
+cat > "${PORTABLE_STAGING}/install-desktop.sh" << 'EOF'
+#!/usr/bin/env bash
+set -e
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+ICONS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+mkdir -p "${APPS_DIR}" "${ICONS_DIR}"
+cp -f "${DIR}/share/icons/hicolor/scalable/apps/lan-drop.svg" "${ICONS_DIR}/lan-drop.svg"
+
+cat > "${APPS_DIR}/lan-drop.desktop" << DESK
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=LAN-Drop
+GenericName=File Transfer
+Comment=Cross-Platform P2P and Hybrid Cloud File Transfer
+Exec=${DIR}/bin/lan_drop %U
+Icon=lan-drop
+Terminal=false
+Categories=Network;FileTransfer;Qt;
+StartupNotify=true
+StartupWMClass=lan_drop
+Keywords=LAN;Drop;AirDrop;P2P;Share;Transfer;
+DESK
+chmod +x "${APPS_DIR}/lan-drop.desktop"
+
+if [ -d "$HOME/Стільниця" ]; then
+    cp -f "${APPS_DIR}/lan-drop.desktop" "$HOME/Стільниця/lan-drop.desktop"
+    chmod +x "$HOME/Стільниця/lan-drop.desktop"
+    gio set "$HOME/Стільниця/lan-drop.desktop" metadata::trusted true 2>/dev/null || true
+fi
+if [ -d "$HOME/Desktop" ]; then
+    cp -f "${APPS_DIR}/lan-drop.desktop" "$HOME/Desktop/lan-drop.desktop"
+    chmod +x "$HOME/Desktop/lan-drop.desktop"
+    gio set "$HOME/Desktop/lan-drop.desktop" metadata::trusted true 2>/dev/null || true
+fi
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "${APPS_DIR}" || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" 2>/dev/null || true
+fi
+echo "✓ LAN-Drop desktop shortcut installed successfully: ${APPS_DIR}/lan-drop.desktop"
+EOF
+chmod +x "${PORTABLE_STAGING}/install-desktop.sh"
+
 tar -czf "${DIST_DIR}/landrop-${VERSION}-linux-x86_64.tar.gz" -C "${DIST_DIR}" "landrop-${VERSION}-linux-x86_64"
 echo "    Created: ${DIST_DIR}/landrop-${VERSION}-linux-x86_64.tar.gz"
 
@@ -77,7 +124,7 @@ elif command -v podman >/dev/null 2>&1; then
                 cmake gcc-c++ make qt6-qtbase-devel openssl-devel desktop-file-utils rpm-build rpmdevtools
             echo "--> Running rpmbuild..."
             mkdir -p /root/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-            cp /dist/landrop-1.0.0.tar.gz /root/rpmbuild/SOURCES/
+            cp /dist/landrop-1.0.1.tar.gz /root/rpmbuild/SOURCES/
             rpmbuild -ba /landrop.spec
             cp -rf /root/rpmbuild/RPMS/* /dist/rpmbuild/RPMS/
             cp -rf /root/rpmbuild/SRPMS/* /dist/rpmbuild/SRPMS/
@@ -92,7 +139,7 @@ elif command -v docker >/dev/null 2>&1; then
             dnf install -y --setopt=install_weak_deps=False \
                 cmake gcc-c++ make qt6-qtbase-devel openssl-devel desktop-file-utils rpm-build rpmdevtools
             mkdir -p /root/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-            cp /dist/landrop-1.0.0.tar.gz /root/rpmbuild/SOURCES/
+            cp /dist/landrop-1.0.1.tar.gz /root/rpmbuild/SOURCES/
             rpmbuild -ba /landrop.spec
             cp -rf /root/rpmbuild/RPMS/* /dist/rpmbuild/RPMS/
             cp -rf /root/rpmbuild/SRPMS/* /dist/rpmbuild/SRPMS/

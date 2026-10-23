@@ -62,14 +62,19 @@ web:
 	@cd "Design LAN-Drop macOS UI" && npm run dev -- --host 0.0.0.0 --port 5173
 
 desktop:
-	@mkdir -p ~/.local/share/applications ~/.local/share/icons/hicolor/scalable/apps
+	@mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/scalable/apps ~/.local/share/landrop
+	@cp -f build-release/lan_drop ~/.local/bin/lan_drop 2>/dev/null || cp -f bin/lan_drop ~/.local/bin/lan_drop 2>/dev/null || true
+	@chmod +x ~/.local/bin/lan_drop 2>/dev/null || true
 	@cp -f resources/lan-drop.svg ~/.local/share/icons/hicolor/scalable/apps/lan-drop.svg 2>/dev/null || true
+	@cp -f resources/lan-drop.svg ~/.local/share/landrop/lan-drop.svg 2>/dev/null || true
+	@cp -f resources/styles.qss ~/.local/share/landrop/styles.qss 2>/dev/null || true
 	@mkdir -p ~/Стільниця ~/Desktop 2>/dev/null || true
 	@[ -d ~/Стільниця ] && cp -f resources/lan-drop.desktop ~/Стільниця/lan-drop.desktop && chmod +x ~/Стільниця/lan-drop.desktop && gio set ~/Стільниця/lan-drop.desktop metadata::trusted true 2>/dev/null || true
 	@[ -d ~/Desktop ] && cp -f resources/lan-drop.desktop ~/Desktop/lan-drop.desktop && chmod +x ~/Desktop/lan-drop.desktop && gio set ~/Desktop/lan-drop.desktop metadata::trusted true 2>/dev/null || true
 	@cp -f resources/lan-drop.desktop ~/.local/share/applications/lan-drop.desktop
 	@chmod +x ~/.local/share/applications/lan-drop.desktop
 	@update-desktop-database ~/.local/share/applications 2>/dev/null || true
+	@gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor 2>/dev/null || true
 
 clean:
 	rm -rf $(OBJ_DIR) $(BIN_DIR)

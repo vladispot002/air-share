@@ -337,6 +337,12 @@ void QtTransferWidget::updateLocationBar() {
     if (display.isEmpty()) {
         display = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
         if (display.isEmpty()) {
+            display = QStandardPaths::writableLocation(QStandardPaths::HomeLocation) + "/Downloads";
+        }
+        if (display.isEmpty()) {
+            display = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/downloads";
+        }
+        if (display.isEmpty()) {
             display = QDir::currentPath() + "/downloads";
         }
     }
@@ -371,6 +377,12 @@ void QtTransferWidget::onOpenFolderClicked() {
     QString path = QString::fromStdString(m_downloadsDirectory);
     if (path.isEmpty()) {
         path = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        if (path.isEmpty()) {
+            path = QStandardPaths::writableLocation(QStandardPaths::HomeLocation) + "/Downloads";
+        }
+        if (path.isEmpty()) {
+            path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/downloads";
+        }
         if (path.isEmpty()) {
             path = QDir::currentPath() + "/downloads";
         }
