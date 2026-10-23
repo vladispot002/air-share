@@ -1,32 +1,29 @@
 #include "landrop/core/MulticastBeacon.hpp"
 #include <sstream>
 #include <utility>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <sys/select.h>
+#include "landrop/utils/SocketCompat.hpp"
 #include <cstring>
-
-#include <fcntl.h>
 #include <chrono>
 #include <ctime>
 #include <cstdio>
+#include <random>
 
 namespace landrop {
 
 std::string MulticastBeacon::generateUniqueUuid() {
     uint32_t r1 = 0, r2 = 0;
+#if !defined(_WIN32) && !defined(_WIN64)
     int fd = open("/dev/urandom", O_RDONLY);
     if (fd >= 0) {
         if (read(fd, &r1, sizeof(r1)) < 0) r1 = 0;
         if (read(fd, &r2, sizeof(r2)) < 0) r2 = 0;
         close(fd);
     }
+#endif
     if (r1 == 0 && r2 == 0) {
-        auto now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-        r1 = static_cast<uint32_t>(now ^ (getpid() << 16));
-        r2 = static_cast<uint32_t>(now >> 32);
+        std::random_device rd;
+        r1 = rd();
+        r2 = rd();
     }
     char buf[64];
     std::snprintf(buf, sizeof(buf), "node-%08x-%08x", r1, r2);
@@ -60,9 +57,9 @@ bool MulticastBeacon::start() {
     }
 
     int reuse = 1;
-    setsockopt(m_listenSocketFd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    setsockopt(m_listenSocketFd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
 #ifdef SO_REUSEPORT
-    setsockopt(m_listenSocketFd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
+    setsockopt(m_listenSocketFd, SOL_SOCKET, SO_REUSEPORT, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
 #endif
     struct sockaddr_in bindAddr{};
     bindAddr.sin_family = AF_INET;
@@ -70,7 +67,7 @@ bool MulticastBeacon::start() {
     bindAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(m_listenSocketFd, reinterpret_cast<struct sockaddr*>(&bindAddr), sizeof(bindAddr)) != 0) {
-        close(m_listenSocketFd);
+        closeSocket(m_listenSocketFd);
         m_listenSocketFd = -1;
         return false;
     }
@@ -78,7 +75,7 @@ bool MulticastBeacon::start() {
     struct ip_mreq mreq{};
     if (inet_pton(AF_INET, m_multicastGroup.c_str(), &mreq.imr_multiaddr) == 1) {
         mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-        setsockopt(m_listenSocketFd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+        setsockopt(m_listenSocketFd, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq));
     }
 
     m_isRunning.store(true);
@@ -97,7 +94,7 @@ bool MulticastBeacon::start() {
             if (ret > 0 && FD_ISSET(m_listenSocketFd, &readFds)) {
                 struct sockaddr_in senderAddr{};
                 socklen_t addrLen = sizeof(senderAddr);
-                ssize_t n = recvfrom(m_listenSocketFd, buf, sizeof(buf) - 1, 0,
+                ssize_t n = recvfrom(m_listenSocketFd, buf, static_cast<int>(sizeof(buf) - 1), 0,
                                      reinterpret_cast<struct sockaddr*>(&senderAddr), &addrLen);
                 if (n > 0) {
                     buf[n] = '\0';
@@ -136,7 +133,7 @@ void MulticastBeacon::stop() {
         m_listenerThread.join();
     }
     if (m_listenSocketFd >= 0) {
-        close(m_listenSocketFd);
+        closeSocket(m_listenSocketFd);
         m_listenSocketFd = -1;
     }
 }
@@ -153,7 +150,7 @@ bool MulticastBeacon::broadcastAnnouncement() {
     }
 
     int broadcastEnable = 1;
-    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable));
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&broadcastEnable), sizeof(broadcastEnable));
 
     std::string payload = serializePayload();
 
@@ -161,22 +158,22 @@ bool MulticastBeacon::broadcastAnnouncement() {
     bcastAddr.sin_family = AF_INET;
     bcastAddr.sin_port = htons(m_beaconPort);
     bcastAddr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-    sendto(sock, payload.data(), payload.size(), 0, reinterpret_cast<struct sockaddr*>(&bcastAddr), sizeof(bcastAddr));
+    sendto(sock, payload.data(), static_cast<int>(payload.size()), 0, reinterpret_cast<struct sockaddr*>(&bcastAddr), sizeof(bcastAddr));
 
     struct sockaddr_in mcastAddr{};
     mcastAddr.sin_family = AF_INET;
     mcastAddr.sin_port = htons(m_beaconPort);
     if (inet_pton(AF_INET, m_multicastGroup.c_str(), &mcastAddr.sin_addr) == 1) {
-        sendto(sock, payload.data(), payload.size(), 0, reinterpret_cast<struct sockaddr*>(&mcastAddr), sizeof(mcastAddr));
+        sendto(sock, payload.data(), static_cast<int>(payload.size()), 0, reinterpret_cast<struct sockaddr*>(&mcastAddr), sizeof(mcastAddr));
     }
 
     struct sockaddr_in loopAddr{};
     loopAddr.sin_family = AF_INET;
     loopAddr.sin_port = htons(m_beaconPort);
     loopAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    sendto(sock, payload.data(), payload.size(), 0, reinterpret_cast<struct sockaddr*>(&loopAddr), sizeof(loopAddr));
+    sendto(sock, payload.data(), static_cast<int>(payload.size()), 0, reinterpret_cast<struct sockaddr*>(&loopAddr), sizeof(loopAddr));
 
-    close(sock);
+    closeSocket(sock);
     return true;
 }
 

@@ -36,19 +36,12 @@ set(LANDROP_CORE_SOURCES
     src/ui/SettingsPresenter.cpp
 )
 
-find_package(OpenSSL QUIET)
-if (OPENSSL_FOUND)
-    message(STATUS "Found system OpenSSL ${OPENSSL_VERSION}")
-    set(OPENSSL_TARGETS OpenSSL::SSL OpenSSL::Crypto)
-else()
-    message(STATUS "OpenSSL development package not found, falling back to local include headers and system runtime libraries")
-    find_library(SSL_LIB NAMES ssl libssl.so.3 libssl PATHS /lib64 /usr/lib64 /usr/lib ${CMAKE_CURRENT_SOURCE_DIR}/lib)
-    find_library(CRYPTO_LIB NAMES crypto libcrypto.so.3 libcrypto PATHS /lib64 /usr/lib64 /usr/lib ${CMAKE_CURRENT_SOURCE_DIR}/lib)
-    if (NOT SSL_LIB OR NOT CRYPTO_LIB)
-        message(FATAL_ERROR "OpenSSL libraries (libssl, libcrypto) not found. Please install openssl or openssl-devel.")
-    endif()
-    set(OPENSSL_TARGETS ${SSL_LIB} ${CRYPTO_LIB})
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent Test)
+
+if (NOT DEFINED OPENSSL_ROOT_DIR AND EXISTS "$ENV{HOME}/.local/include/openssl")
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{HOME}/.local")
 endif()
+find_package(OpenSSL REQUIRED)
 
 add_library(landrop_core STATIC ${LANDROP_CORE_SOURCES})
 target_include_directories(landrop_core PUBLIC
@@ -60,15 +53,18 @@ else()
     target_compile_options(landrop_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+target_link_libraries(landrop_core PUBLIC
+    Qt6::Core
+    Qt6::Network
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
+
 if (WIN32)
-    target_link_libraries(landrop_core PUBLIC ws2_32 iphlpapi ${OPENSSL_TARGETS})
+    target_link_libraries(landrop_core PUBLIC ws2_32 iphlpapi)
 else()
-    target_link_libraries(landrop_core PUBLIC pthread ${OPENSSL_TARGETS})
+    target_link_libraries(landrop_core PUBLIC pthread)
 endif()
-
-
-# Find Qt 6
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent Test)
 
 # Qt 6 UI Sources & Headers
 set(LANDROP_QT_HEADERS

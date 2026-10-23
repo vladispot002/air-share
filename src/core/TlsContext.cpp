@@ -1,11 +1,11 @@
 #include "landrop/core/TlsContext.hpp"
+#include "landrop/utils/SocketCompat.hpp"
 #include <mutex>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
 #include <cctype>
 #include <csignal>
-#include <arpa/inet.h>
 #include <openssl/x509v3.h>
 
 namespace landrop {
@@ -14,7 +14,9 @@ static std::once_flag s_initFlag;
 
 void TlsHelper::initOpenSsl() {
     std::call_once(s_initFlag, []() {
+#ifdef SIGPIPE
         signal(SIGPIPE, SIG_IGN);
+#endif
         SSL_library_init();
         SSL_load_error_strings();
         OpenSSL_add_all_algorithms();

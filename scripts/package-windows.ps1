@@ -25,7 +25,25 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
 # 1. Configure and Build
 Write-Host "==> [1/4] Configuring with CMake..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
-cmake -B $BuildDir -S $RootDir -DCMAKE_BUILD_TYPE=$BuildType -DBUILD_TESTING=OFF
+
+$CmakeArgs = @(
+    "-B", $BuildDir,
+    "-S", $RootDir,
+    "-DCMAKE_BUILD_TYPE=$BuildType",
+    "-DBUILD_TESTING=OFF"
+)
+
+$VcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+if (-not $VcpkgRoot -and (Test-Path "C:\vcpkg")) {
+    $VcpkgRoot = "C:\vcpkg"
+}
+if ($VcpkgRoot -and (Test-Path "$VcpkgRoot\scripts\buildsystems\vcpkg.cmake")) {
+    Write-Host "    Using vcpkg toolchain from $VcpkgRoot"
+    $CmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot\scripts\buildsystems\vcpkg.cmake"
+    $CmakeArgs += "-DVCPKG_TARGET_TRIPLET=x64-windows"
+}
+
+cmake @CmakeArgs
 if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed." }
 
 Write-Host "==> [2/4] Building lan_drop executable..." -ForegroundColor Yellow
@@ -54,6 +72,15 @@ if ($WinDeployQt) {
     & $WinDeployQt.Source --release --compiler-runtime --no-translations --dir $DeployDir (Join-Path $DeployDir "lan_drop.exe")
 } else {
     Write-Warning "windeployqt not found in PATH. Make sure Qt bin directory is in PATH."
+}
+
+# Copy OpenSSL runtime DLLs from vcpkg if present
+if ($VcpkgRoot) {
+    $VcpkgBin = Join-Path $VcpkgRoot "installed\x64-windows\bin"
+    if (Test-Path $VcpkgBin) {
+        Write-Host "    Copying OpenSSL DLLs from $VcpkgBin to deployment directory..."
+        Get-ChildItem -Path $VcpkgBin -Filter "*.dll" | Copy-Item -Destination $DeployDir -Force
+    }
 }
 
 # 3. Compile Inno Setup Script

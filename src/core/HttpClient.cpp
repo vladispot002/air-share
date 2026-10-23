@@ -1,10 +1,6 @@
 #include "landrop/core/HttpClient.hpp"
 #include "landrop/core/TlsContext.hpp"
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include "landrop/utils/SocketCompat.hpp"
 #include <cstring>
 #include <sstream>
 #include <algorithm>
@@ -19,7 +15,7 @@ struct SocketGuard {
     int fd{-1};
     ~SocketGuard() {
         if (fd >= 0) {
-            ::close(fd);
+            closeSocket(fd);
         }
     }
 };
@@ -180,12 +176,17 @@ HttpResponse HttpClient::send(const HttpRequest& request) {
     }
 
     // Non-blocking connect with timeout guard
-    int origFlags = fcntl(sockGuard.fd, F_GETFL, 0);
-    fcntl(sockGuard.fd, F_SETFL, origFlags | O_NONBLOCK);
+    setSocketNonBlocking(sockGuard.fd, true);
 
     int connRet = connect(sockGuard.fd, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr));
     if (connRet < 0) {
-        if (errno == EINPROGRESS) {
+        bool inProgress = false;
+#if defined(_WIN32) || defined(_WIN64)
+        inProgress = (::WSAGetLastError() == WSAEWOULDBLOCK);
+#else
+        inProgress = (errno == EINPROGRESS);
+#endif
+        if (inProgress) {
             fd_set wfds, efds;
             FD_ZERO(&wfds);
             FD_ZERO(&efds);
@@ -200,27 +201,27 @@ HttpResponse HttpClient::send(const HttpRequest& request) {
             if (sel <= 0) {
                 res.success = false;
                 res.statusCode = 0;
-                res.errorMessage = (sel == 0) ? "Connection timed out" : ("Connection select error: " + std::string(strerror(errno)));
+                res.errorMessage = (sel == 0) ? "Connection timed out" : "Connection select error";
                 return res;
             }
 
             int so_error = 0;
             socklen_t len = sizeof(so_error);
-            getsockopt(sockGuard.fd, SOL_SOCKET, SO_ERROR, &so_error, &len);
+            getsockopt(sockGuard.fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_error), &len);
             if (so_error != 0) {
                 res.success = false;
                 res.statusCode = 0;
-                res.errorMessage = "Connection failed: " + std::string(strerror(so_error));
+                res.errorMessage = "Connection failed";
                 return res;
             }
         } else {
             res.success = false;
             res.statusCode = 0;
-            res.errorMessage = "Connection failed: " + std::string(strerror(errno));
+            res.errorMessage = "Connection failed";
             return res;
         }
     }
-    fcntl(sockGuard.fd, F_SETFL, origFlags);
+    setSocketNonBlocking(sockGuard.fd, false);
 
     SslCtxGuard sslCtxGuard;
     SslGuard sslGuard;
@@ -347,11 +348,11 @@ HttpResponse HttpClient::send(const HttpRequest& request) {
 #ifdef MSG_NOSIGNAL
             flags |= MSG_NOSIGNAL;
 #endif
-            ssize_t sent = ::send(sockGuard.fd, fullReq.data() + totalSent, toSend, flags);
+            ssize_t sent = ::send(sockGuard.fd, fullReq.data() + totalSent, static_cast<int>(toSend), flags);
             if (sent <= 0) {
                 res.success = false;
                 res.statusCode = 0;
-                res.errorMessage = "Failed to send HTTP request: " + std::string(strerror(errno));
+                res.errorMessage = "Failed to send HTTP request";
                 return res;
             }
             totalSent += static_cast<size_t>(sent);
@@ -384,10 +385,10 @@ HttpResponse HttpClient::send(const HttpRequest& request) {
             }
             n = ret;
         } else {
-            n = ::recv(sockGuard.fd, buf, sizeof(buf), 0);
+            n = ::recv(sockGuard.fd, buf, static_cast<int>(sizeof(buf)), 0);
             if (n < 0) {
                 readError = true;
-                readErrorMsg = "Socket receive error: " + std::string(strerror(errno));
+                readErrorMsg = "Socket receive error";
                 break;
             }
             if (n == 0) {

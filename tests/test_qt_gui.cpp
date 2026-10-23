@@ -14,6 +14,7 @@
 #include "landrop/ui/qt/QtTransferWidget.hpp"
 #include "landrop/ui/qt/QtStorageWidget.hpp"
 #include "landrop/ui/qt/QtSettingsWidget.hpp"
+#include "landrop/utils/SocketCompat.hpp"
 
 using namespace landrop;
 using namespace landrop::ui;
@@ -381,7 +382,7 @@ void TestQtGui::testDirectoryValidationLogic() {
     QVERIFY(res1.errorMessage.contains("порожнім"));
 
     // 2. Non-existent path without create should fail
-    QString nonExistent = "/tmp/landrop_test_nonexistent_" + QString::number(QCoreApplication::applicationPid());
+    QString nonExistent = QDir::tempPath() + "/landrop_test_nonexistent_" + QString::number(QCoreApplication::applicationPid());
     QDir(nonExistent).removeRecursively();
     auto res2 = QtSettingsWidget::validateWritableDirectory(nonExistent, false);
     QVERIFY(!res2.ok);
@@ -394,7 +395,7 @@ void TestQtGui::testDirectoryValidationLogic() {
     QDir(nonExistent).removeRecursively();
 
     // 4. File path (not directory) should fail
-    QString filePath = "/tmp/landrop_test_file_" + QString::number(QCoreApplication::applicationPid()) + ".txt";
+    QString filePath = QDir::tempPath() + "/landrop_test_file_" + QString::number(QCoreApplication::applicationPid()) + ".txt";
     QFile f(filePath);
     QVERIFY(f.open(QIODevice::WriteOnly));
     f.write("hello", 5);
@@ -425,7 +426,7 @@ void TestQtGui::testDownloadsPathGuiSelectionAndSync() {
     QVERIFY(!transfer->getDownloadsPathDisplay()->text().isEmpty());
 
     // Create a custom test directory
-    QString customDir = "/tmp/landrop_custom_recv_" + QString::number(QCoreApplication::applicationPid());
+    QString customDir = QDir::tempPath() + "/landrop_custom_recv_" + QString::number(QCoreApplication::applicationPid());
     QDir().mkpath(customDir);
 
     // Change path in settings edit and save
@@ -447,7 +448,7 @@ void TestQtGui::testDownloadsPathGuiSelectionAndSync() {
     QVERIFY(transfer->getDownloadsPathDisplay()->text().contains(customDir));
 
     // Test signal from TransferWidget
-    QString anotherDir = "/tmp/landrop_another_recv_" + QString::number(QCoreApplication::applicationPid());
+    QString anotherDir = QDir::tempPath() + "/landrop_another_recv_" + QString::number(QCoreApplication::applicationPid());
     QDir().mkpath(anotherDir);
     emit transfer->downloadsDirectoryChanged(anotherDir);
     QCoreApplication::processEvents();
@@ -462,10 +463,13 @@ void TestQtGui::testDownloadsPathGuiSelectionAndSync() {
 }
 
 int main(int argc, char* argv[]) {
+    initSocketSubsystem();
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication a(argc, argv);
     TestQtGui test;
-    return QTest::qExec(&test, argc, argv);
+    int res = QTest::qExec(&test, argc, argv);
+    cleanupSocketSubsystem();
+    return res;
 }
 
 #include "test_qt_gui.moc"

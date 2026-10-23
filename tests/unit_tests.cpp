@@ -9,11 +9,7 @@
 #include <thread>
 #include <atomic>
 #include <functional>
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "landrop/utils/SocketCompat.hpp"
 #include <cstring>
 
 
@@ -922,7 +918,7 @@ static bool testTlsTransportAndDeviceAuth() {
     const char plaintextGarbage[] = "GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n";
     send(fdsNeg3[1], plaintextGarbage, sizeof(plaintextGarbage), 0);
     sTh3.join();
-    close(fdsNeg3[1]);
+    closeSocket(fdsNeg3[1]);
 
     TEST_ASSERT(sStatus == TlsStatus::ProtocolMismatch || sStatus == TlsStatus::HandshakeFailed,
                 "TLS Server safely rejected plaintext protocol mismatch");
@@ -938,7 +934,7 @@ public:
         : m_isHttps(useHttps) {
         m_listenFd = socket(AF_INET, SOCK_STREAM, 0);
         int opt = 1;
-        setsockopt(m_listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        setsockopt(m_listenFd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
 
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -1009,11 +1005,11 @@ public:
                         iss >> method >> path;
                         std::string response = handler(method, path, req);
                         if (!response.empty()) {
-                            ::send(clientFd, response.data(), response.size(), MSG_NOSIGNAL);
+                            ::send(clientFd, response.data(), static_cast<int>(response.size()), MSG_NOSIGNAL);
                         }
                     }
                 }
-                close(clientFd);
+                closeSocket(clientFd);
             }
         });
     }
@@ -1024,7 +1020,7 @@ public:
             m_worker.join();
         }
         if (m_listenFd >= 0) {
-            close(m_listenFd);
+            closeSocket(m_listenFd);
             m_listenFd = -1;
         }
     }
@@ -1042,7 +1038,7 @@ private:
                 if (r <= 0) break;
                 n = r;
             } else {
-                n = recv(fd, b, sizeof(b), 0);
+                n = recv(fd, b, static_cast<int>(sizeof(b)), 0);
                 if (n <= 0) break;
             }
             req.append(b, static_cast<size_t>(n));
@@ -1286,22 +1282,22 @@ static bool testLiveSocketTransferPipeline() {
         listenFd = socket(AF_INET, SOCK_STREAM, 0);
         if (listenFd < 0) return false;
         int opt = 1;
-        setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         addr.sin_port = 0;
         if (bind(listenFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-            close(listenFd);
+            closeSocket(listenFd);
             return false;
         }
         if (listen(listenFd, 2) < 0) {
-            close(listenFd);
+            closeSocket(listenFd);
             return false;
         }
         socklen_t len = sizeof(addr);
         if (getsockname(listenFd, reinterpret_cast<sockaddr*>(&addr), &len) < 0) {
-            close(listenFd);
+            closeSocket(listenFd);
             return false;
         }
         outPort = ntohs(addr.sin_port);
@@ -1482,7 +1478,7 @@ static bool testLiveSocketTransferPipeline() {
     std::thread rxTh1([&]() { runReceiverWorker(listenFd1, recvDir.string(), rxStatus1); });
     bool txOk1 = sendFileOverSocket(port1, smallFile, "", false);
     rxTh1.join();
-    close(listenFd1);
+    closeSocket(listenFd1);
 
     TEST_ASSERT(txOk1, "Sender received positive ACK from receiver for small file");
     TEST_ASSERT(rxStatus1.load() == 0, "Receiver status indicates success for small file");
@@ -1508,7 +1504,7 @@ static bool testLiveSocketTransferPipeline() {
     std::thread rxTh2([&]() { runReceiverWorker(listenFd2, recvDir.string(), rxStatus2); });
     bool txOk2 = sendFileOverSocket(port2, largeFile, "", false);
     rxTh2.join();
-    close(listenFd2);
+    closeSocket(listenFd2);
 
     TEST_ASSERT(txOk2, "Sender received positive ACK for multi-chunk file");
     TEST_ASSERT(rxStatus2.load() == 0, "Receiver status indicates success for multi-chunk file");
@@ -1530,7 +1526,7 @@ static bool testLiveSocketTransferPipeline() {
     std::thread rxTh3([&]() { runReceiverWorker(listenFd3, recvDir.string(), rxStatus3); });
     bool txOk3 = sendFileOverSocket(port3, abortFile, "", true); // simulate disconnect!
     rxTh3.join();
-    close(listenFd3);
+    closeSocket(listenFd3);
 
     TEST_ASSERT(!txOk3, "Sender detected interrupted connection");
     TEST_ASSERT(rxStatus3.load() == 7, "Receiver correctly caught premature abort/disconnection");
@@ -1550,7 +1546,7 @@ static bool testLiveSocketTransferPipeline() {
     std::string forgedHash = "0000000000000000000000000000000000000000000000000000000000000000";
     bool txOk4 = sendFileOverSocket(port4, corruptFile, forgedHash, false);
     rxTh4.join();
-    close(listenFd4);
+    closeSocket(listenFd4);
 
     TEST_ASSERT(!txOk4, "Sender received NACK on hash mismatch");
     TEST_ASSERT(rxStatus4.load() == 8, "Receiver flagged hash mismatch");
@@ -1565,7 +1561,7 @@ static bool testLiveSocketTransferPipeline() {
     std::thread rxTh5([&]() { runReceiverWorker(listenFd5, recvDir.string(), rxStatus5); });
     bool txOk5 = sendFileOverSocket(port5, smallFile, "", false); // small.txt already exists from Test 1!
     rxTh5.join();
-    close(listenFd5);
+    closeSocket(listenFd5);
 
     TEST_ASSERT(!txOk5, "Sender rejected when destination file already exists");
     TEST_ASSERT(rxStatus5.load() == 4, "Receiver detected existing file collision and sent NACK");
@@ -1599,7 +1595,7 @@ static bool testTransferEngine() {
         socklen_t slen = sizeof(a);
         getsockname(ephemeralFd, reinterpret_cast<sockaddr*>(&a), &slen);
         listenPort = ntohs(a.sin_port);
-        close(ephemeralFd);
+        closeSocket(ephemeralFd);
     }
     if (listenPort == 0) listenPort = 9988;
 
@@ -1768,6 +1764,8 @@ static bool testTransferEngine() {
 }
 
 int main() {
+    initSocketSubsystem();
+
     std::cout << "==========================================\n";
     std::cout << "  LAN-Drop: Comprehensive Unit Test Suite \n";
     std::cout << "==========================================\n\n";
@@ -1817,5 +1815,6 @@ int main() {
               << g_passedTests << "/" << g_totalTests << " assertions passed).\n";
     std::cout << "==========================================\n";
 
+    cleanupSocketSubsystem();
     return (passedCases == cases.size()) ? 0 : 1;
 }

@@ -53,29 +53,56 @@ size_t SharedFolderManager::scanDirectory() {
     m_sharedFiles.clear();
     m_totalSharedBytes = 0;
 
-    std::error_code ec;
-    if (!std::filesystem::exists(m_rootSharedPath, ec)) {
+    std::error_code dirEc;
+    if (!std::filesystem::exists(m_rootSharedPath, dirEc)) {
         return 0;
     }
 
-    std::filesystem::path canonicalRoot = std::filesystem::weakly_canonical(m_rootSharedPath, ec);
+    std::filesystem::path canonicalRoot = std::filesystem::weakly_canonical(m_rootSharedPath, dirEc);
 
     FileChunkHasher hasher;
-    for (const auto& entry : std::filesystem::directory_iterator(m_rootSharedPath, ec)) {
-        if (ec) break;
+    auto iter = std::filesystem::directory_iterator(
+        m_rootSharedPath,
+        std::filesystem::directory_options::skip_permission_denied,
+        dirEc
+    );
 
-        // Security check: Ignore symlinks pointing outside the shared directory
-        if (entry.is_symlink()) {
-            auto symTarget = std::filesystem::weakly_canonical(entry.path(), ec);
-            auto rel = std::filesystem::relative(symTarget, canonicalRoot, ec);
-            if (ec || rel.empty() || rel.string().rfind("..", 0) == 0 || symTarget == canonicalRoot) {
+    while (!dirEc && iter != std::filesystem::directory_iterator()) {
+        std::error_code entryEc;
+        const auto& entry = *iter;
+
+        // Security check: Ignore symlinks pointing outside the shared directory or dangling
+        bool isSym = entry.is_symlink(entryEc);
+        if (entryEc) {
+            entryEc.clear();
+            iter.increment(dirEc);
+            continue;
+        }
+
+        if (isSym) {
+            auto symTarget = std::filesystem::weakly_canonical(entry.path(), entryEc);
+            if (entryEc) {
+                entryEc.clear();
+                iter.increment(dirEc);
+                continue;
+            }
+            auto rel = std::filesystem::relative(symTarget, canonicalRoot, entryEc);
+            if (entryEc || rel.empty() || rel.string().rfind("..", 0) == 0 || symTarget == canonicalRoot) {
+                iter.increment(dirEc);
                 continue;
             }
         }
 
-        if (entry.is_regular_file(ec) && m_sharedFiles.size() < m_maxFilesLimit) {
-            uint64_t fsize = entry.file_size(ec);
-            if (ec || fsize > m_maxFileSizeLimit) {
+        bool isReg = entry.is_regular_file(entryEc);
+        if (entryEc || !isReg) {
+            iter.increment(dirEc);
+            continue;
+        }
+
+        if (m_sharedFiles.size() < m_maxFilesLimit) {
+            uint64_t fsize = entry.file_size(entryEc);
+            if (entryEc || fsize > m_maxFileSizeLimit) {
+                iter.increment(dirEc);
                 continue;
             }
 
@@ -91,6 +118,8 @@ size_t SharedFolderManager::scanDirectory() {
             m_totalSharedBytes += meta.fileSize;
             m_sharedFiles.push_back(std::move(meta));
         }
+
+        iter.increment(dirEc);
     }
     return m_sharedFiles.size();
 }
@@ -107,11 +136,12 @@ bool SharedFolderManager::addSharedFile(const std::string& filePath) {
     }
 
     // Security check: If path is a symlink, verify it doesn't escape allowed root
-    if (std::filesystem::is_symlink(std::filesystem::symlink_status(path, ec))) {
-        std::filesystem::path canonicalRoot = std::filesystem::weakly_canonical(m_rootSharedPath, ec);
-        std::filesystem::path canonicalTarget = std::filesystem::weakly_canonical(path, ec);
-        auto rel = std::filesystem::relative(canonicalTarget, canonicalRoot, ec);
-        if (ec || rel.empty() || rel.string().rfind("..", 0) == 0) {
+    std::error_code symEc;
+    if (std::filesystem::is_symlink(std::filesystem::symlink_status(path, symEc))) {
+        std::filesystem::path canonicalRoot = std::filesystem::weakly_canonical(m_rootSharedPath, symEc);
+        std::filesystem::path canonicalTarget = std::filesystem::weakly_canonical(path, symEc);
+        auto rel = std::filesystem::relative(canonicalTarget, canonicalRoot, symEc);
+        if (symEc || rel.empty() || rel.string().rfind("..", 0) == 0) {
             return false;
         }
     }

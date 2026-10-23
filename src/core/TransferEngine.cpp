@@ -5,11 +5,7 @@
 #include <cstring>
 #include <chrono>
 #include <algorithm>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include "landrop/utils/SocketCompat.hpp"
 
 namespace landrop {
 

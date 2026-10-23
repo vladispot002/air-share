@@ -2,11 +2,10 @@
 #include "landrop/peers/LocalPeer.hpp"
 #include "landrop/peers/CloudPeer.hpp"
 #include "landrop/mobile/NfcPairingSession.hpp"
-#include <unistd.h>
-#include <ifaddrs.h>
-#include <netdb.h>
-#include <net/if.h>
-#include <arpa/inet.h>
+#include "landrop/utils/SocketCompat.hpp"
+#include <QHostInfo>
+#include <QNetworkInterface>
+#include <QHostAddress>
 #include <cstring>
 #include <algorithm>
 
@@ -298,37 +297,21 @@ finish_check:
 }
 
 std::string DiscoveryPresenter::getLocalDeviceName() const {
-    char h[256];
-    if (gethostname(h, sizeof(h)) == 0 && strlen(h) > 0) {
-        return std::string(h);
+    QString name = QHostInfo::localHostName();
+    if (!name.isEmpty()) {
+        return name.toStdString();
     }
     return "This Device";
 }
 
 std::string DiscoveryPresenter::getLocalDeviceIp() const {
-    struct ifaddrs* ifaddr = nullptr;
-    if (getifaddrs(&ifaddr) == -1) {
-        return "127.0.0.1";
-    }
-    std::string ip = "127.0.0.1";
-    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) {
-            continue;
-        }
-        if (ifa->ifa_flags & IFF_LOOPBACK) {
-            continue;
-        }
-        if (!(ifa->ifa_flags & IFF_UP)) {
-            continue;
-        }
-        char host[NI_MAXHOST];
-        if (getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
-            ip = host;
-            break;
+    const auto addresses = QNetworkInterface::allAddresses();
+    for (const auto& address : addresses) {
+        if (address.protocol() == QAbstractSocket::IPv4Protocol && !address.isLoopback()) {
+            return address.toString().toStdString();
         }
     }
-    freeifaddrs(ifaddr);
-    return ip;
+    return "127.0.0.1";
 }
 
 uint16_t DiscoveryPresenter::getLocalDevicePort() const {
