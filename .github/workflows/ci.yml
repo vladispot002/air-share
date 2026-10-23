@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build qt6-base-dev libssl-dev libxkbcommon-dev
+          sudo apt-get install -y cmake ninja-build qt6-base-dev qt6-qpa-plugins libssl-dev libxkbcommon-dev
 
       - name: Configure CMake
         run: |
@@ -44,14 +44,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install Qt 6
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.7.*'
+          version: '6.7.2'
           host: 'windows'
           target: 'desktop'
           arch: 'win64_msvc2022_64'
-          modules: 'qtbase'
+          setup-python: 'false'
 
       - name: Configure CMake
         run: |
@@ -66,3 +71,5 @@ jobs:
       - name: Run CTest
         run: |
           ctest --test-dir build -C Release --output-on-failure
+        env:
+          QT_QPA_PLATFORM: offscreen
