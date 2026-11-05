@@ -88,6 +88,9 @@ public:
     bool startAsInitiator(const std::string& signalingWsUrl);
     bool startAsJoiner(const std::string& signalingWsUrl, const std::string& roomCode);
 
+    // Crockford Base32 normalization and validation (DROP-XXXX-XXXX)
+    static std::string normalizeRoomCode(const std::string& input, std::string* outError = nullptr);
+
     // Blocking wait for connection establishment (with cancellation support)
     std::shared_ptr<WebRtcDataChannel> waitForConnection(
         std::chrono::milliseconds timeout = std::chrono::milliseconds(30000),

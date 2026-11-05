@@ -6,12 +6,14 @@
 #include <QStatusBar>
 #include <QTimer>
 #include <memory>
+#include <map>
 
 #include "landrop/ui/DiscoveryPresenter.hpp"
 #include "landrop/ui/TransferPresenter.hpp"
 #include "landrop/ui/StoragePresenter.hpp"
 #include "landrop/ui/SettingsPresenter.hpp"
 #include "landrop/core/TransferEngine.hpp"
+#include "landrop/core/WebRtcSessionCoordinator.hpp"
 
 namespace landrop::ui {
 
@@ -40,18 +42,34 @@ public:
     SettingsPresenter* getSettingsPresenter() const { return m_settingsPresenter.get(); }
     TransferEngine* getTransferEngine() const { return m_transferEngine.get(); }
     QTimer* getTransferTickTimer() const { return m_transferTickTimer; }
-    const std::string& getDownloadsDirectory() const { return m_downloadsDirectory; }
+    std::string getDownloadsDirectory() const {
+        std::lock_guard<std::mutex> lock(m_settingsMutex);
+        return m_downloadsDirectory;
+    }
+    void setDownloadsDirectory(const std::string& dir) {
+        std::lock_guard<std::mutex> lock(m_settingsMutex);
+        m_downloadsDirectory = dir;
+    }
 
     void startBackgroundTransferServer();
     void handleSendFile(const std::string& taskId, const std::string& targetPeerId, const std::string& filePath);
+    void launchWorker(std::function<void()> task);
 
 public slots:
     void applyTheme(const QString& themeName);
+    void onHostRoomRequested(const QString& filePath = QString());
+    void onJoinRoomRequested(const QString& roomCode);
 
 private slots:
     void onNavigationItemChanged(int row);
 
 private:
+    std::shared_ptr<std::atomic<bool>> m_aliveToken{std::make_shared<std::atomic<bool>>(true)};
+    mutable std::mutex m_workerThreadsMutex;
+    std::vector<std::thread> m_workerThreads;
+
+    mutable std::mutex m_coordinatorsMutex;
+    std::map<std::string, std::shared_ptr<WebRtcSessionCoordinator>> m_globalCoordinators;
     QListWidget* m_sidebar{nullptr};
     QStackedWidget* m_stackedWidget{nullptr};
 
@@ -66,6 +84,7 @@ private:
     std::unique_ptr<SettingsPresenter> m_settingsPresenter;
     std::unique_ptr<TransferEngine> m_transferEngine;
 
+    mutable std::mutex m_settingsMutex;
     std::string m_downloadsDirectory;
     QTimer* m_transferTickTimer{nullptr};
 

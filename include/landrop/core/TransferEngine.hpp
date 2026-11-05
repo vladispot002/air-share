@@ -40,6 +40,8 @@ struct TransferOptions {
     bool autoRenameDuplicates{false}; // When true, rename file (1).ext on duplicate instead of failing
     bool allowLegacyV1Fallback{true}; // Allows transparent interop with legacy LAN-Drop v1.x clients
     bool requireProtocolV2{false};     // When true, strictly aborts if incoming connection does not negotiate Protocol v2
+    bool closeChannelOnCompletion{true}; // When false, channel remains open after transfer completion/failure
+    uint32_t headerTimeoutMs{10000};     // Timeout for initial header (0 = indefinite wait until cancel/disconnect)
 };
 
 class TransferEngine {

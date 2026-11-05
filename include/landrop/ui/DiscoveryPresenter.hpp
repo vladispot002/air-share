@@ -21,6 +21,7 @@ public:
     void onRefreshDevicesClicked();
     void onSelectDeviceClicked(const std::string& peerId);
     void onDirectConnectRequested(const std::string& ipOrHost, uint16_t port);
+    void onGlobalPeerConnected(const std::string& peerId, const std::string& displayName, const std::string& endpointInfo);
     void onRemovePeerClicked(const std::string& peerId);
     void onNfcPairTriggered(const std::string& nfcPayload);
     void onToggleScanClicked(bool enable);

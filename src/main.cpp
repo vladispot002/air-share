@@ -17,6 +17,7 @@
 #include "landrop/core/SharedFolderManager.hpp"
 #include "landrop/core/MulticastBeacon.hpp"
 #include "landrop/core/TransferEngine.hpp"
+#include "landrop/core/WebRtcSessionCoordinator.hpp"
 #include "landrop/peers/NetworkPeer.hpp"
 #include "landrop/peers/LocalPeer.hpp"
 #include "landrop/peers/CloudPeer.hpp"
@@ -46,6 +47,8 @@ static void printUsage(const char* progName) {
     std::cout << "  " << progName << " mobile-gui\n";
     std::cout << "  " << progName << " send <file_path> <receiver_ip> [port] [--tls [expected_fingerprint]]\n";
     std::cout << "  " << progName << " receive [port] [save_dir] [--tls]\n";
+    std::cout << "  " << progName << " p2p-send <file_path> [--signaling <ws_url>]\n";
+    std::cout << "  " << progName << " p2p-receive <room_code> [save_dir] [--signaling <ws_url>]\n";
     std::cout << "  " << progName << " demo\n";
     std::cout << "  " << progName << " mobile-test\n";
 }
@@ -110,6 +113,199 @@ static int runReceiver(uint16_t port, const std::string& saveDir, bool useTls = 
     }
     std::cout << "[Receiver] File verified successfully.\n";
     return 0;
+}
+
+[[maybe_unused]] static std::string deriveHttpUrlFromWs(const std::string& wsUrl) {
+    std::string httpUrl = wsUrl;
+    if (httpUrl.rfind("wss://", 0) == 0) {
+        httpUrl = "https://" + httpUrl.substr(6);
+    } else if (httpUrl.rfind("ws://", 0) == 0) {
+        httpUrl = "http://" + httpUrl.substr(5);
+    }
+    size_t pathPos = httpUrl.find('/', 8);
+    if (pathPos != std::string::npos) {
+        httpUrl = httpUrl.substr(0, pathPos);
+    }
+    return httpUrl;
+}
+
+[[maybe_unused]] static int runP2pSender(const std::string& filePath, const std::string& signalingWsUrl) {
+#if !defined(LANDROP_HAVE_WEBRTC)
+    (void)filePath;
+    (void)signalingWsUrl;
+    std::cerr << "Error: WebRTC P2P transport is not enabled in this build.\n"
+              << "Rebuild LAN-Drop with -DLANDROP_ENABLE_WEBRTC=ON to enable global P2P file transfers.\n";
+    return 1;
+#else
+    std::error_code ec;
+    std::filesystem::path p(filePath);
+    if (!std::filesystem::is_regular_file(p, ec)) {
+        std::cerr << "Error: File not found or not a regular file: " << filePath << "\n";
+        return 1;
+    }
+    uint64_t fileSize = std::filesystem::file_size(p, ec);
+    if (ec) {
+        std::cerr << "Error: Failed to determine file size: " << ec.message() << "\n";
+        return 1;
+    }
+
+    std::cout << "[Sender] Initializing Global P2P WebRTC Transfer...\n";
+    std::cout << "[Sender] Target file: " << filePath << " (" << fileSize << " bytes)\n";
+    std::cout << "[Sender] Signaling service: " << signalingWsUrl << "\n";
+
+    CoordinatorOptions opts;
+    opts.signalingHttpUrl = deriveHttpUrlFromWs(signalingWsUrl);
+    opts.autoFetchTurn = true;
+    opts.dataChannelLabel = "lan-drop-data";
+
+    auto coordinator = std::make_shared<WebRtcSessionCoordinator>("cli-p2p-tx", WebRtcConfig{}, opts);
+
+    coordinator->onRoomReady = [](const std::string& code) {
+        std::cout << "\n============================================================\n"
+                  << "  LAN-Drop Global P2P Transfer (Anonymous Guest Mode)\n"
+                  << "============================================================\n"
+                  << "  Room Code: " << code << "\n"
+                  << "  Share this 8-character code with the receiver.\n"
+                  << "  Waiting for receiver to join...\n"
+                  << "============================================================\n" << std::flush;
+    };
+
+    coordinator->onPeerJoined = [](const std::string& peerId) {
+        std::cout << "[Sender] Peer joined (" << peerId << "). Negotiating WebRTC connection...\n" << std::flush;
+    };
+
+    coordinator->onError = [](const std::string& err) {
+        std::cerr << "[Sender Signaling Notice] " << err << "\n" << std::flush;
+    };
+
+    if (!coordinator->startAsInitiator(signalingWsUrl)) {
+        std::cerr << "Error: Failed to initiate signaling session with " << signalingWsUrl << "\n";
+        return 1;
+    }
+
+    std::string waitErr;
+    auto channel = coordinator->waitForConnection(std::chrono::seconds(120), nullptr, &waitErr);
+    if (!channel || !channel->isConnected()) {
+        std::cerr << "Error: WebRTC P2P connection failed: " << (waitErr.empty() ? "timeout waiting for peer" : waitErr) << "\n";
+        coordinator->close();
+        return 1;
+    }
+
+    std::cout << "[Sender] Direct WebRTC P2P connection established! Streaming file...\n" << std::flush;
+
+    TransferEngine engine;
+    TransferOptions txOpts;
+    std::string sendErr;
+    bool ok = engine.sendFileOverChannel(
+        "cli-p2p-tx",
+        filePath,
+        channel,
+        txOpts,
+        [](const TransferProgressUpdate& upd) {
+            if (upd.state == TransferState::Transferring) {
+                std::cout << "\r[Sender] Progress: " << upd.bytesTransferred << "/" << upd.totalBytes
+                          << " bytes (" << static_cast<int>(upd.progressPercentage) << "%) [WebRTC P2P]" << std::flush;
+            }
+        },
+        nullptr,
+        &sendErr
+    );
+
+    std::cout << "\n";
+    coordinator->close();
+
+    if (!ok) {
+        std::cerr << "Error: Transfer failed: " << sendErr << "\n";
+        return 1;
+    }
+
+    std::cout << "[Sender] File transfer verified and acknowledged by receiver.\n";
+    return 0;
+#endif
+}
+
+[[maybe_unused]] static int runP2pReceiver(const std::string& rawRoomCode, const std::string& saveDir, const std::string& signalingWsUrl) {
+#if !defined(LANDROP_HAVE_WEBRTC)
+    (void)rawRoomCode;
+    (void)saveDir;
+    (void)signalingWsUrl;
+    std::cerr << "Error: WebRTC P2P transport is not enabled in this build.\n"
+              << "Rebuild LAN-Drop with -DLANDROP_ENABLE_WEBRTC=ON to enable global P2P file transfers.\n";
+    return 1;
+#else
+    std::string normErr;
+    std::string roomCode = WebRtcSessionCoordinator::normalizeRoomCode(rawRoomCode, &normErr);
+    if (roomCode.empty()) {
+        std::cerr << "Error: Invalid room code '" << rawRoomCode << "': " << normErr << "\n";
+        return 1;
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(saveDir, ec);
+
+    std::cout << "[Receiver] Initializing Global P2P WebRTC Transfer...\n";
+    std::cout << "[Receiver] Target room: " << roomCode << "\n";
+    std::cout << "[Receiver] Destination directory: " << saveDir << "\n";
+    std::cout << "[Receiver] Signaling service: " << signalingWsUrl << "\n";
+
+    CoordinatorOptions opts;
+    opts.signalingHttpUrl = deriveHttpUrlFromWs(signalingWsUrl);
+    opts.autoFetchTurn = true;
+    opts.dataChannelLabel = "lan-drop-data";
+
+    auto coordinator = std::make_shared<WebRtcSessionCoordinator>("cli-p2p-rx", WebRtcConfig{}, opts);
+
+    coordinator->onError = [](const std::string& err) {
+        std::cerr << "[Receiver Signaling Notice] " << err << "\n" << std::flush;
+    };
+
+    std::cout << "[Receiver] Connecting to signaling service and joining room " << roomCode << "...\n" << std::flush;
+    if (!coordinator->startAsJoiner(signalingWsUrl, roomCode)) {
+        std::cerr << "Error: Failed to join room " << roomCode << " at " << signalingWsUrl << "\n";
+        return 1;
+    }
+
+    std::string waitErr;
+    auto channel = coordinator->waitForConnection(std::chrono::seconds(120), nullptr, &waitErr);
+    if (!channel || !channel->isConnected()) {
+        std::cerr << "Error: WebRTC P2P connection failed: " << (waitErr.empty() ? "timeout or peer left" : waitErr) << "\n";
+        coordinator->close();
+        return 1;
+    }
+
+    std::cout << "[Receiver] Direct WebRTC P2P connection established! Awaiting incoming file...\n" << std::flush;
+
+    TransferEngine engine;
+    TransferOptions rxOpts;
+    rxOpts.autoRenameDuplicates = true;
+    std::string recvErr;
+
+    bool ok = engine.receiveFileOverChannel(
+        "cli-p2p-rx",
+        saveDir,
+        channel,
+        rxOpts,
+        [](const TransferProgressUpdate& upd) {
+            if (upd.state == TransferState::Transferring) {
+                std::cout << "\r[Receiver] Progress: " << upd.bytesTransferred << "/" << upd.totalBytes
+                          << " bytes (" << static_cast<int>(upd.progressPercentage) << "%) [WebRTC P2P]" << std::flush;
+            }
+        },
+        nullptr,
+        &recvErr
+    );
+
+    std::cout << "\n";
+    coordinator->close();
+
+    if (!ok) {
+        std::cerr << "Error: Transfer failed: " << recvErr << "\n";
+        return 1;
+    }
+
+    std::cout << "[Receiver] File verified successfully (SHA-256 integrity confirmed).\n";
+    return 0;
+#endif
 }
 
 
@@ -412,6 +608,53 @@ int main(int argc, char* argv[]) {
                 }
             }
             exitCode = runReceiver(port, saveDir, useTls);
+        } else if (mode == "p2p-send") {
+#if !defined(LANDROP_HAVE_WEBRTC)
+            std::cerr << "Error: WebRTC P2P transport is not enabled in this build.\n"
+                      << "Rebuild LAN-Drop with -DLANDROP_ENABLE_WEBRTC=ON to enable global P2P file transfers.\n";
+            exitCode = 1;
+#else
+            if (argc < 3) {
+                printUsage(argv[0]);
+                exitCode = 1;
+            } else {
+                std::string filePath = argv[2];
+                const char* envSignaling = std::getenv("LANDROP_SIGNALING_URL");
+                std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "ws://127.0.0.1:8080/ws/signaling";
+                for (int i = 3; i < argc; ++i) {
+                    std::string arg = argv[i];
+                    if (arg == "--signaling" && i + 1 < argc) {
+                        signalingWsUrl = argv[++i];
+                    }
+                }
+                exitCode = runP2pSender(filePath, signalingWsUrl);
+            }
+#endif
+        } else if (mode == "p2p-receive") {
+#if !defined(LANDROP_HAVE_WEBRTC)
+            std::cerr << "Error: WebRTC P2P transport is not enabled in this build.\n"
+                      << "Rebuild LAN-Drop with -DLANDROP_ENABLE_WEBRTC=ON to enable global P2P file transfers.\n";
+            exitCode = 1;
+#else
+            if (argc < 3) {
+                printUsage(argv[0]);
+                exitCode = 1;
+            } else {
+                std::string roomCode = argv[2];
+                std::string saveDir = "./downloads";
+                const char* envSignaling = std::getenv("LANDROP_SIGNALING_URL");
+                std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "ws://127.0.0.1:8080/ws/signaling";
+                for (int i = 3; i < argc; ++i) {
+                    std::string arg = argv[i];
+                    if (arg == "--signaling" && i + 1 < argc) {
+                        signalingWsUrl = argv[++i];
+                    } else if (!arg.empty() && arg[0] != '-') {
+                        saveDir = arg;
+                    }
+                }
+                exitCode = runP2pReceiver(roomCode, saveDir, signalingWsUrl);
+            }
+#endif
         } else {
             // Unrecognized or GUI parameters (e.g. desktop launcher %U, Qt flags -platform, -style, etc.)
             // Launch GUI application and let Qt parse framework arguments

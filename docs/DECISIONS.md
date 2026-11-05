@@ -49,3 +49,29 @@
   2. **Coturn Ephemeral Credentials (`TurnConfigClient`)**: Implements `GET /api/v1/turn-config?token=...&client_id=...` with Bearer token authentication, parsing W3C `RTCIceServer` dictionaries into `landrop::WebRtcConfig`.
   3. **High-Level Session Coordination (`WebRtcSessionCoordinator`)**: Orchestrates the state lifecycle (`ConnectingSignaling`, `WaitingForPeer`, `NegotiatingSdp`, `Connected`), SDP exchange, ICE candidate queueing (`CandidateQueue`), and `WebRtcDataChannel` creation.
   4. **Headless Verification Architecture**: In-memory cross-wiring hook (`enableLoopbackMode`) enables end-to-end P2P unit testing (`TC-E2E-01`, `TC-E2E-02`, `TC-E2E-03`, `TC-E2E-04`) without external network sockets or kernel SCTP dependencies.
+
+## ADR-011: CLI Global P2P (`p2p-send` and `p2p-receive`) & Clean Fallback
+- **Status**: Accepted & Verified.
+- **Context**: Enabling headless and scripted global P2P file transfers directly from the command line while cleanly communicating WebRTC availability in builds without `libdatachannel`.
+- **Decision**:
+  1. **CLI Commands**:
+     - `p2p-send <file_path> [--signaling <ws_url>]`: Hosts an ephemeral room via `WebRtcSessionCoordinator`, outputs the normalized Crockford Base32 room code (`DROP-XXXX-XXXX`), waits for a joining peer, and streams the specified file over `WebRtcDataChannel` with live progress bars and SHA-256 verification.
+     - `p2p-receive <room_code> [save_dir] [--signaling <ws_url>]`: Normalizes user room code input, connects to the room as Joiner, accepts incoming file transfer over `WebRtcDataChannel`, and writes to `save_dir` with atomic `.part` file assembly.
+  2. **Strict Crockford Base32 Input Normalization**: `WebRtcSessionCoordinator::normalizeRoomCode` canonicalizes input strings: uppercase transformation, stripping prefixes (`DROP-`), removing whitespace and hyphens, and resolving visual confusions (`O` -> `0`, `I`/`L` -> `1`).
+  3. **Conditional Compilation & Offline Fallback**: Under `#if !defined(LANDROP_HAVE_WEBRTC)`, CLI commands immediately inform the user that WebRTC is not compiled in (`"WebRTC global P2P support is not compiled into this build. Recompile with -DLANDROP_ENABLE_WEBRTC=ON."`) and exit with status 1, guaranteeing zero undefined behavior or runtime crashes.
+
+## ADR-012: Real WebRTC & Signaling E2E Verification Harness (Suite 26)
+- **Status**: Accepted & Verified.
+- **Context**: Rigorously proving end-to-end file transfer capabilities across WebRTC data channels under heavy data loads and real Go signaling daemon WebSocket interactions.
+- **Decision**:
+  1. **100 MB Large-File Streaming Validation (`TC-E2E-100MB`)**: Validates `TransferEngine::sendFileOverChannel` and `receiveFileOverChannel` with a 100 MB randomized payload. Verifies in-flight dynamic backpressure handling (`onBufferedAmountLow`), Wire Protocol v2 chunking and framing, zero transmission aborts, atomic `.part` finalization, and bit-exact SHA-256 checksum matching across sender and receiver.
+  2. **Live Go Signaling Server Integration (`TC-E2E-REAL-SIGNALING`)**: Spawns `backend/signaling/bin/signaling-server` on a dedicated localhost port in test harness, polls `/healthz`, connects real WebSocket clients (`SignalingClient`), verifies room creation, joiner notification, and disconnect propagation over live network loopback.
+  3. **Room Normalization Test Coverage (`TC-ROOM-NORMALIZATION`)**: Exhaustively tests standard format, lowercase, optical confusion corrections (`O->0`, `I/L->1`), arbitrary whitespace/hyphen formatting, and strict rejection of illegal characters or invalid lengths.
+
+## ADR-013: Desktop UI Global P2P Room Radar Pairing & Background Channel Listening
+- **Status**: Accepted & Verified.
+- **Context**: Providing a seamless, intuitive desktop user experience for global file sharing across the internet without manual IP configuration, port forwarding, or cloud account creation.
+- **Decision**:
+  1. **Unified Radar Discovery (`DiscoveryPresenter` & `QtDiscoveryWidget`)**: Added "🌍 Global P2P Room" action to the radar view. Hosts can create a room, view the generated room code with one-click clipboard copying, and wait for peer connection. Joiners can enter or paste a room code.
+  2. **Dynamic WebRTC Peer Registration**: Upon establishing the WebRTC DataChannel session, `DiscoveryPresenter::onGlobalPeerConnected` injects the remote peer into the discovery radar with endpoint `webrtc:<room_code>`. Transfers directed at this peer in `QtDesktopApp` automatically route through `TransferEngine::sendFileOverChannel()`.
+  3. **Bidirectional Background Channel Receiver**: Both host and joiner launch asynchronous receiver listener threads on the established `WebRtcDataChannel`. When the remote peer initiates a transfer, files are received, validated via SHA-256, staged atomically, and logged to the UI transfer list with desktop notifications.

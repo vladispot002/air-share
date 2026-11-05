@@ -159,6 +159,13 @@ void WebRtcSessionCoordinator::setupSignalingBindings() {
                     onChannelOpened(m_channel);
                 }
             });
+            if (dc->isOpen()) {
+                m_channel->setConnected(true);
+                setState(CoordinatorState::Connected);
+                if (onChannelOpened) {
+                    onChannelOpened(m_channel);
+                }
+            }
 
             m_pc->setLocalDescription();
         }
@@ -263,6 +270,13 @@ void WebRtcSessionCoordinator::setupPeerConnection() {
                     onChannelOpened(m_channel);
                 }
             });
+            if (dc->isOpen()) {
+                m_channel->setConnected(true);
+                setState(CoordinatorState::Connected);
+                if (onChannelOpened) {
+                    onChannelOpened(m_channel);
+                }
+            }
         });
     }
 
@@ -301,13 +315,64 @@ bool WebRtcSessionCoordinator::startAsInitiator(const std::string& signalingWsUr
     return m_signaling->createRoom();
 }
 
+std::string WebRtcSessionCoordinator::normalizeRoomCode(const std::string& input, std::string* outError) {
+    std::string raw;
+    raw.reserve(input.size());
+    for (char c : input) {
+        if (c != '-' && c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+            raw.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+        }
+    }
+
+    if (raw.rfind("DROP", 0) == 0 && raw.length() == 12) {
+        raw = raw.substr(4);
+    }
+
+    const std::string kAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    std::string canonical;
+    canonical.reserve(raw.size());
+    for (char c : raw) {
+        if (c == 'O') {
+            canonical.push_back('0');
+        } else if (c == 'I' || c == 'L') {
+            canonical.push_back('1');
+        } else if (kAlphabet.find(c) != std::string::npos) {
+            canonical.push_back(c);
+        } else {
+            if (outError) {
+                *outError = std::string("Invalid character '") + c + "' in room code";
+            }
+            return "";
+        }
+    }
+
+    if (canonical.length() != 8) {
+        if (outError) {
+            *outError = "Invalid room code length: expected 8 characters, got " + std::to_string(canonical.length());
+        }
+        return "";
+    }
+
+    return "DROP-" + canonical.substr(0, 4) + "-" + canonical.substr(4, 4);
+}
+
 bool WebRtcSessionCoordinator::startAsJoiner(const std::string& signalingWsUrl, const std::string& roomCode) {
     m_role = SessionRole::Joiner;
     m_signaling->setRole(signaling::Role::Joiner);
     setState(CoordinatorState::ConnectingSignaling);
 
+    std::string normErr;
+    std::string normalizedCode = normalizeRoomCode(roomCode, &normErr);
+    if (normalizedCode.empty()) {
+        if (onError) {
+            onError("ERR_INVALID_ROOM_CODE: " + normErr);
+        }
+        setState(CoordinatorState::Failed);
+        return false;
+    }
+
     if (m_options.mockLoopbackMode) {
-        m_signaling->joinRoom(roomCode);
+        m_signaling->joinRoom(normalizedCode);
         return true;
     }
 
@@ -325,7 +390,7 @@ bool WebRtcSessionCoordinator::startAsJoiner(const std::string& signalingWsUrl, 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
-    return m_signaling->joinRoom(roomCode);
+    return m_signaling->joinRoom(normalizedCode);
 }
 
 std::shared_ptr<WebRtcDataChannel> WebRtcSessionCoordinator::waitForConnection(
@@ -375,7 +440,7 @@ void WebRtcSessionCoordinator::enableLoopbackMode(std::shared_ptr<WebRtcSessionC
 
     struct MockBrokerState {
         std::mutex mutex;
-        std::string roomCode = "749201";
+        std::string roomCode = "DROP-K8M4-P9X2";
         std::string roomToken = "mock-token-loopback";
     };
     auto broker = std::make_shared<MockBrokerState>();

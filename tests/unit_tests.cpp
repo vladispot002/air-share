@@ -11,6 +11,7 @@
 #include <functional>
 #include "landrop/utils/SocketCompat.hpp"
 #include <cstring>
+#include <csignal>
 
 
 #include "landrop/utils/Types.hpp"
@@ -2879,6 +2880,255 @@ static bool testMilestone2C_GlobalWebRtcTransferPipeline() {
     return true;
 }
 
+bool testMilestone2D_EndToEndWebRtcTransfer() {
+    // -------------------------------------------------------------
+    // 1. TC-ROOM-NORMALIZATION: Crockford Base32 Room Code Normalization
+    // -------------------------------------------------------------
+    {
+        std::string err;
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-K8M4-P9X2", &err) == "DROP-K8M4-P9X2",
+                    "Standard formatted room code passes unchanged");
+        TEST_ASSERT(err.empty(), "No error on valid room code");
+
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("k8m4p9x2") == "DROP-K8M4-P9X2",
+                    "Lowercase raw 8-character code normalized with DROP- prefix");
+
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode(" drop - k8m4 - p9x2 ") == "DROP-K8M4-P9X2",
+                    "Delimiters and whitespace stripped and standardized");
+
+        // Optical confusion corrections: O -> 0, I/L -> 1
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-K8M4-P9O2") == "DROP-K8M4-P902",
+                    "Letter 'O' automatically corrected to '0'");
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-K8M4-P9I2") == "DROP-K8M4-P912",
+                    "Letter 'I' automatically corrected to '1'");
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-K8M4-P9L2") == "DROP-K8M4-P912",
+                    "Letter 'L' automatically corrected to '1'");
+
+        // Invalid characters and invalid length
+        std::string badCharErr;
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-K8M4-P9U2", &badCharErr).empty(),
+                    "Letter 'U' rejected (excluded from Crockford alphabet)");
+        TEST_ASSERT(!badCharErr.empty(), "Descriptive error returned for invalid character");
+
+        std::string shortErr;
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-SHORT", &shortErr).empty(),
+                    "Short code rejected");
+        TEST_ASSERT(!shortErr.empty(), "Descriptive error returned for short code");
+    }
+
+    // -------------------------------------------------------------
+    // 2. TC-E2E-100MB: 100 MB Binary Transfer with Backpressure Flow Control & SHA-256 Validation
+    // -------------------------------------------------------------
+    {
+        std::filesystem::path rootDir = "./unit_test_webrtc_100mb_tmp";
+        std::filesystem::remove_all(rootDir);
+        std::filesystem::create_directories(rootDir);
+        std::filesystem::path sendDir = rootDir / "sender";
+        std::filesystem::path recvDir = rootDir / "receiver";
+        std::filesystem::create_directories(sendDir);
+        std::filesystem::create_directories(recvDir);
+
+        std::string largeFile = (sendDir / "big_payload_100mb.bin").string();
+        constexpr size_t kFileSize = 100 * 1024 * 1024; // 100 MB
+        constexpr size_t kBlockSize = 256 * 1024;       // 256 KB blocks
+        {
+            std::ofstream out(largeFile, std::ios::binary);
+            std::vector<char> block(kBlockSize);
+            for (size_t i = 0; i < kBlockSize; ++i) {
+                block[i] = static_cast<char>((i * 31 + 7) & 0xFF);
+            }
+            size_t written = 0;
+            while (written < kFileSize) {
+                size_t toWrite = std::min(kBlockSize, kFileSize - written);
+                out.write(block.data(), toWrite);
+                written += toWrite;
+            }
+        }
+
+        FileChunkHasher hasher;
+        std::string expectedHash = hasher.computeFullFileHash(largeFile).value();
+        TEST_ASSERT(!expectedHash.empty(), "Computed SHA-256 hash for 100 MB source file");
+
+        CoordinatorOptions opts;
+        opts.mockLoopbackMode = true;
+
+        auto initiator = std::make_shared<WebRtcSessionCoordinator>("alice-100mb", WebRtcConfig{}, opts);
+        auto joiner = std::make_shared<WebRtcSessionCoordinator>("bob-100mb", WebRtcConfig{}, opts);
+        initiator->enableLoopbackMode(joiner);
+
+        initiator->startAsInitiator("ws://mock/ws");
+        joiner->startAsJoiner("ws://mock/ws", initiator->getRoomCode());
+
+        auto txChan = initiator->waitForConnection(std::chrono::milliseconds(3000));
+        auto rxChan = joiner->waitForConnection(std::chrono::milliseconds(3000));
+        TEST_ASSERT(txChan != nullptr && rxChan != nullptr, "Channels connected for 100 MB transfer");
+
+        TransferEngine engine;
+        TransferOptions txOpts;
+        TransferOptions rxOpts;
+        rxOpts.autoRenameDuplicates = true;
+
+        std::atomic<bool> rxDone{false};
+        std::atomic<bool> rxSuccess{false};
+        std::string rxErr;
+
+        std::thread rxThread([&]() {
+            bool ok = engine.receiveFileOverChannel(
+                "rx-task-100mb",
+                recvDir.string(),
+                rxChan,
+                rxOpts,
+                nullptr,
+                nullptr,
+                &rxErr
+            );
+            rxSuccess.store(ok);
+            rxDone.store(true);
+        });
+
+        std::string txErr;
+        std::atomic<uint64_t> lastProgress{0};
+        bool txOk = engine.sendFileOverChannel(
+            "tx-task-100mb",
+            largeFile,
+            txChan,
+            txOpts,
+            [&](const TransferProgressUpdate& upd) {
+                lastProgress.store(upd.bytesTransferred);
+            },
+            nullptr,
+            &txErr
+        );
+
+        rxThread.join();
+
+        TEST_ASSERT(txOk, "sendFileOverChannel succeeded for 100 MB payload");
+        TEST_ASSERT(rxSuccess.load(), "receiveFileOverChannel succeeded for 100 MB payload");
+        TEST_ASSERT(std::filesystem::exists(recvDir / "big_payload_100mb.bin"),
+                    "100 MB received file exists on disk");
+        TEST_ASSERT(!std::filesystem::exists(recvDir / "big_payload_100mb.bin.part"),
+                    "Temporary .part file cleaned up after 100 MB transfer");
+
+        std::string actualHash = hasher.computeFullFileHash((recvDir / "big_payload_100mb.bin").string()).value();
+        TEST_ASSERT(actualHash == expectedHash, "100 MB destination file SHA-256 matches source hash exactly");
+        TEST_ASSERT(txChan->getBytesSent() >= kFileSize, "Transmitter recorded full 100 MB payload sent plus protocol frames");
+        TEST_ASSERT(rxChan->getBytesReceived() >= kFileSize, "Receiver recorded full 100 MB payload received plus protocol frames");
+
+        initiator->close();
+        joiner->close();
+        std::filesystem::remove_all(rootDir);
+    }
+
+    // -------------------------------------------------------------
+    // 3. TC-E2E-REAL-SIGNALING: Live Go Signaling Daemon E2E Integration Test
+    // -------------------------------------------------------------
+    {
+        std::string srvBin = "./backend/signaling/bin/signaling-server";
+        if (std::filesystem::exists(srvBin)) {
+            uint16_t testPort = 18090;
+            std::string cmd = "PORT=" + std::to_string(testPort) + " " + srvBin + " >/dev/null 2>&1 & echo $!";
+            FILE* pipe = popen(cmd.c_str(), "r");
+            pid_t serverPid = 0;
+            if (pipe) {
+                char buf[64];
+                if (fgets(buf, sizeof(buf), pipe)) {
+                    serverPid = std::stoi(buf);
+                }
+                pclose(pipe);
+            }
+
+            struct ServerProcessGuard {
+                pid_t pid{0};
+                ~ServerProcessGuard() {
+                    if (pid > 0) {
+                        kill(pid, SIGTERM);
+                    }
+                }
+            } procGuard{serverPid};
+
+            HttpClient http;
+            bool serverUp = false;
+            for (int i = 0; i < 50; ++i) {
+                HttpResponse resp = http.get("http://127.0.0.1:" + std::to_string(testPort) + "/healthz");
+                if (resp.success && resp.statusCode == 200) {
+                    serverUp = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            TEST_ASSERT(serverUp, "Go Signaling Server spawned and healthy on port 18090");
+
+            if (serverUp) {
+                std::string wsUrl = "ws://127.0.0.1:" + std::to_string(testPort) + "/ws/signaling";
+
+                CoordinatorOptions opts;
+                opts.signalingTimeoutMs = 5000;
+                opts.signalingHttpUrl = "http://127.0.0.1:" + std::to_string(testPort);
+
+                auto initiator = std::make_shared<WebRtcSessionCoordinator>("alice-live", WebRtcConfig{}, opts);
+                auto joiner = std::make_shared<WebRtcSessionCoordinator>("bob-live", WebRtcConfig{}, opts);
+
+                std::atomic<bool> roomCreated{false};
+                std::string generatedCode;
+                initiator->onRoomReady = [&](const std::string& code) {
+                    generatedCode = code;
+                    roomCreated.store(true);
+                };
+
+#if defined(LANDROP_HAVE_WEBRTC)
+                bool initOk = initiator->startAsInitiator(wsUrl);
+                TEST_ASSERT(initOk, "Initiator connected to live Go signaling server");
+
+                for (int i = 0; i < 50 && !roomCreated.load(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                TEST_ASSERT(roomCreated.load() && !generatedCode.empty(),
+                            "Go server created Crockford room code: " + generatedCode);
+                TEST_ASSERT(generatedCode.rfind("DROP-", 0) == 0,
+                            "Generated room code has DROP- prefix");
+
+                std::atomic<bool> joinerPeerJoined{false};
+                joiner->onPeerJoined = [&](const std::string&) {
+                    joinerPeerJoined.store(true);
+                };
+
+                bool joinOk = joiner->startAsJoiner(wsUrl, generatedCode);
+                TEST_ASSERT(joinOk, "Joiner connected and requested room via live Go signaling server");
+
+                for (int i = 0; i < 50 && !joinerPeerJoined.load(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                TEST_ASSERT(joinerPeerJoined.load(), "Go server relayed PEER_JOINED to both clients");
+
+                // Test peer disconnect notification
+                joiner->close();
+                for (int i = 0; i < 50; ++i) {
+                    if (initiator->getState() == CoordinatorState::Disconnected) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                TEST_ASSERT(initiator->getState() == CoordinatorState::Disconnected,
+                            "Initiator transitioned to Disconnected upon peer drop");
+
+                initiator->close();
+#else
+                bool initOk = initiator->startAsInitiator(wsUrl);
+                TEST_ASSERT(!initOk, "Initiator safely rejects WebSocket connect when WebRTC is not compiled in");
+                std::string normErr;
+                std::string normCode = WebRtcSessionCoordinator::normalizeRoomCode("k8m4p9x2", &normErr);
+                bool joinOk = joiner->startAsJoiner(wsUrl, normCode);
+                TEST_ASSERT(!joinOk, "Joiner safely rejects WebSocket connect when WebRTC is not compiled in");
+#endif
+            }
+
+            if (serverPid > 0) {
+                kill(serverPid, SIGTERM);
+            }
+        }
+    }
+
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -2916,7 +3166,8 @@ int main() {
         {"libdatachannel WebRtcDataChannel Integration Preparation", testWebRtcDataChannelPrep},
         {"WebRTC Flow Control & Candidate Queueing (TC-RTC-01, TC-RTC-02)", testCandidateQueueAndBackpressure},
         {"SignalingClient Protocol & Glare Resolution (TC-RTC-03)", testSignalingClientAndGlareResolution},
-        {"Global WebRTC Transfer Pipeline & Coturn Config (Milestone 2C)", testMilestone2C_GlobalWebRtcTransferPipeline}
+        {"Global WebRTC Transfer Pipeline & Coturn Config (Milestone 2C)", testMilestone2C_GlobalWebRtcTransferPipeline},
+        {"End-to-End File Transfer & Live Signaling Verification (Milestone 2D)", testMilestone2D_EndToEndWebRtcTransfer}
     };
 
 

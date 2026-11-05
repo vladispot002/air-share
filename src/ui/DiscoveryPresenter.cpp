@@ -127,6 +127,40 @@ void DiscoveryPresenter::onDirectConnectRequested(const std::string& ipOrHost, u
     }
 }
 
+void DiscoveryPresenter::onGlobalPeerConnected(const std::string& peerId, const std::string& displayName, const std::string& endpointInfo) {
+    auto newPeer = std::make_shared<LocalPeer>(
+        peerId,
+        displayName,
+        endpointInfo,
+        0,
+        "Global P2P",
+        "WebRTC DTLS/SCTP",
+        "255.255.255.255",
+        true
+    );
+    newPeer->initialize();
+    bool updated = false;
+    {
+        std::lock_guard<std::mutex> lock(m_peersMutex);
+        for (auto it = m_peers.begin(); it != m_peers.end(); ++it) {
+            if ((*it)->getId() == peerId) {
+                *it = newPeer;
+                m_selectedPeer = newPeer;
+                updated = true;
+                break;
+            }
+        }
+        if (!updated) {
+            m_peers.push_back(newPeer);
+            m_selectedPeer = newPeer;
+        }
+    }
+    refreshView();
+    if (m_view && !updated) {
+        m_view->showNotification("Connected to global peer: " + displayName);
+    }
+}
+
 void DiscoveryPresenter::onNfcPairTriggered(const std::string& nfcPayload) {
     std::string name, uuid, ip = "192.168.1.150";
     uint16_t port = 0;

@@ -479,7 +479,9 @@ bool TransferEngine::receiveFileOverChannel(
         if (channel && channel->isConnected()) {
             uint8_t nack = 0;
             channel->sendExact(&nack, 1);
-            channel->close();
+            if (options.closeChannelOnCompletion) {
+                channel->close();
+            }
         }
         if (outError) *outError = err;
         if (progressCb) {
@@ -504,7 +506,8 @@ bool TransferEngine::receiveFileOverChannel(
 
     // 1. Read metadata header
     uint32_t nameLen = 0;
-    if (!channel->receiveExact(reinterpret_cast<uint8_t*>(&nameLen), sizeof(uint32_t), 10000, effectiveCancel.get())) {
+    int headerTimeout = (options.headerTimeoutMs > 0) ? static_cast<int>(options.headerTimeoutMs) : -1;
+    if (!channel->receiveExact(reinterpret_cast<uint8_t*>(&nameLen), sizeof(uint32_t), headerTimeout, effectiveCancel.get())) {
         return finishWithFailure("", "Failed to receive filename length");
     }
 
@@ -692,7 +695,9 @@ bool TransferEngine::receiveFileOverChannel(
     // Send positive ACK
     uint8_t ack = 1;
     channel->sendExact(&ack, 1);
-    channel->close();
+    if (options.closeChannelOnCompletion) {
+        channel->close();
+    }
 
     if (progressCb) {
         TransferProgressUpdate upd;
