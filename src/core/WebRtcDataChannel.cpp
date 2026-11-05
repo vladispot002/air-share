@@ -89,6 +89,14 @@ bool WebRtcDataChannel::sendExact(const uint8_t* data, size_t length) {
         }
     }
 
+    if (m_customSink) {
+        bool ok = m_customSink(data, length);
+        if (ok) {
+            m_bytesSent += length;
+        }
+        return ok;
+    }
+
 #if defined(LANDROP_HAVE_WEBRTC)
     std::shared_ptr<rtc::DataChannel> dc;
     {
@@ -253,6 +261,7 @@ void WebRtcDataChannel::close() {
         m_rxBuffer.clear();
         m_rxOffset = 0;
     }
+    m_customSink = nullptr;
     m_rxCv.notify_all();
     m_txCv.notify_all();
 }

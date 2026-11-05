@@ -27,6 +27,8 @@
 #include "landrop/core/WebRtcDataChannel.hpp"
 #include "landrop/core/CandidateQueue.hpp"
 #include "landrop/core/SignalingClient.hpp"
+#include "landrop/core/TurnConfigClient.hpp"
+#include "landrop/core/WebRtcSessionCoordinator.hpp"
 
 
 #include "landrop/peers/NetworkPeer.hpp"
@@ -2475,6 +2477,408 @@ static bool testSignalingClientAndGlareResolution() {
     return true;
 }
 
+
+static bool testMilestone2C_GlobalWebRtcTransferPipeline() {
+    using namespace landrop;
+
+    // -------------------------------------------------------------
+    // 1. TC-TURN-01: Coturn REST API & JSON Configuration Parsing
+    // -------------------------------------------------------------
+    {
+        std::string validJson = R"({
+            "ice_servers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {
+                    "urls": [
+                        "turn:turn.lan-drop.org:3478?transport=udp",
+                        "turns:turn.lan-drop.org:5349?transport=tcp"
+                    ],
+                    "username": "1730000000:alice",
+                    "credential": "secretpassword123"
+                }
+            ],
+            "ttl_seconds": 86400
+        })";
+
+        WebRtcConfig cfg;
+        int64_t ttl = 0;
+        std::string err;
+        bool ok = TurnConfigClient::parseTurnConfigJson(validJson, cfg, &ttl, &err);
+        TEST_ASSERT(ok, "Valid Coturn JSON parsed successfully");
+        TEST_ASSERT(err.empty(), "No error on valid TURN parse");
+        TEST_ASSERT(ttl == 86400, "TTL parsed correctly (86400)");
+        TEST_ASSERT(cfg.turnUsername == "1730000000:alice", "TURN username extracted");
+        TEST_ASSERT(cfg.turnPassword == "secretpassword123", "TURN credential extracted");
+        TEST_ASSERT(cfg.turnServer == "turn:turn.lan-drop.org:3478?transport=udp", "TURN server URI selected");
+        TEST_ASSERT(cfg.iceServers.size() == 3, "All 3 ICE server URIs captured");
+
+        // Malformed JSON checks
+        WebRtcConfig malformedCfg;
+        std::string malformedErr;
+        bool malformedOk = TurnConfigClient::parseTurnConfigJson("{not_valid_json", malformedCfg, nullptr, &malformedErr);
+        TEST_ASSERT(!malformedOk, "Malformed JSON rejected");
+        TEST_ASSERT(!malformedErr.empty(), "Malformed JSON returns error message");
+
+        std::string missingServersJson = R"({"status": "ok"})";
+        bool missingOk = TurnConfigClient::parseTurnConfigJson(missingServersJson, malformedCfg, nullptr, &malformedErr);
+        TEST_ASSERT(!missingOk, "JSON missing ice_servers array rejected");
+
+        // F-01 regression test: JSON type mismatch must be caught gracefully without aborting
+        std::string typeErrorJson = R"({"ice_servers": [{"urls": ["turn:h:3478"], "username": 12345}]})";
+        std::string typeErr;
+        bool typeOk = TurnConfigClient::parseTurnConfigJson(typeErrorJson, malformedCfg, nullptr, &typeErr);
+        TEST_ASSERT(!typeOk, "Type mismatch in JSON fields safely rejected without throwing");
+        TEST_ASSERT(!typeErr.empty(), "Descriptive error returned on JSON type mismatch");
+
+        // F-06 regression test: CandidateQueue::reset() clears callback
+        {
+            CandidateQueue cq;
+            bool cbFired = false;
+            cq.setOnCandidateReady([&](const IceCandidate&) { cbFired = true; });
+            cq.reset();
+            cq.setRemoteDescriptionSet();
+            cq.push({"cand1", "mid1", 0});
+            TEST_ASSERT(!cbFired, "CandidateQueue callback cleared on reset");
+        }
+
+        // Mock HttpClient testing fetchTurnConfig
+        class MockTurnHttpClient : public HttpClient {
+        public:
+            std::string lastAuthHeader;
+            std::string lastUrl;
+            HttpResponse send(const HttpRequest& request) override {
+                lastUrl = request.url;
+                auto it = request.headers.find("Authorization");
+                if (it != request.headers.end()) {
+                    lastAuthHeader = it->second;
+                }
+                HttpResponse resp;
+                resp.statusCode = 200;
+                resp.success = true;
+                resp.body = R"({
+                    "ice_servers": [
+                        {"urls": "stun:stun.example.com:3478"},
+                        {"urls": ["turn:turn.example.com:3478"], "username": "u1", "credential": "p1"}
+                    ],
+                    "ttl_seconds": 3600
+                })";
+                return resp;
+            }
+        };
+
+        auto mockHttp = std::make_shared<MockTurnHttpClient>();
+        TurnConfigClient client(mockHttp);
+        WebRtcConfig fetchedCfg;
+        std::string fetchErr;
+        bool fetchOk = client.fetchTurnConfig(
+            "https://signaling.lan-drop.org",
+            "token-secret-xyz",
+            "client-abc",
+            fetchedCfg,
+            5,
+            &fetchErr
+        );
+        TEST_ASSERT(fetchOk, "fetchTurnConfig succeeds with mock HTTP response");
+        TEST_ASSERT(mockHttp->lastAuthHeader == "Bearer token-secret-xyz", "Bearer token sent in Authorization header");
+        TEST_ASSERT(mockHttp->lastUrl.find("/api/v1/turn-config?token=token-secret-xyz&client_id=client-abc") != std::string::npos,
+                    "Query parameters formatted correctly in request URL");
+        TEST_ASSERT(fetchedCfg.turnUsername == "u1" && fetchedCfg.turnPassword == "p1", "Fetched credentials mapped into WebRtcConfig");
+        TEST_ASSERT(fetchedCfg.iceServers.size() == 2, "Both STUN and TURN URIs mapped");
+    }
+
+    // -------------------------------------------------------------
+    // 2. TC-E2E-01: Mock Loopback WebRTC P2P Transfer (10 MB Memory Buffer)
+    // -------------------------------------------------------------
+    {
+        CoordinatorOptions opts;
+        opts.mockLoopbackMode = true;
+
+        auto initiator = std::make_shared<WebRtcSessionCoordinator>("alice", WebRtcConfig{}, opts);
+        auto joiner = std::make_shared<WebRtcSessionCoordinator>("bob", WebRtcConfig{}, opts);
+
+        initiator->enableLoopbackMode(joiner);
+
+        TEST_ASSERT(initiator->startAsInitiator("ws://mock/ws"), "Initiator start succeeds");
+        std::string roomCode = initiator->getRoomCode();
+        TEST_ASSERT(!roomCode.empty(), "Initiator creates room code");
+
+        TEST_ASSERT(joiner->startAsJoiner("ws://mock/ws", roomCode), "Joiner start succeeds with room code");
+
+        auto txChan = initiator->waitForConnection(std::chrono::milliseconds(2000));
+        auto rxChan = joiner->waitForConnection(std::chrono::milliseconds(2000));
+
+        TEST_ASSERT(txChan != nullptr && txChan->isConnected(), "Initiator WebRTC channel is connected");
+        TEST_ASSERT(rxChan != nullptr && rxChan->isConnected(), "Joiner WebRTC channel is connected");
+
+        // Transfer 10 MB in-memory buffer
+        constexpr size_t kPayloadSize = 10 * 1024 * 1024;
+        std::vector<uint8_t> sendData(kPayloadSize);
+        for (size_t i = 0; i < kPayloadSize; ++i) {
+            sendData[i] = static_cast<uint8_t>((i * 7 + 13) & 0xFF);
+        }
+
+        std::vector<uint8_t> recvData(kPayloadSize, 0);
+        std::atomic<bool> rxDone{false};
+        std::atomic<bool> rxError{false};
+
+        std::thread rxThread([&]() {
+            if (!rxChan->receiveExact(recvData.data(), kPayloadSize, 5000)) {
+                rxError.store(true);
+            }
+            rxDone.store(true);
+        });
+
+        // Send in 64 KB slices
+        constexpr size_t kChunkSize = 64 * 1024;
+        size_t totalSent = 0;
+        bool sendOk = true;
+        while (totalSent < kPayloadSize) {
+            size_t toSend = std::min(kChunkSize, kPayloadSize - totalSent);
+            if (!txChan->sendExact(sendData.data() + totalSent, toSend)) {
+                sendOk = false;
+                break;
+            }
+            totalSent += toSend;
+        }
+
+        rxThread.join();
+
+        TEST_ASSERT(sendOk, "10 MB in-memory send completed successfully");
+        TEST_ASSERT(!rxError.load() && rxDone.load(), "10 MB in-memory receive completed successfully");
+        TEST_ASSERT(sendData == recvData, "10 MB buffer data matches identically between peers");
+        TEST_ASSERT(txChan->getBytesSent() == kPayloadSize, "Channel bytesSent matches 10 MB");
+        TEST_ASSERT(rxChan->getBytesReceived() == kPayloadSize, "Channel bytesReceived matches 10 MB");
+
+        initiator->close();
+        joiner->close();
+    }
+
+    // -------------------------------------------------------------
+    // 3. TC-E2E-02: Real File Transfer Over WebRTC DataChannel Pipeline
+    // -------------------------------------------------------------
+    std::filesystem::path rootDir = "./unit_test_webrtc_e2e_tmp";
+    std::filesystem::remove_all(rootDir);
+    std::filesystem::create_directories(rootDir);
+    std::filesystem::path sendDir = rootDir / "sender";
+    std::filesystem::path recvDir = rootDir / "receiver";
+    std::filesystem::create_directories(sendDir);
+    std::filesystem::create_directories(recvDir);
+
+    FileChunkHasher hasher;
+    TransferEngine engine;
+
+    {
+        CoordinatorOptions opts;
+        opts.mockLoopbackMode = true;
+
+        auto initiator = std::make_shared<WebRtcSessionCoordinator>("alice", WebRtcConfig{}, opts);
+        auto joiner = std::make_shared<WebRtcSessionCoordinator>("bob", WebRtcConfig{}, opts);
+        initiator->enableLoopbackMode(joiner);
+
+        initiator->startAsInitiator("ws://mock/ws");
+        joiner->startAsJoiner("ws://mock/ws", initiator->getRoomCode());
+
+        auto txChan = initiator->waitForConnection(std::chrono::milliseconds(2000));
+        auto rxChan = joiner->waitForConnection(std::chrono::milliseconds(2000));
+
+        // Create a 4 MB binary file
+        std::string largeFile = (sendDir / "webrtc_payload.bin").string();
+        {
+            std::ofstream out(largeFile, std::ios::binary);
+            std::vector<char> blk(64 * 1024);
+            for (size_t i = 0; i < blk.size(); ++i) blk[i] = static_cast<char>((i * 17) & 0xFF);
+            for (int chunk = 0; chunk < 64; ++chunk) {
+                out.write(blk.data(), blk.size());
+            }
+        }
+        std::string expectedHash = hasher.computeFullFileHash(largeFile).value();
+
+        TransferOptions txOpts;
+        TransferOptions rxOpts;
+        std::atomic<bool> rxFinished{false};
+        std::string rxErr;
+        std::atomic<bool> rxSuccess{false};
+
+        std::thread rxThread([&]() {
+            bool ok = engine.receiveFileOverChannel(
+                "rx-task-rtc",
+                recvDir.string(),
+                rxChan,
+                rxOpts,
+                nullptr,
+                nullptr,
+                &rxErr
+            );
+            rxSuccess.store(ok);
+            rxFinished.store(true);
+        });
+
+        std::string txErr;
+        bool txOk = engine.sendFileOverChannel(
+            "tx-task-rtc",
+            largeFile,
+            txChan,
+            txOpts,
+            nullptr,
+            nullptr,
+            &txErr
+        );
+
+        rxThread.join();
+
+        TEST_ASSERT(txOk, "sendFileOverChannel succeeded over WebRTC channel");
+        TEST_ASSERT(rxSuccess.load(), "receiveFileOverChannel succeeded over WebRTC channel");
+        TEST_ASSERT(std::filesystem::exists(recvDir / "webrtc_payload.bin"), "Received file exists in destination directory");
+        TEST_ASSERT(!std::filesystem::exists(recvDir / "webrtc_payload.bin.part"), "Temporary .part file cleaned up");
+        TEST_ASSERT(hasher.computeFullFileHash((recvDir / "webrtc_payload.bin").string()).value() == expectedHash,
+                    "Destination file SHA-256 matches source hash exactly");
+
+        initiator->close();
+        joiner->close();
+    }
+
+    // -------------------------------------------------------------
+    // 4. TC-E2E-03: Cancellation Handling Over WebRTC DataChannel
+    // -------------------------------------------------------------
+    {
+        CoordinatorOptions opts;
+        opts.mockLoopbackMode = true;
+
+        auto initiator = std::make_shared<WebRtcSessionCoordinator>("alice", WebRtcConfig{}, opts);
+        auto joiner = std::make_shared<WebRtcSessionCoordinator>("bob", WebRtcConfig{}, opts);
+        initiator->enableLoopbackMode(joiner);
+
+        initiator->startAsInitiator("ws://mock/ws");
+        joiner->startAsJoiner("ws://mock/ws", initiator->getRoomCode());
+
+        auto txChan = initiator->waitForConnection(std::chrono::milliseconds(2000));
+        auto rxChan = joiner->waitForConnection(std::chrono::milliseconds(2000));
+
+        std::string cancelFile = (sendDir / "webrtc_cancel.bin").string();
+        {
+            std::ofstream out(cancelFile, std::ios::binary);
+            std::vector<char> blk(64 * 1024, 'X');
+            for (int i = 0; i < 16; ++i) out.write(blk.data(), blk.size());
+        }
+
+        std::atomic<bool> cancelToken{false};
+        TransferOptions txOpts;
+        txOpts.speedLimitKbps = 32; // throttle to allow mid-stream abort
+        TransferOptions rxOpts;
+
+        std::atomic<bool> rxFinished{false};
+        std::atomic<bool> rxSuccess{true};
+        std::string rxErr;
+
+        std::thread rxThread([&]() {
+            bool ok = engine.receiveFileOverChannel(
+                "rx-cancel-task",
+                recvDir.string(),
+                rxChan,
+                rxOpts,
+                nullptr,
+                &cancelToken,
+                &rxErr
+            );
+            rxSuccess.store(ok);
+            rxFinished.store(true);
+        });
+
+        std::string txErr;
+        bool txOk = engine.sendFileOverChannel(
+            "tx-cancel-task",
+            cancelFile,
+            txChan,
+            txOpts,
+            [&](const TransferProgressUpdate& upd) {
+                if (upd.bytesTransferred > 0) {
+                    cancelToken.store(true);
+                }
+            },
+            &cancelToken,
+            &txErr
+        );
+
+        rxThread.join();
+
+        TEST_ASSERT(!txOk, "Cancelled sendFileOverChannel returns false");
+        TEST_ASSERT(!rxSuccess.load(), "Cancelled receiveFileOverChannel returns false");
+        TEST_ASSERT(!std::filesystem::exists(recvDir / "webrtc_cancel.bin.part"), "Cancelled .part file purged cleanly");
+        TEST_ASSERT(!std::filesystem::exists(recvDir / "webrtc_cancel.bin"), "Destination file was not created on abort");
+
+        initiator->close();
+        joiner->close();
+    }
+
+    // -------------------------------------------------------------
+    // 5. TC-E2E-04: Duplicate Auto-Rename Over WebRTC DataChannel
+    // -------------------------------------------------------------
+    {
+        CoordinatorOptions opts;
+        opts.mockLoopbackMode = true;
+
+        auto initiator = std::make_shared<WebRtcSessionCoordinator>("alice", WebRtcConfig{}, opts);
+        auto joiner = std::make_shared<WebRtcSessionCoordinator>("bob", WebRtcConfig{}, opts);
+        initiator->enableLoopbackMode(joiner);
+
+        initiator->startAsInitiator("ws://mock/ws");
+        joiner->startAsJoiner("ws://mock/ws", initiator->getRoomCode());
+
+        auto txChan = initiator->waitForConnection(std::chrono::milliseconds(2000));
+        auto rxChan = joiner->waitForConnection(std::chrono::milliseconds(2000));
+
+        std::string originalFile = (sendDir / "webrtc_payload.bin").string();
+        std::string expectedHash = hasher.computeFullFileHash(originalFile).value();
+
+        TransferOptions rxOpts;
+        rxOpts.autoRenameDuplicates = true;
+
+        std::atomic<bool> rxFinished{false};
+        std::atomic<bool> rxSuccess{false};
+        std::string rxErr;
+
+        std::thread rxThread([&]() {
+            bool ok = engine.receiveFileOverChannel(
+                "rx-dup-task",
+                recvDir.string(),
+                rxChan,
+                rxOpts,
+                nullptr,
+                nullptr,
+                &rxErr
+            );
+            rxSuccess.store(ok);
+            rxFinished.store(true);
+        });
+
+        std::string txErr;
+        bool txOk = engine.sendFileOverChannel(
+            "tx-dup-task",
+            originalFile,
+            txChan,
+            TransferOptions{},
+            nullptr,
+            nullptr,
+            &txErr
+        );
+
+        rxThread.join();
+
+        TEST_ASSERT(txOk, "Duplicate send succeeds over WebRTC channel");
+        TEST_ASSERT(rxSuccess.load(), "Duplicate receive succeeds over WebRTC channel");
+        TEST_ASSERT(std::filesystem::exists(recvDir / "webrtc_payload (1).bin"), "Auto-renamed file webrtc_payload (1).bin exists");
+        TEST_ASSERT(!std::filesystem::exists(recvDir / "webrtc_payload (1).bin.part"), "Auto-renamed .part file removed");
+        TEST_ASSERT(hasher.computeFullFileHash((recvDir / "webrtc_payload (1).bin").string()).value() == expectedHash,
+                    "Auto-renamed file SHA-256 matches original file");
+
+        initiator->close();
+        joiner->close();
+    }
+
+    std::filesystem::remove_all(rootDir);
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -2511,7 +2915,8 @@ int main() {
         {"ITransportChannel & TcpSocketChannel Abstraction", testTransportChannelAbstraction},
         {"libdatachannel WebRtcDataChannel Integration Preparation", testWebRtcDataChannelPrep},
         {"WebRTC Flow Control & Candidate Queueing (TC-RTC-01, TC-RTC-02)", testCandidateQueueAndBackpressure},
-        {"SignalingClient Protocol & Glare Resolution (TC-RTC-03)", testSignalingClientAndGlareResolution}
+        {"SignalingClient Protocol & Glare Resolution (TC-RTC-03)", testSignalingClientAndGlareResolution},
+        {"Global WebRTC Transfer Pipeline & Coturn Config (Milestone 2C)", testMilestone2C_GlobalWebRtcTransferPipeline}
     };
 
 

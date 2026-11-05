@@ -93,6 +93,11 @@ public:
 
     void injectIncomingBytes(const uint8_t* data, size_t length);
 
+    using CustomSink = std::function<bool(const uint8_t*, size_t)>;
+    void setCustomSink(CustomSink sink) {
+        m_customSink = std::move(sink);
+    }
+
     const WebRtcConfig& getConfig() const { return m_config; }
     const std::string& getLabel() const { return m_label; }
 
@@ -111,6 +116,7 @@ private:
     WebRtcConfig m_config;
     std::atomic<bool> m_connected{false};
     bool m_simulatedMode{false};
+    CustomSink m_customSink;
     std::atomic<size_t> m_bufferedAmount{0};
     std::atomic<uint64_t> m_bytesSent{0};
     std::atomic<uint64_t> m_bytesReceived{0};

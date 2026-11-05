@@ -14,6 +14,7 @@
 #include "landrop/utils/Types.hpp"
 #include "landrop/core/NetworkSession.hpp"
 #include "landrop/core/FileChunkHasher.hpp"
+#include "landrop/core/ITransportChannel.hpp"
 
 namespace landrop {
 
@@ -62,6 +63,17 @@ public:
         std::string* outError = nullptr
     );
 
+    // Send a single file over an arbitrary transport channel (WebRTC, TCP, etc.)
+    bool sendFileOverChannel(
+        const std::string& taskId,
+        const std::string& filePath,
+        std::shared_ptr<ITransportChannel> channel,
+        const TransferOptions& options,
+        TransferProgressCallback progressCb,
+        std::atomic<bool>* cancelFlag = nullptr,
+        std::string* outError = nullptr
+    );
+
     // Receive a single file (CLI receive mode)
     bool receiveFileOnce(
         const std::string& taskId,
@@ -88,6 +100,19 @@ public:
         const std::string& savedPath,
         const std::string& error
     )>;
+
+    // Receive a single file over an arbitrary transport channel (WebRTC, TCP, etc.)
+    bool receiveFileOverChannel(
+        const std::string& taskId,
+        const std::string& saveDirectory,
+        std::shared_ptr<ITransportChannel> channel,
+        const TransferOptions& options,
+        TransferProgressCallback progressCb,
+        std::atomic<bool>* cancelFlag = nullptr,
+        std::string* outError = nullptr,
+        ServerIncomingCallback onIncoming = nullptr,
+        ServerFinishedCallback onFinished = nullptr
+    );
 
     // Start background receiver listener
     bool startServer(

@@ -131,6 +131,7 @@ public:
         std::unique_lock<std::recursive_mutex> deliveryLock(m_deliveryMutex);
         std::lock_guard<std::mutex> lock(m_mutex);
         m_remoteDescriptionSet = false;
+        m_onCandidateReady = nullptr;
         while (!m_queue.empty()) {
             m_queue.pop();
         }
