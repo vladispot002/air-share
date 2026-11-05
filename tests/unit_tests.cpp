@@ -46,6 +46,7 @@
 #include "landrop/ui/TransferPresenter.hpp"
 #include "landrop/ui/StoragePresenter.hpp"
 #include "landrop/ui/SettingsPresenter.hpp"
+#include "landrop/ui/QrCodeGenerator.hpp"
 
 using namespace landrop;
 
@@ -3129,6 +3130,84 @@ bool testMilestone2D_EndToEndWebRtcTransfer() {
     return true;
 }
 
+static bool testSuite27_OpticalPairingAndQrCode() {
+    // 1. TC-QR-01: Generates QR matrix for room code
+    auto qr = landrop::ui::QrCodeGenerator::encodeText("DROP-7K9M-X2PQ");
+    TEST_ASSERT(qr.getVersion() >= 1, "TC-QR-01: Valid QR version generated for room code");
+    TEST_ASSERT(qr.getSize() == qr.getVersion() * 4 + 17, "TC-QR-01: Size matches dimension formula 4*V + 17");
+    TEST_ASSERT(qr.getModule(0, 0), "TC-QR-01: Top-left finder corner is dark");
+
+    // 2. TC-QR-02: Finder patterns and Dark Module checks (ISO/IEC 18004:2015 Sections 6.3.3 & 6.3.6)
+    TEST_ASSERT(qr.getModule(3, 3), "TC-QR-02: Finder top-left center (3, 3) is dark");
+    TEST_ASSERT(qr.getModule(qr.getSize() - 4, 3), "TC-QR-02: Finder top-right center is dark");
+    TEST_ASSERT(qr.getModule(3, qr.getSize() - 4), "TC-QR-02: Finder bottom-left center is dark");
+
+    // Finder border modules must NEVER be overwritten by timing patterns
+    TEST_ASSERT(qr.getModule(1, 6), "TC-QR-02: Top-left finder border (1, 6) is dark");
+    TEST_ASSERT(qr.getModule(3, 6), "TC-QR-02: Top-left finder border (3, 6) is dark");
+    TEST_ASSERT(qr.getModule(5, 6), "TC-QR-02: Top-left finder border (5, 6) is dark");
+    TEST_ASSERT(qr.getModule(6, 1), "TC-QR-02: Top-left finder border (6, 1) is dark");
+    TEST_ASSERT(qr.getModule(6, 3), "TC-QR-02: Top-left finder border (6, 3) is dark");
+    TEST_ASSERT(qr.getModule(6, 5), "TC-QR-02: Top-left finder border (6, 5) is dark");
+
+    // Dark Module at (8, 4*version + 9) == (8, size - 8) is ALWAYS dark
+    TEST_ASSERT(qr.getModule(8, qr.getSize() - 8), "TC-QR-02: Dark module (8, size - 8) is dark");
+
+    TEST_ASSERT(!qr.getModule(7, 0), "TC-QR-02: Finder separator (7, 0) is white/light");
+    TEST_ASSERT(!qr.getModule(7, 6), "TC-QR-02: Finder separator (7, 6) is white/light");
+
+    // 3. TC-QR-03: Timing patterns check (strictly between 8 and size - 9)
+    for (int x = 8; x <= qr.getSize() - 9; ++x) {
+        TEST_ASSERT(qr.getModule(x, 6) == (x % 2 == 0), "TC-QR-03: Horizontal timing pattern alternates");
+    }
+    for (int y = 8; y <= qr.getSize() - 9; ++y) {
+        TEST_ASSERT(qr.getModule(6, y) == (y % 2 == 0), "TC-QR-03: Vertical timing pattern alternates");
+    }
+
+    // 4. TC-QR-04: Version 7-10 Version Information Blocks (ISO/IEC 18004:2015 Section 6.5.2)
+    std::string textV7(110, 'A'); // 110 bytes exceeds V6 (max 106 bytes) -> triggers Version 7
+    auto qrV7 = landrop::ui::QrCodeGenerator::encodeText(textV7);
+    TEST_ASSERT(qrV7.getVersion() == 7, "TC-QR-04: 110-byte payload selects Version 7 matrix");
+    TEST_ASSERT(qrV7.getSize() == 45, "TC-QR-04: Version 7 size is 45x45");
+    uint32_t v7Expected = 0x07C94;
+    for (int k = 0; k < 18; ++k) {
+        bool expectedBit = ((v7Expected >> k) & 1) != 0;
+        TEST_ASSERT(qrV7.getModule(k / 3, 45 - 11 + (k % 3)) == expectedBit, "TC-QR-04: V7 Bottom-left version info bit matches");
+        TEST_ASSERT(qrV7.getModule(45 - 11 + (k % 3), k / 3) == expectedBit, "TC-QR-04: V7 Top-right version info bit matches");
+    }
+
+    // 5. TC-QR-05: Capacity overflow throws std::length_error
+    bool threwOverflow = false;
+    try {
+        std::vector<uint8_t> hugeData(250, 0x42); // Exceeds Version 10 Medium capacity (213 bytes)
+        landrop::ui::QrCodeGenerator::encodeBinary(hugeData);
+    } catch (const std::length_error&) {
+        threwOverflow = true;
+    }
+    TEST_ASSERT(threwOverflow, "TC-QR-05: Exceeding Version 10 capacity throws std::length_error");
+
+    // 6. TC-QR-06: SVG export
+    std::string svg = qr.toSvg(4, "#000000", "#ffffff");
+    TEST_ASSERT(svg.find("<svg") != std::string::npos, "TC-QR-06: SVG contains <svg tag");
+    TEST_ASSERT(svg.find("viewBox=\"0 0 ") != std::string::npos, "TC-QR-06: SVG contains viewBox");
+    TEST_ASSERT(svg.find("<path fill=\"#000000\"") != std::string::npos, "TC-QR-06: SVG contains path element");
+    TEST_ASSERT(svg.find("</svg>") != std::string::npos, "TC-QR-06: SVG contains closing tag");
+
+    // 7. TC-QR-07: ASCII export
+    std::string ascii = qr.toAscii(false);
+    TEST_ASSERT(!ascii.empty(), "TC-QR-07: ASCII output is non-empty");
+    TEST_ASSERT(ascii.find("\n") != std::string::npos, "TC-QR-07: ASCII output is multi-line");
+
+    // 8. TC-QR-08: Optical pairing URL encoding
+    std::string pairingUrl = "https://drop.local/#DROP-7K9M-X2PQ";
+    auto qrUrl = landrop::ui::QrCodeGenerator::encodeText(pairingUrl);
+    TEST_ASSERT(qrUrl.getSize() >= 25, "TC-QR-08: Pairing URL fits in Version 2 or higher matrix");
+    TEST_ASSERT(qrUrl.getModule(3, 3), "TC-QR-08: Pairing URL QR code has valid finder patterns");
+    TEST_ASSERT(qrUrl.getModule(8, qrUrl.getSize() - 8), "TC-QR-08: Pairing URL QR code has dark module intact");
+
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -3167,7 +3246,8 @@ int main() {
         {"WebRTC Flow Control & Candidate Queueing (TC-RTC-01, TC-RTC-02)", testCandidateQueueAndBackpressure},
         {"SignalingClient Protocol & Glare Resolution (TC-RTC-03)", testSignalingClientAndGlareResolution},
         {"Global WebRTC Transfer Pipeline & Coturn Config (Milestone 2C)", testMilestone2C_GlobalWebRtcTransferPipeline},
-        {"End-to-End File Transfer & Live Signaling Verification (Milestone 2D)", testMilestone2D_EndToEndWebRtcTransfer}
+        {"End-to-End File Transfer & Live Signaling Verification (Milestone 2D)", testMilestone2D_EndToEndWebRtcTransfer},
+        {"Optical Pairing & QrCodeGenerator Suite (Milestone 3B)", testSuite27_OpticalPairingAndQrCode}
     };
 
 

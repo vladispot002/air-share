@@ -86,3 +86,13 @@
   4. **Security & Zero Telemetry**: Streaming incremental SHA-256 validation, strict CSP, path traversal prevention, zero telemetry, and DTLS 1.3 encryption.
   5. **Static Asset Integration**: Embedded via Go signaling server serving static distribution from `web/dist` at `/`.
 
+## ADR-015: Optical Pairing & Zero-Dependency QR Code Integration
+- **Status**: Accepted & Specified.
+- **Context**: Eliminating manual room code entry and network discovery friction across desktop, mobile, and web clients while maintaining the Transfer-First principle, client-side privacy, and zero external dependencies.
+- **Decision**:
+  1. **Zero-Dependency C++ & TypeScript Generators**: Implement ISO/IEC 18004:2015 (Versions 1-10, ECC Levels L/M/Q/H, Alphanumeric and Byte modes) natively in `src/ui/QrCodeGenerator.cpp` and `web/src/core/session/QrCode.ts`. Strictly prohibit external libraries (`libqrencode`, npm `qrcode`).
+  2. **URL Schema with URI Hash Fragment**: Optical QR codes encode `https://<signaling_host>/#<ROOM_CODE>` (or `https://drop.local/#DROP-XXXX-XXXX`). In accordance with RFC 3986, the fragment `#...` is parsed client-side only and never transmitted in HTTP request headers, ensuring zero telemetry and zero server eavesdropping.
+  3. **High-DPI & Contrast Guarantees**: Integer module scaling with `QPainter` eliminates interpolation blur. In dark mode, QR codes are isolated within an opaque white card container with a 4-module quiet zone to ensure camera decodability.
+  4. **Full Web P2P Integration**: Web client automatically joins rooms detected in `window.location.hash`. Host Room button spawns an optical pairing modal, streaming files over `WebRtcCoordinator` and `FileStreamSender`/`FileStreamReceiver`.
+
+

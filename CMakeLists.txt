@@ -40,6 +40,7 @@ set(LANDROP_CORE_SOURCES
     src/ui/TransferPresenter.cpp
     src/ui/StoragePresenter.cpp
     src/ui/SettingsPresenter.cpp
+    src/ui/QrCodeGenerator.cpp
 )
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent Test)
