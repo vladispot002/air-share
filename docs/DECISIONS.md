@@ -29,3 +29,14 @@
 - **ADR-006 (Asynchronous Network Reactor)**: Deferred / Premature. Focus first on non-blocking timeouts and robust socket error handling.
 - **ADR-007 (LAN-Drop Wire Protocol v1)**: Accepted in principle for basic streaming framing (`.part` streaming and length validation); advanced multi-peer state machines deferred.
 - **ADR-008 (Kernel AWDL / AirDrop Plugin)**: Deferred. In-tree implementation remains scoped to local LAN and mock bridge testing.
+
+## ADR-009: Stage 2 Global Connectivity & WebRTC Signaling Architecture
+- **Status**: Accepted with Architectural Refinements.
+- **Context**: Enabling global peer-to-peer file transfers across disparate NAT/firewall boundaries while maintaining the Transfer-First principle for local networks.
+- **Decision**:
+  1. Go 1.22+ lightweight pure WebSocket router for signaling service, managing ephemeral in-memory rooms with zero telemetry and IP rate limiting (5 attempts / 10m).
+  2. 8-character Crockford Base32 room codes (`DROP-XXXX-XXXX`, 40 bits of entropy) with out-of-band SAS verification (anti-MITM).
+  3. libdatachannel (C++20) for WebRTC DataChannel transport using native `rtc::WebSocket` for signaling.
+  4. Strict transport hierarchy: Direct LAN (TCP/TLS) -> Direct WebRTC P2P (ICE Host/Srflx) -> TURN Relay.
+  5. Core transfer logic unified over `ITransportChannel` abstraction. Native DTLS 1.3 encryption is leveraged for WebRTC P2P; application-layer double encryption is scoped for untrusted cloud byte relays.
+  6. Backpressure handling in `WebRtcDataChannel::sendExact()` utilizes condition-variable wait on `onBufferedAmountLow` rather than hard error aborts. Remote ICE candidates arriving prior to remote SDP descriptions are queued.
