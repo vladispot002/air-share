@@ -1,6 +1,7 @@
 #pragma once
 
 #include "TransferTask.hpp"
+#include <atomic>
 
 namespace landrop {
 
@@ -12,8 +13,9 @@ public:
         uint64_t fileSize,
         TransferDirection direction,
         uint16_t httpPort = 8080,
-        std::string webToken = "landrop-token-auto",
-        uint32_t maxDownloadCount = 5
+        std::string webToken = "",
+        uint32_t maxDownloadCount = 5,
+        std::string sessionPin = ""
     );
 
     ~HttpWebTransferTask() override = default;
@@ -26,12 +28,13 @@ public:
     std::string generateQrCodePayload(const std::string& hostIp) const;
 
     bool validateAccessToken(const std::string& token) const;
+    bool validateSessionPin(const std::string& pin) const;
     bool registerDownload();
 
     uint16_t getHttpPort() const { return m_httpPort; }
     const std::string& getWebToken() const { return m_webToken; }
     
-    uint32_t getCurrentDownloads() const { return m_currentDownloadCount; }
+    uint32_t getCurrentDownloads() const { return m_currentDownloadCount.load(); }
     uint32_t getMaxDownloads() const { return m_maxDownloadCount; }
     bool isExpired() const;
 
@@ -42,8 +45,8 @@ private:
     std::string m_webToken;
     uint16_t m_httpPort;
     uint32_t m_maxDownloadCount;
-    uint32_t m_currentDownloadCount{0};
-    std::string m_sessionPin{"4242"};
+    std::atomic<uint32_t> m_currentDownloadCount{0};
+    std::string m_sessionPin;
 };
 
 }

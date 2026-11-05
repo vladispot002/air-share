@@ -6,9 +6,15 @@
 #include "landrop/tasks/P2PTransferTask.hpp"
 
 #include <QHBoxLayout>
+#include <QVBoxLayout>
 #include <QFile>
 #include <QTextStream>
 #include <QApplication>
+#include <QClipboard>
+#include <QMessageBox>
+#include <QDialog>
+#include <QLabel>
+#include <QPushButton>
 #include <QStandardPaths>
 #include <QDir>
 #include <thread>
@@ -24,9 +30,39 @@ QtDesktopApp::QtDesktopApp(QWidget* parent)
 }
 
 QtDesktopApp::~QtDesktopApp() {
+    *m_aliveToken = false;
     if (m_transferEngine) {
         m_transferEngine->stopServer();
     }
+#if defined(LANDROP_HAVE_WEBRTC)
+    {
+        std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+        for (auto& [id, coord] : m_globalCoordinators) {
+            if (coord) {
+                coord->cancel();
+            }
+        }
+        m_globalCoordinators.clear();
+    }
+#endif
+    {
+        std::lock_guard<std::mutex> lock(m_workerThreadsMutex);
+        for (auto& th : m_workerThreads) {
+            if (th.joinable()) {
+                th.join();
+            }
+        }
+        m_workerThreads.clear();
+    }
+}
+
+void QtDesktopApp::launchWorker(std::function<void()> task) {
+    std::lock_guard<std::mutex> lock(m_workerThreadsMutex);
+    m_workerThreads.emplace_back([aliveToken = m_aliveToken, task = std::move(task)]() {
+        if (aliveToken && *aliveToken) {
+            task();
+        }
+    });
 }
 
 void QtDesktopApp::initialize() {
@@ -92,6 +128,9 @@ void QtDesktopApp::setupUi() {
             m_transferPresenter->onSendFileClicked(peerId.toStdString(), filePath.toStdString());
         }
     });
+
+    connect(m_discoveryWidget, &QtDiscoveryWidget::hostRoomRequested, this, &QtDesktopApp::onHostRoomRequested);
+    connect(m_discoveryWidget, &QtDiscoveryWidget::joinRoomRequested, this, &QtDesktopApp::onJoinRoomRequested);
 
     connect(m_settingsWidget, &QtSettingsWidget::themeChanged, this, &QtDesktopApp::applyTheme);
 
@@ -379,6 +418,59 @@ void QtDesktopApp::handleSendFile(const std::string& taskId, const std::string& 
     std::string remoteIp = "127.0.0.1";
     uint16_t remotePort = 8848;
 
+    if (targetPeerId.rfind("webrtc:", 0) == 0) {
+        std::shared_ptr<WebRtcSessionCoordinator> coordinator;
+        {
+            std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+            auto it = m_globalCoordinators.find(targetPeerId);
+            if (it != m_globalCoordinators.end()) {
+                coordinator = it->second;
+            }
+        }
+        if (coordinator) {
+            auto channel = coordinator->getChannel();
+            if (channel && channel->isConnected()) {
+                statusBar()->showMessage(QString("Streaming file over WebRTC to %1...").arg(QString::fromStdString(targetPeerId)));
+                launchWorker([this, taskId, filePath, targetPeerId, channel]() {
+                    TransferOptions opts;
+                    opts.closeChannelOnCompletion = false;
+                    if (m_settingsPresenter) {
+                        opts.speedLimitKbps = m_settingsPresenter->getSpeedLimitKbps();
+                    }
+
+                    std::string err;
+                    bool ok = m_transferEngine->sendFileOverChannel(
+                        taskId,
+                        filePath,
+                        channel,
+                        opts,
+                        [this](const TransferProgressUpdate& upd) {
+                            QMetaObject::invokeMethod(this, [this, upd]() {
+                                if (m_transferPresenter) {
+                                    m_transferPresenter->updateTaskProgress(upd.taskId, upd.bytesTransferred, upd.speedBytesPerSec, upd.state, upd.message);
+                                }
+                            }, Qt::QueuedConnection);
+                        },
+                        nullptr,
+                        &err
+                    );
+
+                    QMetaObject::invokeMethod(this, [this, taskId, ok, err, targetPeerId]() {
+                        if (ok) {
+                            statusBar()->showMessage(QString("✓ File successfully sent over WebRTC to %1").arg(QString::fromStdString(targetPeerId)));
+                        } else {
+                            statusBar()->showMessage(QString("✗ WebRTC send error: %1").arg(QString::fromStdString(err)));
+                            if (m_transferWidget) {
+                                m_transferWidget->showTransferError(taskId, err);
+                            }
+                        }
+                    }, Qt::QueuedConnection);
+                });
+                return;
+            }
+        }
+    }
+
     if (targetPeerId.rfind("direct:", 0) == 0) {
         size_t colon = targetPeerId.rfind(':');
         if (colon != std::string::npos && colon > 7) {
@@ -403,7 +495,7 @@ void QtDesktopApp::handleSendFile(const std::string& taskId, const std::string& 
 
     statusBar()->showMessage(QString("Connecting to %1:%2 to send file...").arg(QString::fromStdString(remoteIp)).arg(remotePort));
 
-    std::thread([this, taskId, filePath, remoteIp, remotePort]() {
+    launchWorker([this, taskId, filePath, remoteIp, remotePort]() {
         TransferOptions opts;
         if (m_settingsPresenter) {
             opts.speedLimitKbps = m_settingsPresenter->getSpeedLimitKbps();
@@ -437,7 +529,228 @@ void QtDesktopApp::handleSendFile(const std::string& taskId, const std::string& 
                 }
             }
         }, Qt::QueuedConnection);
-    }).detach();
+    });
+}
+
+[[maybe_unused]] static std::string deriveWsHttpUrl(const std::string& wsUrl) {
+    std::string httpUrl = wsUrl;
+    if (httpUrl.rfind("wss://", 0) == 0) {
+        httpUrl = "https://" + httpUrl.substr(6);
+    } else if (httpUrl.rfind("ws://", 0) == 0) {
+        httpUrl = "http://" + httpUrl.substr(5);
+    }
+    size_t pathPos = httpUrl.find('/', 8);
+    if (pathPos != std::string::npos) {
+        httpUrl = httpUrl.substr(0, pathPos);
+    }
+    return httpUrl;
+}
+
+void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
+#if !defined(LANDROP_HAVE_WEBRTC)
+    (void)filePath;
+    QMessageBox::information(this, "Global P2P Not Available",
+        "WebRTC support is not compiled into this build. Rebuild with -DLANDROP_ENABLE_WEBRTC=ON.");
+#else
+    const char* envSignaling = std::getenv("LANDROP_SIGNALING_URL");
+    std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "ws://127.0.0.1:8080/ws/signaling";
+
+    CoordinatorOptions opts;
+    opts.signalingHttpUrl = deriveWsHttpUrl(signalingWsUrl);
+    opts.autoFetchTurn = true;
+    opts.dataChannelLabel = "lan-drop-data";
+
+    auto coordinator = std::make_shared<WebRtcSessionCoordinator>("gui-host", WebRtcConfig{}, opts);
+
+    coordinator->onRoomReady = [this, coordinator, filePath](const std::string& code) {
+        QMetaObject::invokeMethod(this, [this, coordinator, code, filePath]() {
+            auto* dlg = new QDialog(this);
+            dlg->setWindowTitle("Global P2P Room Created");
+            auto* l = new QVBoxLayout(dlg);
+            auto* info = new QLabel("<b>Room Code Created:</b>", dlg);
+            auto* codeLbl = new QLabel(QString::fromStdString(code), dlg);
+            QFont f = codeLbl->font();
+            f.setPointSize(20);
+            f.setBold(true);
+            codeLbl->setFont(f);
+            codeLbl->setAlignment(Qt::AlignCenter);
+            codeLbl->setStyleSheet("color: #007aff; padding: 12px; background: #e5f1ff; border-radius: 8px;");
+
+            QString promptText = filePath.isEmpty()
+                ? "Waiting for peer to connect..."
+                : QString("Ready to send: %1\nWaiting for receiver to join...").arg(QFileInfo(filePath).fileName());
+            auto* status = new QLabel(promptText, dlg);
+            status->setAlignment(Qt::AlignCenter);
+
+            auto* copyBtn = new QPushButton("Copy Room Code", dlg);
+            connect(copyBtn, &QPushButton::clicked, [code, status]() {
+                QApplication::clipboard()->setText(QString::fromStdString(code));
+                status->setText("✓ Room code copied to clipboard!");
+            });
+
+            auto* closeBtn = new QPushButton("Close", dlg);
+            connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
+
+            l->addWidget(info);
+            l->addWidget(codeLbl);
+            l->addWidget(status);
+            l->addWidget(copyBtn);
+            l->addWidget(closeBtn);
+            dlg->setAttribute(Qt::WA_DeleteOnClose);
+            dlg->show();
+        }, Qt::QueuedConnection);
+    };
+
+    coordinator->onChannelOpened = [this, coordinator, filePath](std::shared_ptr<WebRtcDataChannel> channel) {
+        std::string roomCode = coordinator->getRoomCode();
+        std::string peerId = "webrtc:" + roomCode;
+        {
+            std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+            m_globalCoordinators[peerId] = coordinator;
+        }
+        QMetaObject::invokeMethod(this, [this, peerId, roomCode]() {
+            if (m_discoveryPresenter) {
+                m_discoveryPresenter->onGlobalPeerConnected(
+                    peerId,
+                    "WebRTC Peer (" + roomCode + ")",
+                    "WebRTC P2P"
+                );
+            }
+            statusBar()->showMessage(QString("✓ WebRTC Global P2P Peer Connected (%1)").arg(QString::fromStdString(roomCode)), 5000);
+        }, Qt::QueuedConnection);
+
+        if (!filePath.isEmpty()) {
+            std::string pathStd = filePath.toStdString();
+            std::string taskId = "rtc-tx-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+            launchWorker([this, channel, taskId, pathStd, peerId]() {
+                TransferOptions opts;
+                opts.closeChannelOnCompletion = false;
+                if (m_settingsPresenter) {
+                    opts.speedLimitKbps = m_settingsPresenter->getSpeedLimitKbps();
+                }
+                std::string err;
+                bool ok = m_transferEngine->sendFileOverChannel(
+                    taskId,
+                    pathStd,
+                    channel,
+                    opts,
+                    [this](const TransferProgressUpdate& upd) {
+                        QMetaObject::invokeMethod(this, [this, upd]() {
+                            if (m_transferPresenter) {
+                                m_transferPresenter->updateTaskProgress(upd.taskId, upd.bytesTransferred, upd.speedBytesPerSec, upd.state, upd.message);
+                            }
+                        }, Qt::QueuedConnection);
+                    },
+                    nullptr,
+                    &err
+                );
+                QMetaObject::invokeMethod(this, [this, ok, err, peerId]() {
+                    if (ok) {
+                        statusBar()->showMessage(QString("✓ File successfully sent over WebRTC to %1").arg(QString::fromStdString(peerId)), 5000);
+                    } else {
+                        statusBar()->showMessage(QString("✗ WebRTC send error: %1").arg(QString::fromStdString(err)), 6000);
+                    }
+                }, Qt::QueuedConnection);
+            });
+        }
+    };
+
+    statusBar()->showMessage("Creating Global P2P Room on signaling server...");
+    launchWorker([this, coordinator, signalingWsUrl]() {
+        bool ok = coordinator->startAsInitiator(signalingWsUrl);
+        if (!ok) {
+            QMetaObject::invokeMethod(this, [this]() {
+                statusBar()->showMessage("✗ Failed to connect to WebRTC signaling server", 6000);
+            }, Qt::QueuedConnection);
+        }
+    });
+#endif
+}
+
+void QtDesktopApp::onJoinRoomRequested(const QString& roomCode) {
+#if !defined(LANDROP_HAVE_WEBRTC)
+    (void)roomCode;
+    QMessageBox::information(this, "Global P2P Not Available",
+        "WebRTC support is not compiled into this build. Rebuild with -DLANDROP_ENABLE_WEBRTC=ON.");
+#else
+    const char* envSignaling = std::getenv("LANDROP_SIGNALING_URL");
+    std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "ws://127.0.0.1:8080/ws/signaling";
+
+    CoordinatorOptions opts;
+    opts.signalingHttpUrl = deriveWsHttpUrl(signalingWsUrl);
+    opts.autoFetchTurn = true;
+    opts.dataChannelLabel = "lan-drop-data";
+
+    auto coordinator = std::make_shared<WebRtcSessionCoordinator>("gui-joiner", WebRtcConfig{}, opts);
+
+    coordinator->onChannelOpened = [this, coordinator](std::shared_ptr<WebRtcDataChannel> channel) {
+        std::string roomCode = coordinator->getRoomCode();
+        std::string peerId = "webrtc:" + roomCode;
+        {
+            std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+            m_globalCoordinators[peerId] = coordinator;
+        }
+        QMetaObject::invokeMethod(this, [this, peerId, roomCode]() {
+            if (m_discoveryPresenter) {
+                m_discoveryPresenter->onGlobalPeerConnected(
+                    peerId,
+                    "WebRTC Peer (" + roomCode + ")",
+                    "WebRTC P2P"
+                );
+            }
+            statusBar()->showMessage(QString("✓ WebRTC Global P2P Peer Connected (%1)").arg(QString::fromStdString(roomCode)), 5000);
+        }, Qt::QueuedConnection);
+
+        launchWorker([this, coordinator, channel]() {
+            while (coordinator->getState() == CoordinatorState::Connected && channel && channel->isConnected()) {
+                TransferOptions rxOpts;
+                rxOpts.autoRenameDuplicates = true;
+                rxOpts.closeChannelOnCompletion = false;
+                rxOpts.headerTimeoutMs = 0; // Wait indefinitely for incoming file transfer
+                std::string rxErr;
+                std::string taskId = "rtc-rx-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+                std::string destDir = getDownloadsDirectory();
+                bool ok = m_transferEngine->receiveFileOverChannel(
+                    taskId,
+                    destDir,
+                    channel,
+                    rxOpts,
+                    [this](const TransferProgressUpdate& upd) {
+                        QMetaObject::invokeMethod(this, [this, upd]() {
+                            if (m_transferPresenter) {
+                                m_transferPresenter->updateTaskProgress(upd.taskId, upd.bytesTransferred, upd.speedBytesPerSec, upd.state, upd.message);
+                            }
+                        }, Qt::QueuedConnection);
+                    },
+                    nullptr, // cancelFlag
+                    &rxErr,  // outError
+                    nullptr, // onIncoming
+                    [this](const std::string&, const std::string& fileName, bool success, const std::string& savedPath, const std::string& err) {
+                        (void)savedPath;
+                        QMetaObject::invokeMethod(this, [this, fileName, success, err]() {
+                            if (success) {
+                                statusBar()->showMessage(QString("✓ Received file: %1").arg(QString::fromStdString(fileName)), 5000);
+                            } else if (!err.empty()) {
+                                statusBar()->showMessage(QString("✗ Receive error: %1").arg(QString::fromStdString(err)), 6000);
+                            }
+                        }, Qt::QueuedConnection);
+                    }
+                );
+                if (!ok) break;
+            }
+        });
+    };
+
+    statusBar()->showMessage(QString("Connecting to WebRTC room %1...").arg(roomCode));
+    launchWorker([this, coordinator, signalingWsUrl, roomCode]() {
+        bool ok = coordinator->startAsJoiner(signalingWsUrl, roomCode.toStdString());
+        if (!ok) {
+            QMetaObject::invokeMethod(this, [this, roomCode]() {
+                statusBar()->showMessage(QString("✗ Failed to join WebRTC room %1").arg(roomCode), 6000);
+            }, Qt::QueuedConnection);
+        }
+    });
+#endif
 }
 
 }

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include <string_view>
+#include <cctype>
 #include <cstdint>
 #include <vector>
 #include <chrono>
@@ -80,18 +82,68 @@ inline bool isSafeFileName(const std::string& fileName) {
     if (fileName.empty() || fileName.size() > 255) {
         return false;
     }
-    if (fileName.front() == '.') {
+    // Leading/trailing dots and spaces are dangerous across Win32 / POSIX
+    if (fileName.front() == '.' || fileName.back() == '.' ||
+        fileName.front() == ' ' || fileName.back() == ' ') {
         return false;
     }
-    for (char c : fileName) {
-        unsigned char uc = static_cast<unsigned char>(c);
-        if (uc < 32 || uc == 127 || c == '/' || c == '\\') {
-            return false;
-        }
-    }
+    // Path traversal sequence
     if (fileName.find("..") != std::string::npos) {
         return false;
     }
+
+    // Invalid and dangerous characters
+    // Slashes: forward slash and backslash
+    // Windows ADS stream delimiter: :
+    // Win32 forbidden characters: < > " | ? *
+    // Control characters: 0x00-0x1F, 0x7F
+    for (char c : fileName) {
+        unsigned char uc = static_cast<unsigned char>(c);
+        if (uc < 32 || uc == 127 ||
+            c == '/' || c == '\\' || c == ':' ||
+            c == '<' || c == '>' || c == '"' ||
+            c == '|' || c == '?' || c == '*') {
+            return false;
+        }
+    }
+
+    // Unicode bidirectional override / embedding spoofing characters:
+    // U+202A to U+202E: UTF-8 "\xE2\x80\xAA" through "\xE2\x80\xAE" (LRE, RLE, PDF, LRO, RTLO)
+    // U+2066 to U+2069: UTF-8 "\xE2\x81\xA6" through "\xE2\x81\xA9" (LRI, RLI, FSI, PDI)
+    // Zero-width characters: U+200B (\xE2\x80\x8B), U+200E (\xE2\x80\x8E), U+200F (\xE2\x80\x8F)
+    const std::string_view fsv(fileName);
+    const std::string_view bidiOverrides[] = {
+        "\xE2\x80\xAA", "\xE2\x80\xAB", "\xE2\x80\xAC", "\xE2\x80\xAD", "\xE2\x80\xAE",
+        "\xE2\x81\xA6", "\xE2\x81\xA7", "\xE2\x81\xA8", "\xE2\x81\xA9",
+        "\xE2\x80\x8B", "\xE2\x80\x8E", "\xE2\x80\x8F"
+    };
+    for (const auto& seq : bidiOverrides) {
+        if (fsv.find(seq) != std::string_view::npos) {
+            return false;
+        }
+    }
+
+    // Windows reserved device names:
+    // CON, PRN, AUX, NUL, COM1-9, LPT1-9 (case-insensitive, with or without extensions)
+    size_t firstDot = fileName.find('.');
+    std::string stem = (firstDot == std::string::npos) ? fileName : fileName.substr(0, firstDot);
+    std::string upperStem;
+    upperStem.reserve(stem.size());
+    for (char ch : stem) {
+        upperStem.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+    }
+
+    if (upperStem == "CON" || upperStem == "PRN" || upperStem == "AUX" || upperStem == "NUL") {
+        return false;
+    }
+    if (upperStem.size() == 4 &&
+        (upperStem.rfind("COM", 0) == 0 || upperStem.rfind("LPT", 0) == 0)) {
+        char digit = upperStem[3];
+        if (digit >= '1' && digit <= '9') {
+            return false;
+        }
+    }
+
     return true;
 }
 

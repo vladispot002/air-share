@@ -1,5 +1,6 @@
 #include "landrop/core/TransferEngine.hpp"
 #include "landrop/core/TlsContext.hpp"
+#include "landrop/core/TcpSocketChannel.hpp"
 #include <iostream>
 #include <fstream>
 #include <cstring>
@@ -43,8 +44,62 @@ bool TransferEngine::sendFile(
     std::atomic<bool>* cancelFlag,
     std::string* outError
 ) {
-    auto internalCancel = std::make_shared<std::atomic<bool>>(false);
-    registerCancelToken(taskId, internalCancel);
+    auto reportError = [&](const std::string& err) {
+        if (outError) *outError = err;
+        if (progressCb) {
+            TransferProgressUpdate upd;
+            upd.taskId = taskId;
+            upd.state = TransferState::Failed;
+            upd.message = err;
+            progressCb(upd);
+        }
+        return false;
+    };
+
+    if (progressCb) {
+        TransferProgressUpdate upd;
+        upd.taskId = taskId;
+        upd.state = TransferState::Connecting;
+        upd.message = "Connecting to " + remoteIp + ":" + std::to_string(remotePort) + "...";
+        progressCb(upd);
+    }
+
+    auto session = std::make_unique<NetworkSession>("tx-" + taskId, remoteIp, remotePort);
+    if (options.useTls) {
+        TlsConfig tlsConfig;
+        tlsConfig.role = TlsRole::Client;
+        tlsConfig.verifyMode = TlsVerificationMode::VerifyPinnedFingerprint;
+        tlsConfig.expectedFingerprint = options.expectedFingerprint;
+        session->enableTls(tlsConfig);
+    }
+
+    if (!session->connectTo(remoteIp, remotePort)) {
+        if (options.useTls && session->getTlsStatus() != TlsStatus::Connected && session->getTlsStatus() != TlsStatus::None) {
+            return reportError(std::string("TLS connection failed: ") + TlsHelper::statusToString(session->getTlsStatus()));
+        }
+        return reportError("Connection to " + remoteIp + ":" + std::to_string(remotePort) + " failed");
+    }
+
+    auto channel = std::make_shared<TcpSocketChannel>(std::move(session));
+    return sendFileOverChannel(taskId, filePath, channel, options, progressCb, cancelFlag, outError);
+}
+
+bool TransferEngine::sendFileOverChannel(
+    const std::string& taskId,
+    const std::string& filePath,
+    std::shared_ptr<ITransportChannel> channel,
+    const TransferOptions& options,
+    TransferProgressCallback progressCb,
+    std::atomic<bool>* cancelFlag,
+    std::string* outError
+) {
+    std::shared_ptr<std::atomic<bool>> effectiveCancel;
+    if (cancelFlag) {
+        effectiveCancel = std::shared_ptr<std::atomic<bool>>(cancelFlag, [](std::atomic<bool>*){});
+    } else {
+        effectiveCancel = std::make_shared<std::atomic<bool>>(false);
+    }
+    registerCancelToken(taskId, effectiveCancel);
     struct CancelScopeCleaner {
         TransferEngine* engine;
         std::string tid;
@@ -52,7 +107,7 @@ bool TransferEngine::sendFile(
     } cleaner{this, taskId};
 
     auto isCancelled = [&]() -> bool {
-        return (cancelFlag && cancelFlag->load()) || internalCancel->load();
+        return effectiveCancel->load();
     };
 
     auto reportError = [&](const std::string& err) {
@@ -66,6 +121,10 @@ bool TransferEngine::sendFile(
         }
         return false;
     };
+
+    if (!channel || !channel->isConnected()) {
+        return reportError("Transport channel is null or not connected");
+    }
 
     std::filesystem::path p(filePath);
     std::error_code ec;
@@ -117,35 +176,7 @@ bool TransferEngine::sendFile(
     }
     std::string fileHash = fullHashOpt.value();
 
-    if (progressCb) {
-        TransferProgressUpdate upd;
-        upd.taskId = taskId;
-        upd.fileName = fileName;
-        upd.totalBytes = fileSize;
-        upd.state = TransferState::Connecting;
-        upd.message = "Connecting to " + remoteIp + ":" + std::to_string(remotePort) + "...";
-        progressCb(upd);
-    }
-
-    NetworkSession session("tx-" + taskId, remoteIp, remotePort);
-    if (options.useTls) {
-        TlsConfig tlsConfig;
-        tlsConfig.role = TlsRole::Client;
-        tlsConfig.verifyMode = TlsVerificationMode::VerifyPinnedFingerprint;
-        tlsConfig.expectedFingerprint = options.expectedFingerprint;
-        session.enableTls(tlsConfig);
-    }
-
-    if (!session.connectTo(remoteIp, remotePort)) {
-        if (options.useTls && session.getTlsStatus() != TlsStatus::Connected && session.getTlsStatus() != TlsStatus::None) {
-            return reportError(std::string("TLS connection failed: ") + TlsHelper::statusToString(session.getTlsStatus()));
-        }
-        return reportError("Connection to " + remoteIp + ":" + std::to_string(remotePort) + " failed");
-    }
-
-    // Check cancellation after connection
     if (isCancelled()) {
-        session.closeSession();
         if (progressCb) {
             TransferProgressUpdate upd;
             upd.taskId = taskId;
@@ -168,7 +199,7 @@ bool TransferEngine::sendFile(
     hashPadded.resize(64, '0');
     std::memcpy(ptr, hashPadded.data(), 64);
 
-    if (!session.sendAll(header.data(), header.size())) {
+    if (!channel->sendExact(header.data(), header.size())) {
         return reportError("Failed to send metadata header to receiver");
     }
 
@@ -199,7 +230,7 @@ bool TransferEngine::sendFile(
 
     while (sentBytes < fileSize && in) {
         if (isCancelled()) {
-            session.closeSession();
+            channel->close();
             if (progressCb) {
                 TransferProgressUpdate upd;
                 upd.taskId = taskId;
@@ -216,10 +247,10 @@ bool TransferEngine::sendFile(
         if (count == 0) break;
 
         uint32_t countU32 = static_cast<uint32_t>(count);
-        if (!session.sendAll(reinterpret_cast<const uint8_t*>(&countU32), sizeof(uint32_t))) {
+        if (!channel->sendExact(reinterpret_cast<const uint8_t*>(&countU32), sizeof(uint32_t))) {
             return reportError("Connection interrupted while sending chunk header");
         }
-        if (!session.sendAll(chunkBuf.data(), count)) {
+        if (!channel->sendExact(chunkBuf.data(), count)) {
             return reportError("Connection interrupted while sending chunk payload");
         }
 
@@ -275,7 +306,7 @@ bool TransferEngine::sendFile(
 
     // Wait for receiver ACK
     uint8_t ack = 0;
-    if (!session.receiveExact(&ack, 1)) {
+    if (!channel->receiveExact(&ack, 1, 30000, effectiveCancel.get())) {
         return reportError("Connection dropped while waiting for receiver verification ACK");
     }
 
@@ -397,14 +428,43 @@ bool TransferEngine::handleIncomingConnection(
     ServerFinishedCallback onFinished,
     std::atomic<bool>* cancelFlag
 ) {
+    if (!session) return false;
     std::string taskId = session->getSessionId();
     if (taskId.empty() || taskId == "rx-client" || taskId == "rx-session") {
         taskId = "RX-" + std::to_string(m_nextSessionId.fetch_add(1));
     }
-    std::string senderIp = session->getRemoteIp();
+    auto channel = std::make_shared<TcpSocketChannel>(std::move(session));
+    return receiveFileOverChannel(
+        taskId,
+        saveDir,
+        channel,
+        options,
+        onProgress,
+        cancelFlag,
+        nullptr,
+        onIncoming,
+        onFinished
+    );
+}
 
-    auto internalCancel = std::make_shared<std::atomic<bool>>(false);
-    registerCancelToken(taskId, internalCancel);
+bool TransferEngine::receiveFileOverChannel(
+    const std::string& taskId,
+    const std::string& saveDirectory,
+    std::shared_ptr<ITransportChannel> channel,
+    const TransferOptions& options,
+    TransferProgressCallback progressCb,
+    std::atomic<bool>* cancelFlag,
+    std::string* outError,
+    ServerIncomingCallback onIncoming,
+    ServerFinishedCallback onFinished
+) {
+    std::shared_ptr<std::atomic<bool>> effectiveCancel;
+    if (cancelFlag) {
+        effectiveCancel = std::shared_ptr<std::atomic<bool>>(cancelFlag, [](std::atomic<bool>*){});
+    } else {
+        effectiveCancel = std::make_shared<std::atomic<bool>>(false);
+    }
+    registerCancelToken(taskId, effectiveCancel);
     struct CancelScopeCleaner {
         TransferEngine* engine;
         std::string tid;
@@ -412,20 +472,25 @@ bool TransferEngine::handleIncomingConnection(
     } cleaner{this, taskId};
 
     auto isCancelled = [&]() -> bool {
-        return (cancelFlag && cancelFlag->load()) || internalCancel->load() || (!m_serverRunning.load() && m_serverPort > 0);
+        return effectiveCancel->load() || (!m_serverRunning.load() && m_serverPort > 0);
     };
 
     auto finishWithFailure = [&](const std::string& fileName, const std::string& err) {
-        uint8_t nack = 0;
-        session->sendAll(&nack, 1);
-        session->closeSession();
-        if (onProgress) {
+        if (channel && channel->isConnected()) {
+            uint8_t nack = 0;
+            channel->sendExact(&nack, 1);
+            if (options.closeChannelOnCompletion) {
+                channel->close();
+            }
+        }
+        if (outError) *outError = err;
+        if (progressCb) {
             TransferProgressUpdate upd;
             upd.taskId = taskId;
             upd.fileName = fileName;
             upd.state = TransferState::Failed;
             upd.message = err;
-            onProgress(upd);
+            progressCb(upd);
         }
         if (onFinished) {
             onFinished(taskId, fileName, false, "", err);
@@ -433,9 +498,16 @@ bool TransferEngine::handleIncomingConnection(
         return false;
     };
 
+    if (!channel || !channel->isConnected()) {
+        return finishWithFailure("", "Transport channel is null or not connected");
+    }
+
+    std::string senderAddr = channel->getRemoteAddress();
+
     // 1. Read metadata header
     uint32_t nameLen = 0;
-    if (!session->receiveExact(reinterpret_cast<uint8_t*>(&nameLen), sizeof(uint32_t))) {
+    int headerTimeout = (options.headerTimeoutMs > 0) ? static_cast<int>(options.headerTimeoutMs) : -1;
+    if (!channel->receiveExact(reinterpret_cast<uint8_t*>(&nameLen), sizeof(uint32_t), headerTimeout, effectiveCancel.get())) {
         return finishWithFailure("", "Failed to receive filename length");
     }
 
@@ -443,8 +515,9 @@ bool TransferEngine::handleIncomingConnection(
         return finishWithFailure("", "Invalid filename length: " + std::to_string(nameLen));
     }
 
-    std::string fileName(nameLen, '\0');
-    if (!session->receiveExact(reinterpret_cast<uint8_t*>(fileName.data()), nameLen)) {
+    std::string fileName;
+    fileName.resize(nameLen);
+    if (!channel->receiveExact(reinterpret_cast<uint8_t*>(fileName.data()), nameLen, 10000, effectiveCancel.get())) {
         return finishWithFailure("", "Failed to receive filename");
     }
 
@@ -458,7 +531,7 @@ bool TransferEngine::handleIncomingConnection(
     }
 
     uint64_t fileSize = 0;
-    if (!session->receiveExact(reinterpret_cast<uint8_t*>(&fileSize), sizeof(uint64_t))) {
+    if (!channel->receiveExact(reinterpret_cast<uint8_t*>(&fileSize), sizeof(uint64_t), 10000, effectiveCancel.get())) {
         return finishWithFailure(fileName, "Failed to receive file size");
     }
 
@@ -466,12 +539,13 @@ bool TransferEngine::handleIncomingConnection(
         return finishWithFailure(fileName, "Invalid or excessive file size: " + std::to_string(fileSize));
     }
 
-    std::string expectedHash(64, '\0');
-    if (!session->receiveExact(reinterpret_cast<uint8_t*>(expectedHash.data()), 64)) {
+    std::string expectedHash;
+    expectedHash.resize(64);
+    if (!channel->receiveExact(reinterpret_cast<uint8_t*>(expectedHash.data()), 64, 10000, effectiveCancel.get())) {
         return finishWithFailure(fileName, "Failed to receive expected SHA-256 hash");
     }
 
-    std::filesystem::path canonicalBase = std::filesystem::weakly_canonical(std::filesystem::path(saveDir));
+    std::filesystem::path canonicalBase = std::filesystem::weakly_canonical(std::filesystem::path(saveDirectory));
     std::filesystem::path destPath = canonicalBase / cleanName;
     std::filesystem::path canonicalDest = std::filesystem::weakly_canonical(destPath);
 
@@ -514,7 +588,7 @@ bool TransferEngine::handleIncomingConnection(
 
     // If incoming callback provided, check if application accepts
     if (onIncoming) {
-        bool accepted = onIncoming(taskId, fileName, fileSize, senderIp);
+        bool accepted = onIncoming(taskId, fileName, fileSize, senderAddr);
         if (!accepted) {
             return finishWithFailure(fileName, "Transfer rejected by local user");
         }
@@ -534,7 +608,7 @@ bool TransferEngine::handleIncomingConnection(
     constexpr uint32_t kMaxChunkSize = 4 * 1024 * 1024;
     std::vector<uint8_t> chunkBuf;
 
-    if (onProgress) {
+    if (progressCb) {
         TransferProgressUpdate upd;
         upd.taskId = taskId;
         upd.fileName = fileName;
@@ -542,7 +616,7 @@ bool TransferEngine::handleIncomingConnection(
         upd.bytesTransferred = 0;
         upd.state = TransferState::Transferring;
         upd.message = "Receiving chunks...";
-        onProgress(upd);
+        progressCb(upd);
     }
 
     while (totalReceived < fileSize) {
@@ -553,7 +627,7 @@ bool TransferEngine::handleIncomingConnection(
         }
 
         uint32_t chunkSize = 0;
-        if (!session->receiveExact(reinterpret_cast<uint8_t*>(&chunkSize), sizeof(uint32_t))) {
+        if (!channel->receiveExact(reinterpret_cast<uint8_t*>(&chunkSize), sizeof(uint32_t), 15000, effectiveCancel.get())) {
             outFile.close();
             std::filesystem::remove(partPath, ec);
             return finishWithFailure(fileName, "Sender interrupted connection while reading chunk size");
@@ -573,7 +647,7 @@ bool TransferEngine::handleIncomingConnection(
             return finishWithFailure(fileName, "Memory allocation failed for chunk");
         }
 
-        if (!session->receiveExact(chunkBuf.data(), chunkSize)) {
+        if (!channel->receiveExact(chunkBuf.data(), chunkSize, 30000, effectiveCancel.get())) {
             outFile.close();
             std::filesystem::remove(partPath, ec);
             return finishWithFailure(fileName, "Sender disconnected abruptly while sending chunk payload");
@@ -586,7 +660,7 @@ bool TransferEngine::handleIncomingConnection(
         double elapsed = std::chrono::duration<double>(now - startTime).count();
         double speedBps = elapsed > 0.05 ? (static_cast<double>(totalReceived) / elapsed) : 0.0;
 
-        if (onProgress && std::chrono::duration<double>(now - lastProgressReport).count() >= 0.1) {
+        if (progressCb && std::chrono::duration<double>(now - lastProgressReport).count() >= 0.1) {
             lastProgressReport = now;
             TransferProgressUpdate upd;
             upd.taskId = taskId;
@@ -597,7 +671,7 @@ bool TransferEngine::handleIncomingConnection(
             upd.speedBytesPerSec = speedBps;
             upd.state = TransferState::Transferring;
             upd.message = "Receiving chunks...";
-            onProgress(upd);
+            progressCb(upd);
         }
     }
 
@@ -620,10 +694,12 @@ bool TransferEngine::handleIncomingConnection(
 
     // Send positive ACK
     uint8_t ack = 1;
-    session->sendAll(&ack, 1);
-    session->closeSession();
+    channel->sendExact(&ack, 1);
+    if (options.closeChannelOnCompletion) {
+        channel->close();
+    }
 
-    if (onProgress) {
+    if (progressCb) {
         TransferProgressUpdate upd;
         upd.taskId = taskId;
         upd.fileName = fileName;
@@ -632,7 +708,7 @@ bool TransferEngine::handleIncomingConnection(
         upd.progressPercentage = 100.0;
         upd.state = TransferState::Completed;
         upd.message = "File received and verified successfully";
-        onProgress(upd);
+        progressCb(upd);
     }
 
     if (onFinished) {

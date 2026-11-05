@@ -34,9 +34,9 @@ struct HttpRequest {
 class HttpClient {
 public:
     HttpClient() = default;
-    ~HttpClient() = default;
+    virtual ~HttpClient() = default;
 
-    HttpResponse send(const HttpRequest& request);
+    virtual HttpResponse send(const HttpRequest& request);
     HttpResponse get(const std::string& url, int timeoutSeconds = 5);
     HttpResponse get(const std::string& url, int timeoutSeconds, const std::string& caCertPem);
 

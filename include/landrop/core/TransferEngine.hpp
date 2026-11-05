@@ -14,6 +14,7 @@
 #include "landrop/utils/Types.hpp"
 #include "landrop/core/NetworkSession.hpp"
 #include "landrop/core/FileChunkHasher.hpp"
+#include "landrop/core/ITransportChannel.hpp"
 
 namespace landrop {
 
@@ -37,6 +38,10 @@ struct TransferOptions {
     uint64_t maxFileSizeLimit{10ULL * 1024 * 1024 * 1024}; // 10 GB limit
     uint32_t speedLimitKbps{0}; // 0 = unlimited
     bool autoRenameDuplicates{false}; // When true, rename file (1).ext on duplicate instead of failing
+    bool allowLegacyV1Fallback{true}; // Allows transparent interop with legacy LAN-Drop v1.x clients
+    bool requireProtocolV2{false};     // When true, strictly aborts if incoming connection does not negotiate Protocol v2
+    bool closeChannelOnCompletion{true}; // When false, channel remains open after transfer completion/failure
+    uint32_t headerTimeoutMs{10000};     // Timeout for initial header (0 = indefinite wait until cancel/disconnect)
 };
 
 class TransferEngine {
@@ -54,6 +59,17 @@ public:
         const std::string& filePath,
         const std::string& remoteIp,
         uint16_t remotePort,
+        const TransferOptions& options,
+        TransferProgressCallback progressCb,
+        std::atomic<bool>* cancelFlag = nullptr,
+        std::string* outError = nullptr
+    );
+
+    // Send a single file over an arbitrary transport channel (WebRTC, TCP, etc.)
+    bool sendFileOverChannel(
+        const std::string& taskId,
+        const std::string& filePath,
+        std::shared_ptr<ITransportChannel> channel,
         const TransferOptions& options,
         TransferProgressCallback progressCb,
         std::atomic<bool>* cancelFlag = nullptr,
@@ -86,6 +102,19 @@ public:
         const std::string& savedPath,
         const std::string& error
     )>;
+
+    // Receive a single file over an arbitrary transport channel (WebRTC, TCP, etc.)
+    bool receiveFileOverChannel(
+        const std::string& taskId,
+        const std::string& saveDirectory,
+        std::shared_ptr<ITransportChannel> channel,
+        const TransferOptions& options,
+        TransferProgressCallback progressCb,
+        std::atomic<bool>* cancelFlag = nullptr,
+        std::string* outError = nullptr,
+        ServerIncomingCallback onIncoming = nullptr,
+        ServerFinishedCallback onFinished = nullptr
+    );
 
     // Start background receiver listener
     bool startServer(

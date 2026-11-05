@@ -11,6 +11,7 @@
 #include <functional>
 #include "landrop/utils/SocketCompat.hpp"
 #include <cstring>
+#include <csignal>
 
 
 #include "landrop/utils/Types.hpp"
@@ -22,6 +23,13 @@
 #include "landrop/core/TlsContext.hpp"
 #include "landrop/core/HttpClient.hpp"
 #include "landrop/core/TransferEngine.hpp"
+#include "landrop/core/WireProtocolV2.hpp"
+#include "landrop/core/TcpSocketChannel.hpp"
+#include "landrop/core/WebRtcDataChannel.hpp"
+#include "landrop/core/CandidateQueue.hpp"
+#include "landrop/core/SignalingClient.hpp"
+#include "landrop/core/TurnConfigClient.hpp"
+#include "landrop/core/WebRtcSessionCoordinator.hpp"
 
 
 #include "landrop/peers/NetworkPeer.hpp"
@@ -215,6 +223,27 @@ static bool testHttpWebTransferTask() {
     TEST_ASSERT(task.getWebToken() == "qr-auth-token-xyz", "QR token matches");
     TEST_ASSERT(task.getTaskType() == "HttpWebTransferTask", "Task type is HttpWeb");
     TEST_ASSERT(task.initialize(), "Initialized");
+
+    // Constant-time token validation checks
+    TEST_ASSERT(task.validateAccessToken("qr-auth-token-xyz"), "Accepts exact matching token");
+    TEST_ASSERT(!task.validateAccessToken("qr-auth-token-xyw"), "Rejects single-byte mismatch token");
+    TEST_ASSERT(!task.validateAccessToken("qr-auth-token"), "Rejects truncated token");
+    TEST_ASSERT(!task.validateAccessToken(""), "Rejects empty token");
+
+    // Default task security (random token and 6-digit random PIN, NOT static 4242)
+    HttpWebTransferTask defaultTask("T-0100", "doc.pdf", 1024, TransferDirection::Upload);
+    TEST_ASSERT(!defaultTask.getWebToken().empty(), "Default task generates non-empty token");
+    TEST_ASSERT(defaultTask.getSessionPin() != "4242", "Default task does NOT use hardcoded 4242 PIN");
+    TEST_ASSERT(defaultTask.getSessionPin().size() == 6, "Default task generates 6-digit PIN");
+    for (char c : defaultTask.getSessionPin()) {
+        TEST_ASSERT(c >= '0' && c <= '9', "PIN contains only digits");
+    }
+
+    // Constant-time PIN validation
+    TEST_ASSERT(defaultTask.validateSessionPin(defaultTask.getSessionPin()), "Accepts matching random session PIN");
+    TEST_ASSERT(!defaultTask.validateSessionPin("999999"), "Rejects invalid session PIN");
+    TEST_ASSERT(!defaultTask.validateSessionPin(""), "Rejects empty session PIN");
+
     return true;
 }
 
@@ -610,6 +639,51 @@ static bool testReceiverSecurityValidation() {
     TEST_ASSERT(isSafeFileName("valid_report.pdf"), "Accepts valid filename");
     TEST_ASSERT(isSafeFileName("my-image.tar.gz"), "Accepts multi-dot extension");
     TEST_ASSERT(isSafeFileName("document (final).docx"), "Accepts filename with spaces and parentheses");
+
+    // Windows ADS (Alternate Data Streams)
+    TEST_ASSERT(!isSafeFileName("test.txt:stream"), "Rejects Windows ADS colon in filename");
+    TEST_ASSERT(!isSafeFileName("invoice.pdf:Zone.Identifier"), "Rejects Windows ADS Zone.Identifier");
+    TEST_ASSERT(!isSafeFileName(":hidden"), "Rejects leading colon");
+
+    // Win32 reserved device names (case-insensitive and with extensions)
+    TEST_ASSERT(!isSafeFileName("CON"), "Rejects Win32 CON device");
+    TEST_ASSERT(!isSafeFileName("con.txt"), "Rejects Win32 con.txt device");
+    TEST_ASSERT(!isSafeFileName("PRN"), "Rejects Win32 PRN device");
+    TEST_ASSERT(!isSafeFileName("prn.pdf"), "Rejects Win32 prn.pdf device");
+    TEST_ASSERT(!isSafeFileName("AUX"), "Rejects Win32 AUX device");
+    TEST_ASSERT(!isSafeFileName("aux.c"), "Rejects Win32 aux.c device");
+    TEST_ASSERT(!isSafeFileName("NUL"), "Rejects Win32 NUL device");
+    TEST_ASSERT(!isSafeFileName("nul.dat"), "Rejects Win32 nul.dat device");
+    TEST_ASSERT(!isSafeFileName("COM1"), "Rejects Win32 COM1 device");
+    TEST_ASSERT(!isSafeFileName("com9.log"), "Rejects Win32 com9.log device");
+    TEST_ASSERT(!isSafeFileName("LPT1"), "Rejects Win32 LPT1 device");
+    TEST_ASSERT(!isSafeFileName("lpt8.bin"), "Rejects Win32 lpt8.bin device");
+
+    // Valid names starting with device substrings (must not be rejected)
+    TEST_ASSERT(isSafeFileName("constant.txt"), "Accepts constant.txt (starts with CON)");
+    TEST_ASSERT(isSafeFileName("printer.pdf"), "Accepts printer.pdf (starts with PRN)");
+    TEST_ASSERT(isSafeFileName("auxiliary.cpp"), "Accepts auxiliary.cpp (starts with AUX)");
+    TEST_ASSERT(isSafeFileName("nullable.hpp"), "Accepts nullable.hpp (starts with NUL)");
+    TEST_ASSERT(isSafeFileName("computer.png"), "Accepts computer.png (starts with COM)");
+
+    // Win32 forbidden characters < > " | ? *
+    TEST_ASSERT(!isSafeFileName("<tag>.txt"), "Rejects < character");
+    TEST_ASSERT(!isSafeFileName("tag>.txt"), "Rejects > character");
+    TEST_ASSERT(!isSafeFileName("quote\"name.txt"), "Rejects double quote character");
+    TEST_ASSERT(!isSafeFileName("pipe|name.txt"), "Rejects pipe character");
+    TEST_ASSERT(!isSafeFileName("wild*card.txt"), "Rejects asterisk character");
+    TEST_ASSERT(!isSafeFileName("question?mark.txt"), "Rejects question mark character");
+
+    // Leading and trailing spaces and dots
+    TEST_ASSERT(!isSafeFileName(" leading_space.txt"), "Rejects leading space");
+    TEST_ASSERT(!isSafeFileName("trailing_space.txt "), "Rejects trailing space");
+    TEST_ASSERT(!isSafeFileName("trailing_dot."), "Rejects trailing dot");
+    TEST_ASSERT(!isSafeFileName("multiple_trailing_dots..."), "Rejects multiple trailing dots");
+
+    // Unicode RTLO, bidirectional override, and zero-width spoofing
+    TEST_ASSERT(!isSafeFileName("invoice\xE2\x80\xAE" "fdp.exe"), "Rejects Unicode RTLO spoofing");
+    TEST_ASSERT(!isSafeFileName("sample\xE2\x81\xA6test\xE2\x81\xA9.txt"), "Rejects Unicode directional isolate");
+    TEST_ASSERT(!isSafeFileName("zero\xE2\x80\x8Bwidth.txt"), "Rejects zero-width space spoofing");
 
     constexpr uint32_t kMaxChunk = 4 * 1024 * 1024;
     uint64_t fileSize = 1000;
@@ -1776,6 +1850,1285 @@ static bool testTransferEngine() {
     return true;
 }
 
+static bool testWireProtocolV2() {
+    using namespace landrop::protocol::v2;
+
+    // 1. Endianness checks
+    uint16_t val16 = 0x1234;
+    TEST_ASSERT(fromBigEndian16(toBigEndian16(val16)) == val16, "16-bit endianness round-trip");
+    uint32_t val32 = 0x12345678;
+    TEST_ASSERT(fromBigEndian32(toBigEndian32(val32)) == val32, "32-bit endianness round-trip");
+    uint64_t val64 = 0x0102030405060708ULL;
+    TEST_ASSERT(fromBigEndian64(toBigEndian64(val64)) == val64, "64-bit endianness round-trip");
+
+    // 2. IEEE 802.3 CRC32 verification against standard reference
+    const char* crcRef = "123456789";
+    uint32_t expectedCrc = 0xCBF43926;
+    uint32_t computedCrc = computeCrc32(reinterpret_cast<const uint8_t*>(crcRef), std::strlen(crcRef));
+    TEST_ASSERT(computedCrc == expectedCrc, "CRC32 matches IEEE 802.3 reference 0xCBF43926");
+
+    // 3. FrameHeader serialization & boundary/error protection
+    FrameHeader hdr;
+    hdr.version = PROTOCOL_VERSION;
+    hdr.msgType = MessageType::FileHeader;
+    hdr.payloadLength = 4096;
+    hdr.crc32OrSeq = 0xAABBCCDD;
+
+    uint8_t rawHdr[FRAME_HEADER_SIZE];
+    hdr.serialize(rawHdr);
+
+    FrameHeader parsedHdr;
+    std::string err;
+    TEST_ASSERT(FrameHeader::deserialize(rawHdr, parsedHdr, &err), "FrameHeader deserialized successfully");
+    TEST_ASSERT(parsedHdr.version == 2, "Parsed version is 2");
+    TEST_ASSERT(parsedHdr.msgType == MessageType::FileHeader, "Parsed msgType matches");
+    TEST_ASSERT(parsedHdr.payloadLength == 4096, "Parsed payloadLength matches");
+    TEST_ASSERT(parsedHdr.crc32OrSeq == 0xAABBCCDD, "Parsed CRC32 matches");
+
+    // Corrupted magic rejection
+    rawHdr[0] = 'X';
+    TEST_ASSERT(!FrameHeader::deserialize(rawHdr, parsedHdr, &err), "Rejects invalid magic");
+    TEST_ASSERT(!err.empty(), "Reports error message for invalid magic");
+    rawHdr[0] = 'L'; // restore
+
+    // Unsupported version rejection
+    uint16_t badVer = toBigEndian16(99);
+    std::memcpy(rawHdr + 4, &badVer, sizeof(uint16_t));
+    TEST_ASSERT(!FrameHeader::deserialize(rawHdr, parsedHdr, &err), "Rejects unsupported version");
+    uint16_t goodVer = toBigEndian16(PROTOCOL_VERSION);
+    std::memcpy(rawHdr + 4, &goodVer, sizeof(uint16_t)); // restore
+
+    // Oversized payload rejection (> 16MB)
+    uint32_t hugeLen = toBigEndian32(32 * 1024 * 1024);
+    std::memcpy(rawHdr + 8, &hugeLen, sizeof(uint32_t));
+    TEST_ASSERT(!FrameHeader::deserialize(rawHdr, parsedHdr, &err), "Rejects oversized payload (>16MB)");
+
+    // 4. HandshakeMessage
+    HandshakeMessage hs;
+    hs.capabilitiesFlags = 0x07;
+    hs.deviceId = "uuid-client-1234";
+    hs.deviceName = "MacBook Pro M3";
+    hs.clientVersion = "2.0.0-rc1";
+    std::vector<uint8_t> hsBytes = hs.serialize();
+
+    HandshakeMessage parsedHs;
+    TEST_ASSERT(HandshakeMessage::deserialize(hsBytes.data(), hsBytes.size(), parsedHs, &err), "Handshake parsed");
+    TEST_ASSERT(parsedHs.capabilitiesFlags == 0x07, "Handshake capabilities match");
+    TEST_ASSERT(parsedHs.deviceId == "uuid-client-1234", "Handshake deviceId matches");
+    TEST_ASSERT(parsedHs.deviceName == "MacBook Pro M3", "Handshake deviceName matches");
+    TEST_ASSERT(parsedHs.clientVersion == "2.0.0-rc1", "Handshake clientVersion matches");
+
+    // 5. FileHeaderMessage
+    FileHeaderMessage fh;
+    fh.fileSize = 104857600; // 100 MB
+    fh.chunkSize = 65536;
+    fh.flags = 0x01;
+    fh.fileName = "release_archive.tar.gz";
+    fh.sha256Hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    std::vector<uint8_t> fhBytes = fh.serialize();
+
+    FileHeaderMessage parsedFh;
+    TEST_ASSERT(FileHeaderMessage::deserialize(fhBytes.data(), fhBytes.size(), parsedFh, &err), "FileHeader parsed");
+    TEST_ASSERT(parsedFh.fileSize == 104857600, "File size matches");
+    TEST_ASSERT(parsedFh.chunkSize == 65536, "Chunk size matches");
+    TEST_ASSERT(parsedFh.flags == 0x01, "Flags match");
+    TEST_ASSERT(parsedFh.fileName == "release_archive.tar.gz", "Filename matches");
+    TEST_ASSERT(parsedFh.sha256Hex == fh.sha256Hex, "SHA-256 hex matches");
+
+    // Truncated buffer underflow check
+    TEST_ASSERT(!FileHeaderMessage::deserialize(fhBytes.data(), 10, parsedFh, &err), "Rejects truncated FileHeader buffer");
+
+    // 6. ChunkDataMessage & CRC integrity verification
+    ChunkDataMessage chunk;
+    chunk.offset = 131072;
+    chunk.chunkIndex = 2;
+    chunk.data = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80};
+    chunk.chunkCrc32 = computeCrc32(chunk.data.data(), chunk.data.size());
+    std::vector<uint8_t> chunkBytes = chunk.serialize();
+
+    ChunkDataMessage parsedChunk;
+    TEST_ASSERT(ChunkDataMessage::deserialize(chunkBytes.data(), chunkBytes.size(), parsedChunk, &err), "ChunkData parsed");
+    TEST_ASSERT(parsedChunk.offset == 131072, "Chunk offset matches");
+    TEST_ASSERT(parsedChunk.chunkIndex == 2, "Chunk index matches");
+    TEST_ASSERT(parsedChunk.data == chunk.data, "Chunk data payload matches");
+
+    // Tampered payload detection via CRC
+    chunkBytes.back() ^= 0xFF; // corrupt one byte
+    TEST_ASSERT(!ChunkDataMessage::deserialize(chunkBytes.data(), chunkBytes.size(), parsedChunk, &err), "Detects chunk corruption via CRC");
+
+    // 7. TransferAckMessage
+    TransferAckMessage ack;
+    ack.status = AckStatus::Success;
+    ack.receivedBytes = 104857600;
+    ack.message = "File verified and saved";
+    std::vector<uint8_t> ackBytes = ack.serialize();
+
+    TransferAckMessage parsedAck;
+    TEST_ASSERT(TransferAckMessage::deserialize(ackBytes.data(), ackBytes.size(), parsedAck, &err), "Ack parsed");
+    TEST_ASSERT(parsedAck.status == AckStatus::Success, "Ack status is Success");
+    TEST_ASSERT(parsedAck.receivedBytes == 104857600, "Ack receivedBytes matches");
+    TEST_ASSERT(parsedAck.message == "File verified and saved", "Ack message matches");
+
+    // 8. TransferCancelMessage
+    TransferCancelMessage cancel;
+    cancel.errorCode = 403;
+    cancel.reason = "Quota limit exceeded";
+    std::vector<uint8_t> cancelBytes = cancel.serialize();
+
+    TransferCancelMessage parsedCancel;
+    TEST_ASSERT(TransferCancelMessage::deserialize(cancelBytes.data(), cancelBytes.size(), parsedCancel, &err), "Cancel parsed");
+    TEST_ASSERT(parsedCancel.errorCode == 403, "Cancel error code matches");
+    TEST_ASSERT(parsedCancel.reason == "Quota limit exceeded", "Cancel reason matches");
+
+    // 9. Full wire frame builder
+    std::vector<uint8_t> pingPayload = {0x01, 0x02, 0x03, 0x04};
+    std::vector<uint8_t> wireFrame = buildFrame(MessageType::Ping, pingPayload);
+    TEST_ASSERT(wireFrame.size() == FRAME_HEADER_SIZE + pingPayload.size(), "Frame size matches header + payload");
+    FrameHeader pingHdr;
+    TEST_ASSERT(FrameHeader::deserialize(wireFrame.data(), pingHdr, &err), "Frame header parsed from wire frame");
+    TEST_ASSERT(pingHdr.msgType == MessageType::Ping, "Frame msgType is Ping");
+    TEST_ASSERT(pingHdr.payloadLength == pingPayload.size(), "Frame payloadLength matches");
+    TEST_ASSERT(pingHdr.crc32OrSeq == computeCrc32(pingPayload.data(), pingPayload.size()), "Frame CRC32 matches payload");
+
+    // 10. Legacy v1 detection & backward compatibility branching
+    const uint8_t v2Magic[4] = {'L', 'N', 'D', 'P'};
+    TEST_ASSERT(isProtocolV2(v2Magic), "Identifies v2 magic header");
+
+    const uint8_t v1HeaderSample[4] = {14, 0, 0, 0}; // Legacy v1 4-byte nameLen for "my_archive.zip"
+    TEST_ASSERT(!isProtocolV2(v1HeaderSample), "Distinguishes legacy v1 connection from v2");
+
+    // 11. Anti-downgrade policy controls
+    TransferOptions defaultOpts;
+    TEST_ASSERT(defaultOpts.allowLegacyV1Fallback, "Default options allow legacy fallback for backward compatibility");
+    TEST_ASSERT(!defaultOpts.requireProtocolV2, "Default options do not strictly require v2");
+
+    TransferOptions strictOpts;
+    strictOpts.requireProtocolV2 = true;
+    strictOpts.allowLegacyV1Fallback = false;
+    TEST_ASSERT(strictOpts.requireProtocolV2, "Strict options enforce protocol v2");
+    TEST_ASSERT(!strictOpts.allowLegacyV1Fallback, "Strict options prohibit legacy v1 downgrade");
+
+    return true;
+}
+
+static bool testTransportChannelAbstraction() {
+    using namespace landrop;
+
+    // 1. Enum string conversions
+    TEST_ASSERT(std::string(transportTypeToString(TransportType::TcpDirect)) == "TcpDirect", "TcpDirect string");
+    TEST_ASSERT(std::string(transportTypeToString(TransportType::TlsTcp)) == "TlsTcp", "TlsTcp string");
+    TEST_ASSERT(std::string(transportTypeToString(TransportType::WebRtcDataChannel)) == "WebRtcDataChannel", "WebRtcDataChannel string");
+    TEST_ASSERT(std::string(transportTypeToString(TransportType::CloudRelay)) == "CloudRelay", "CloudRelay string");
+
+    // 2. Loopback TCP via ITransportChannel polymorphism
+    uint16_t testPort = 19877;
+    NetworkSession listenerSession("test-srv-listener");
+    bool listenOk = false;
+    for (int retry = 0; retry < 5; ++retry) {
+        if (listenerSession.listenOn(testPort)) {
+            listenOk = true;
+            break;
+        }
+        testPort += 10;
+    }
+    TEST_ASSERT(listenOk, "Listener session bound successfully for transport channel test");
+
+    std::shared_ptr<ITransportChannel> clientChannel;
+    std::shared_ptr<ITransportChannel> serverChannel;
+    std::atomic<bool> serverReady(false);
+    std::atomic<bool> acceptSuccess(false);
+
+    std::thread serverThread([&]() {
+        serverReady = true;
+        if (listenerSession.acceptIncoming()) {
+            acceptSuccess = true;
+            serverChannel = TcpSocketChannel::create(
+                std::make_unique<NetworkSession>(std::move(listenerSession))
+            );
+        }
+    });
+
+    while (!serverReady.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    clientChannel = std::shared_ptr<TcpSocketChannel>(new TcpSocketChannel("127.0.0.1", testPort, false));
+
+    if (serverThread.joinable()) {
+        serverThread.join();
+    }
+
+    TEST_ASSERT(acceptSuccess.load(), "Server accepted incoming connection");
+    TEST_ASSERT(clientChannel != nullptr && clientChannel->isConnected(), "Client channel is connected");
+    TEST_ASSERT(serverChannel != nullptr && serverChannel->isConnected(), "Server channel is connected");
+    TEST_ASSERT(clientChannel->getTransportType() == TransportType::TcpDirect, "Client transport type is TcpDirect");
+    TEST_ASSERT(serverChannel->getTransportType() == TransportType::TcpDirect, "Server transport type is TcpDirect");
+    TEST_ASSERT(!clientChannel->isEncrypted(), "Client is not encrypted in plaintext mode");
+
+    // 3. Bidirectional data transfer over ITransportChannel
+    std::string testMsg = "Hello through ITransportChannel polymorphic abstraction!";
+    std::vector<uint8_t> sendData(testMsg.begin(), testMsg.end());
+    TEST_ASSERT(clientChannel->sendExact(sendData.data(), sendData.size()), "Client channel sent exact bytes");
+
+    std::vector<uint8_t> recvData(sendData.size(), 0);
+    TEST_ASSERT(serverChannel->receiveExact(recvData.data(), recvData.size(), 2000), "Server channel received exact bytes");
+    std::string receivedStr(recvData.begin(), recvData.end());
+    TEST_ASSERT(receivedStr == testMsg, "Data transferred through ITransportChannel matches byte-for-byte");
+
+    // 4. Accounting & Buffered amount
+    TEST_ASSERT(clientChannel->getBytesSent() == sendData.size(), "Client bytes sent accounted correctly");
+    TEST_ASSERT(serverChannel->getBytesReceived() == sendData.size(), "Server bytes received accounted correctly");
+    size_t buffered = clientChannel->getBufferedAmount();
+    TEST_ASSERT(buffered < 1000000000ULL, "Buffered amount returns valid size query");
+
+    // 5. Cancellation check
+    std::atomic<bool> cancelFlag(true); // already cancelled
+    uint8_t dummy[16];
+    bool recvCancelled = serverChannel->receiveExact(dummy, sizeof(dummy), 1000, &cancelFlag);
+    TEST_ASSERT(!recvCancelled, "Cancellation token immediately aborts receiveExact");
+
+    // 6. Channel closure
+    clientChannel->close();
+    serverChannel->close();
+    TEST_ASSERT(!clientChannel->isConnected(), "Client channel marked disconnected after close()");
+    TEST_ASSERT(!serverChannel->isConnected(), "Server channel marked disconnected after close()");
+
+    return true;
+}
+
+static bool testWebRtcDataChannelPrep() {
+    using namespace landrop;
+
+    WebRtcConfig cfg;
+    cfg.iceServers = {"stun:stun.l.google.com:19302"};
+    cfg.maxBufferedAmount = 1024 * 1024; // 1MB limit for testing backpressure
+
+    WebRtcDataChannel channel("peer-uuid-webrtc-99", "lan-drop-file-channel", cfg);
+
+    TEST_ASSERT(channel.getTransportType() == TransportType::WebRtcDataChannel, "Transport type is WebRtcDataChannel");
+    TEST_ASSERT(channel.getRemoteAddress() == "peer-uuid-webrtc-99", "Remote address matches peer UUID");
+    TEST_ASSERT(channel.getRemotePort() == 0, "Remote port is 0 (ICE dynamic)");
+    TEST_ASSERT(channel.isEncrypted(), "WebRtcDataChannel reports encrypted (DTLS)");
+    TEST_ASSERT(!channel.isConnected(), "Initially disconnected");
+    TEST_ASSERT(channel.getLabel() == "lan-drop-file-channel", "Channel label matches");
+    TEST_ASSERT(channel.getConfig().iceServers.size() == 1, "Configured ICE servers present");
+
+    // Cannot send while disconnected
+    uint8_t sampleData[4] = {1, 2, 3, 4};
+    TEST_ASSERT(!channel.sendExact(sampleData, sizeof(sampleData)), "Cannot send on disconnected channel");
+
+    // Connect
+    channel.setConnected(true);
+    TEST_ASSERT(channel.isConnected(), "Channel connected");
+
+    // Send data: fails if no real channel and not simulated (F-05)
+    TEST_ASSERT(!channel.sendExact(sampleData, sizeof(sampleData)), "Cannot send on connected channel without real channel in non-simulated mode");
+    channel.setSimulatedMode(true);
+    TEST_ASSERT(channel.sendExact(sampleData, sizeof(sampleData)), "Sent data on connected channel in simulated mode");
+    TEST_ASSERT(channel.getBytesSent() == sizeof(sampleData), "Bytes sent accounted");
+
+    // Backpressure: attempt to send > maxBufferedAmount
+    std::vector<uint8_t> oversizeData(2 * 1024 * 1024, 0xAA);
+    TEST_ASSERT(!channel.sendExact(oversizeData.data(), oversizeData.size()), "Backpressure rejects sending data exceeding maxBufferedAmount");
+
+    // Dynamic buffered amount control
+    channel.setBufferedAmount(500000);
+    TEST_ASSERT(channel.getBufferedAmount() == 500000, "Simulated buffered amount reflects queue state");
+    channel.setBufferedAmount(0);
+    TEST_ASSERT(channel.getBufferedAmount() == 0, "Buffered amount successfully drained");
+
+    // Receive data
+    std::string testMsg = "WebRTC P2P Data Chunk Payload";
+    channel.injectIncomingBytes(reinterpret_cast<const uint8_t*>(testMsg.data()), testMsg.size());
+
+    std::vector<uint8_t> recvBuf(testMsg.size(), 0);
+    TEST_ASSERT(channel.receiveExact(recvBuf.data(), recvBuf.size(), 1000), "Received exact bytes from WebRtcDataChannel");
+    std::string recvStr(recvBuf.begin(), recvBuf.end());
+    TEST_ASSERT(recvStr == testMsg, "Received WebRTC payload matches sent payload");
+    TEST_ASSERT(channel.getBytesReceived() == testMsg.size(), "Bytes received accounted");
+
+    // Cancellation support
+    std::atomic<bool> cancelToken(true);
+    uint8_t cancelBuf[8];
+    TEST_ASSERT(!channel.receiveExact(cancelBuf, sizeof(cancelBuf), 500, &cancelToken), "Cancelled token aborts receiveExact immediately");
+
+    // Close channel
+    channel.close();
+    TEST_ASSERT(!channel.isConnected(), "Channel marked disconnected after close()");
+
+    return true;
+}
+
+static bool testCandidateQueueAndBackpressure() {
+    // ----------------------------------------------------
+    // TC-RTC-01: Remote ICE Candidate Queueing & Drain
+    // ----------------------------------------------------
+    CandidateQueue queue;
+    TEST_ASSERT(!queue.isRemoteDescriptionSet(), "Initially remote description not set");
+    TEST_ASSERT(queue.pendingCount() == 0, "Initially queue empty");
+
+    std::vector<std::string> deliveredCandidates;
+    queue.setOnCandidateReady([&](const IceCandidate& cand) {
+        deliveredCandidates.push_back(cand.candidate);
+    });
+
+    // Push 3 candidates before remote description is set
+    queue.push({"candidate:1 1 UDP 2122260223 192.168.1.50 50000 typ host", "0", 0});
+    queue.push({"candidate:2 1 UDP 2122260224 192.168.1.50 50001 typ host", "0", 1});
+    queue.push({"candidate:3 1 UDP 1686052607 198.51.100.1 50002 typ srflx", "0", 2});
+
+    TEST_ASSERT(queue.pendingCount() == 3, "All 3 trickle candidates buffered before description set");
+    TEST_ASSERT(deliveredCandidates.empty(), "No candidates delivered prior to remote description set");
+
+    // Set remote description -> should drain all 3 in order
+    queue.setRemoteDescriptionSet();
+    TEST_ASSERT(queue.isRemoteDescriptionSet(), "Remote description marked set");
+    TEST_ASSERT(queue.pendingCount() == 0, "Queue drained");
+    TEST_ASSERT(deliveredCandidates.size() == 3, "All 3 candidates flushed upon description set");
+    TEST_ASSERT(deliveredCandidates[0].find("50000") != std::string::npos, "First candidate matches order");
+    TEST_ASSERT(deliveredCandidates[1].find("50001") != std::string::npos, "Second candidate matches order");
+    TEST_ASSERT(deliveredCandidates[2].find("50002") != std::string::npos, "Third candidate matches order");
+
+    // Subsequent candidates arriving after remote description is set should be delivered immediately
+    queue.push({"candidate:4 1 UDP 2122260225 10.0.0.1 50003 typ host", "0", 3});
+    TEST_ASSERT(deliveredCandidates.size() == 4, "Post-description candidate delivered immediately without buffering");
+    TEST_ASSERT(queue.pendingCount() == 0, "Queue remains empty for immediate candidates");
+
+    // Verify deferred callback registration (F-11)
+    CandidateQueue deferredQueue;
+    deferredQueue.push({"candidate:defer1", "0", 0});
+    deferredQueue.push({"candidate:defer2", "0", 1});
+    TEST_ASSERT(deferredQueue.pendingCount() == 2, "Candidates buffered without callback");
+    deferredQueue.setRemoteDescriptionSet();
+    TEST_ASSERT(deferredQueue.pendingCount() == 2, "Candidates retained when description set before callback");
+    std::vector<std::string> deferredDelivered;
+    deferredQueue.setOnCandidateReady([&](const IceCandidate& cand) {
+        deferredDelivered.push_back(cand.candidate);
+    });
+    TEST_ASSERT(deferredDelivered.size() == 2, "Candidates flushed immediately upon late callback attachment");
+    TEST_ASSERT(deferredQueue.pendingCount() == 0, "Deferred queue drained");
+
+    // Verify bounded capacity DoS prevention (F-12)
+    CandidateQueue boundedQueue;
+    for (size_t i = 0; i < CandidateQueue::kMaxQueueCapacity; ++i) {
+        TEST_ASSERT(boundedQueue.push({"cand", "0", 0}), "Push within capacity succeeds");
+    }
+    TEST_ASSERT(!boundedQueue.push({"overflow", "0", 0}), "Push beyond capacity is rejected");
+
+    // ----------------------------------------------------
+    // TC-RTC-02: WebRTC Backpressure Flow Control (Non-failing cv wait)
+    // ----------------------------------------------------
+    WebRtcConfig bpConfig;
+    bpConfig.maxBufferedAmount = 1000;
+    bpConfig.lowWaterMark = 400;
+
+    WebRtcDataChannel bpChannel("peer-bp-test", "bp-channel", bpConfig);
+    bpChannel.setConnected(true);
+    bpChannel.setSimulatedMode(true);
+
+    // Initial state: buffer empty
+    uint8_t payload[300];
+    std::memset(payload, 0x55, sizeof(payload));
+
+    // Send 300 bytes -> fits in 1000
+    TEST_ASSERT(bpChannel.sendExact(payload, sizeof(payload)), "Initial 300B send succeeds");
+
+    // Simulate socket/channel buffering: set buffered amount to 800 bytes
+    bpChannel.setBufferedAmount(800);
+
+    // Attempt to send 300 bytes -> 800 + 300 = 1100 > 1000 maxBufferedAmount.
+    // It must block until buffered amount drops to lowWaterMark!
+    std::atomic<bool> sendStarted{false};
+    std::atomic<bool> sendCompleted{false};
+    std::atomic<bool> sendResult{false};
+
+    std::thread senderThread([&]() {
+        sendStarted.store(true);
+        bool ok = bpChannel.sendExact(payload, sizeof(payload));
+        sendResult.store(ok);
+        sendCompleted.store(true);
+    });
+
+    // Wait for thread to enter wait state
+    while (!sendStarted.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    TEST_ASSERT(!sendCompleted.load(), "sendExact() is blocked on backpressure condition variable");
+
+    // Simulate drain event: buffer drops to 300 (< lowWaterMark 400)
+    bpChannel.setBufferedAmount(300); // setBufferedAmount calls notifyBufferedAmountLow() automatically
+
+    senderThread.join();
+
+    TEST_ASSERT(sendCompleted.load(), "sendExact() resumed after buffer drained");
+    TEST_ASSERT(sendResult.load(), "sendExact() succeeded after backpressure relief");
+
+    bpChannel.close();
+    return true;
+}
+
+static bool testSignalingClientAndGlareResolution() {
+    using namespace landrop::signaling;
+
+    SignalingClient alice("alice_client");
+    SignalingClient bob("bob_client");
+
+    std::vector<std::string> aliceSentEnvelopes;
+    std::vector<std::string> bobSentEnvelopes;
+
+    alice.setCustomSender([&](const std::string& msg) {
+        aliceSentEnvelopes.push_back(msg);
+        return true;
+    });
+
+    bob.setCustomSender([&](const std::string& msg) {
+        bobSentEnvelopes.push_back(msg);
+        return true;
+    });
+
+    TEST_ASSERT(alice.connect("ws://localhost:8080/ws"), "Alice connected with custom sender");
+    TEST_ASSERT(bob.connect("ws://localhost:8080/ws"), "Bob connected with custom sender");
+
+    // 1. Room Creation by Alice (Initiator)
+    TEST_ASSERT(alice.createRoom(), "Alice sends CREATE_ROOM");
+    TEST_ASSERT(aliceSentEnvelopes.size() == 1, "Alice sent 1 message");
+    TEST_ASSERT(aliceSentEnvelopes[0].find("CREATE_ROOM") != std::string::npos, "Envelope contains CREATE_ROOM action");
+
+    // Simulate Server -> Alice: ROOM_CREATED
+    std::string roomCreatedMsg = R"({
+        "version": "2.0",
+        "action": "ROOM_CREATED",
+        "client_id": "alice_client",
+        "timestamp": 1700000000,
+        "payload": {
+            "room_code": "DROP-TEST-7788",
+            "room_token": "token_alice_secret",
+            "role": "initiator",
+            "expires_at": 1700000600
+        }
+    })";
+
+    bool aliceRoomCreatedCalled = false;
+    alice.onRoomCreated = [&](const RoomCreatedInfo& info) {
+        aliceRoomCreatedCalled = true;
+        if (info.roomCode != "DROP-TEST-7788" || info.roomToken != "token_alice_secret" || info.role != "initiator") {
+            aliceRoomCreatedCalled = false;
+        }
+    };
+
+    TEST_ASSERT(alice.handleIncomingMessage(roomCreatedMsg), "Alice parsed ROOM_CREATED");
+    TEST_ASSERT(aliceRoomCreatedCalled, "onRoomCreated fired with valid data");
+    TEST_ASSERT(alice.getRole() == Role::Initiator, "Alice role is Initiator");
+    TEST_ASSERT(alice.getRoomCode() == "DROP-TEST-7788", "Alice room code stored");
+    TEST_ASSERT(alice.getRoomToken() == "token_alice_secret", "Alice room token stored");
+
+    // 2. Bob joins room
+    TEST_ASSERT(bob.joinRoom("DROP-TEST-7788"), "Bob sends JOIN_ROOM");
+    TEST_ASSERT(bobSentEnvelopes.size() == 1, "Bob sent 1 message");
+    TEST_ASSERT(bobSentEnvelopes[0].find("JOIN_ROOM") != std::string::npos, "Envelope contains JOIN_ROOM action");
+    TEST_ASSERT(bobSentEnvelopes[0].find("DROP-TEST-7788") != std::string::npos, "Envelope contains room code");
+
+    // Simulate Server -> Bob: PEER_JOINED (Bob as joiner)
+    std::string bobPeerJoinedMsg = R"({
+        "version": "2.0",
+        "action": "PEER_JOINED",
+        "client_id": "bob_client",
+        "timestamp": 1700000001,
+        "payload": {
+            "room_code": "DROP-TEST-7788",
+            "peer_id": "alice_client",
+            "role": "joiner",
+            "room_token": "token_bob_secret"
+        }
+    })";
+
+    bool bobPeerJoinedCalled = false;
+    bob.onPeerJoined = [&](const PeerJoinedInfo& info) {
+        if (info.peerId == "alice_client" && info.role == "joiner") {
+            bobPeerJoinedCalled = true;
+        }
+    };
+
+    TEST_ASSERT(bob.handleIncomingMessage(bobPeerJoinedMsg), "Bob parsed PEER_JOINED");
+    TEST_ASSERT(bobPeerJoinedCalled, "Bob onPeerJoined fired");
+    TEST_ASSERT(bob.getRole() == Role::Joiner, "Bob role is Joiner");
+    TEST_ASSERT(bob.getPeerId() == "alice_client", "Bob peer ID is Alice");
+
+    // 3. Glare Resolution Enforcement (TC-RTC-03)
+    // Rule: Joiner (Bob) cannot initiate SDP_OFFER
+    std::string bobErrorReceived;
+    bob.onError = [&](const ErrorInfo& err) {
+        bobErrorReceived = err.code;
+        // F-01: Verify re-entrancy without deadlock
+        (void)bob.getRole();
+        (void)bob.getRoomCode();
+        (void)bob.getPeerId();
+    };
+    TEST_ASSERT(!bob.sendSdpOffer("v=0\r\no=bob..."), "Bob (Joiner) sendSdpOffer is rejected to prevent glare");
+    TEST_ASSERT(bobErrorReceived == "ERR_GLARE_VIOLATION", "Bob received ERR_GLARE_VIOLATION for offer attempt");
+
+    // Rule: Initiator (Alice) cannot send SDP_ANSWER
+    std::string aliceErrorReceived;
+    alice.onError = [&](const ErrorInfo& err) {
+        aliceErrorReceived = err.code;
+        // F-01: Verify re-entrancy without deadlock
+        (void)alice.getRole();
+        (void)alice.getRoomCode();
+        (void)alice.getPeerId();
+    };
+    TEST_ASSERT(!alice.sendSdpAnswer("v=0\r\no=alice..."), "Alice (Initiator) sendSdpAnswer is rejected to prevent glare");
+    TEST_ASSERT(aliceErrorReceived == "ERR_GLARE_VIOLATION", "Alice received ERR_GLARE_VIOLATION for answer attempt");
+
+    // F-09 Ingress Glare Check: Initiator must reject ingress SDP_OFFER
+    std::string aliceGlareError;
+    alice.onError = [&](const ErrorInfo& err) {
+        aliceGlareError = err.code;
+    };
+    TEST_ASSERT(!alice.handleIncomingMessage(R"({"version":"2.0","action":"SDP_OFFER","payload":{"type":"offer","sdp":"..."}})"), "Initiator rejects incoming SDP_OFFER to avoid glare");
+    TEST_ASSERT(aliceGlareError == "ERR_GLARE_VIOLATION", "Alice reports ERR_GLARE_VIOLATION on ingress offer");
+
+    // F-09 Ingress Glare Check: Joiner must reject ingress SDP_ANSWER
+    std::string bobGlareError;
+    bob.onError = [&](const ErrorInfo& err) {
+        bobGlareError = err.code;
+    };
+    TEST_ASSERT(!bob.handleIncomingMessage(R"({"version":"2.0","action":"SDP_ANSWER","payload":{"type":"answer","sdp":"..."}})"), "Joiner rejects incoming SDP_ANSWER to avoid glare");
+    TEST_ASSERT(bobGlareError == "ERR_GLARE_VIOLATION", "Bob reports ERR_GLARE_VIOLATION on ingress answer");
+
+    // F-02: Remote crash prevention on null/non-object payload
+    TEST_ASSERT(alice.handleIncomingMessage(R"({"version":"2.0","action":"ROOM_CREATED","payload":null})"), "Null payload does not throw exception or crash");
+
+    // F-08: Client role transition upon reuse
+    SignalingClient reusedClient("reused");
+    reusedClient.createRoom();
+    TEST_ASSERT(reusedClient.getRole() == Role::Initiator, "Role is Initiator after createRoom");
+    reusedClient.joinRoom("DROP-TEST-9999");
+    TEST_ASSERT(reusedClient.getRole() == Role::Joiner, "Role transitions to Joiner after joinRoom");
+
+    // 4. Valid Negotiation Flow:
+    // Alice sends SDP offer -> Bob
+    size_t alicePrevSent = aliceSentEnvelopes.size();
+    TEST_ASSERT(alice.sendSdpOffer("v=0\r\no=alice 1000 2 IN IP4 127.0.0.1...", "e2ee_alice_key_hex"), "Alice sends SDP offer");
+    TEST_ASSERT(aliceSentEnvelopes.size() == alicePrevSent + 1, "Alice transmitted offer envelope");
+
+    bool bobReceivedOffer = false;
+    bob.onSdpOffer = [&](const SdpInfo& sdp) {
+        if (sdp.type == "offer" && sdp.sdp.find("alice") != std::string::npos && sdp.e2eePublicKey == "e2ee_alice_key_hex") {
+            bobReceivedOffer = true;
+        }
+    };
+    TEST_ASSERT(bob.handleIncomingMessage(aliceSentEnvelopes.back()), "Bob handles Alice's offer");
+    TEST_ASSERT(bobReceivedOffer, "Bob onSdpOffer fired with correct offer details");
+
+    // Bob sends SDP answer -> Alice
+    size_t bobPrevSent = bobSentEnvelopes.size();
+    TEST_ASSERT(bob.sendSdpAnswer("v=0\r\no=bob 2000 2 IN IP4 127.0.0.1...", "e2ee_bob_key_hex"), "Bob sends SDP answer");
+    TEST_ASSERT(bobSentEnvelopes.size() == bobPrevSent + 1, "Bob transmitted answer envelope");
+
+    bool aliceReceivedAnswer = false;
+    alice.onSdpAnswer = [&](const SdpInfo& sdp) {
+        if (sdp.type == "answer" && sdp.sdp.find("bob") != std::string::npos && sdp.e2eePublicKey == "e2ee_bob_key_hex") {
+            aliceReceivedAnswer = true;
+        }
+    };
+    TEST_ASSERT(alice.handleIncomingMessage(bobSentEnvelopes.back()), "Alice handles Bob's answer");
+    TEST_ASSERT(aliceReceivedAnswer, "Alice onSdpAnswer fired with correct answer details");
+
+    // ICE Candidate Exchange
+    TEST_ASSERT(alice.sendIceCandidate("candidate:udp:127.0.0.1:40000", "data", 0), "Alice sends candidate");
+    bool bobReceivedCandidate = false;
+    bob.onIceCandidate = [&](const IceCandidateInfo& cand) {
+        if (cand.candidate == "candidate:udp:127.0.0.1:40000" && cand.sdpMid == "data" && cand.sdpMLineIndex == 0) {
+            bobReceivedCandidate = true;
+        }
+    };
+    TEST_ASSERT(bob.handleIncomingMessage(aliceSentEnvelopes.back()), "Bob handles ICE candidate");
+    TEST_ASSERT(bobReceivedCandidate, "Bob onIceCandidate fired");
+
+    // 5. Leave Room and State Reset
+    bool alicePeerLeftCalled = false;
+    alice.onPeerLeft = [&](const PeerLeftInfo& info) {
+        if (info.reason == "user_exit") {
+            alicePeerLeftCalled = true;
+        }
+    };
+
+    TEST_ASSERT(bob.leaveRoom("user_exit"), "Bob leaves room");
+    TEST_ASSERT(bob.getRole() == Role::Unknown, "Bob role reset to Unknown after leaving");
+    TEST_ASSERT(bob.getRoomCode().empty(), "Bob room code cleared after leaving");
+
+    std::string peerLeftEnv = R"({
+        "version": "2.0",
+        "action": "PEER_LEFT",
+        "client_id": "server",
+        "timestamp": 1700000005,
+        "payload": {
+            "peer_id": "bob_client",
+            "reason": "user_exit"
+        }
+    })";
+    TEST_ASSERT(alice.handleIncomingMessage(peerLeftEnv), "Alice handles PEER_LEFT");
+    TEST_ASSERT(alicePeerLeftCalled, "Alice onPeerLeft fired");
+    TEST_ASSERT(alice.getPeerId().empty(), "Alice peerId cleared");
+
+    alice.disconnect();
+    bob.disconnect();
+    return true;
+}
+
+
+static bool testMilestone2C_GlobalWebRtcTransferPipeline() {
+    using namespace landrop;
+
+    // -------------------------------------------------------------
+    // 1. TC-TURN-01: Coturn REST API & JSON Configuration Parsing
+    // -------------------------------------------------------------
+    {
+        std::string validJson = R"({
+            "ice_servers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {
+                    "urls": [
+                        "turn:turn.lan-drop.org:3478?transport=udp",
+                        "turns:turn.lan-drop.org:5349?transport=tcp"
+                    ],
+                    "username": "1730000000:alice",
+                    "credential": "secretpassword123"
+                }
+            ],
+            "ttl_seconds": 86400
+        })";
+
+        WebRtcConfig cfg;
+        int64_t ttl = 0;
+        std::string err;
+        bool ok = TurnConfigClient::parseTurnConfigJson(validJson, cfg, &ttl, &err);
+        TEST_ASSERT(ok, "Valid Coturn JSON parsed successfully");
+        TEST_ASSERT(err.empty(), "No error on valid TURN parse");
+        TEST_ASSERT(ttl == 86400, "TTL parsed correctly (86400)");
+        TEST_ASSERT(cfg.turnUsername == "1730000000:alice", "TURN username extracted");
+        TEST_ASSERT(cfg.turnPassword == "secretpassword123", "TURN credential extracted");
+        TEST_ASSERT(cfg.turnServer == "turn:turn.lan-drop.org:3478?transport=udp", "TURN server URI selected");
+        TEST_ASSERT(cfg.iceServers.size() == 3, "All 3 ICE server URIs captured");
+
+        // Malformed JSON checks
+        WebRtcConfig malformedCfg;
+        std::string malformedErr;
+        bool malformedOk = TurnConfigClient::parseTurnConfigJson("{not_valid_json", malformedCfg, nullptr, &malformedErr);
+        TEST_ASSERT(!malformedOk, "Malformed JSON rejected");
+        TEST_ASSERT(!malformedErr.empty(), "Malformed JSON returns error message");
+
+        std::string missingServersJson = R"({"status": "ok"})";
+        bool missingOk = TurnConfigClient::parseTurnConfigJson(missingServersJson, malformedCfg, nullptr, &malformedErr);
+        TEST_ASSERT(!missingOk, "JSON missing ice_servers array rejected");
+
+        // F-01 regression test: JSON type mismatch must be caught gracefully without aborting
+        std::string typeErrorJson = R"({"ice_servers": [{"urls": ["turn:h:3478"], "username": 12345}]})";
+        std::string typeErr;
+        bool typeOk = TurnConfigClient::parseTurnConfigJson(typeErrorJson, malformedCfg, nullptr, &typeErr);
+        TEST_ASSERT(!typeOk, "Type mismatch in JSON fields safely rejected without throwing");
+        TEST_ASSERT(!typeErr.empty(), "Descriptive error returned on JSON type mismatch");
+
+        // F-06 regression test: CandidateQueue::reset() clears callback
+        {
+            CandidateQueue cq;
+            bool cbFired = false;
+            cq.setOnCandidateReady([&](const IceCandidate&) { cbFired = true; });
+            cq.reset();
+            cq.setRemoteDescriptionSet();
+            cq.push({"cand1", "mid1", 0});
+            TEST_ASSERT(!cbFired, "CandidateQueue callback cleared on reset");
+        }
+
+        // Mock HttpClient testing fetchTurnConfig
+        class MockTurnHttpClient : public HttpClient {
+        public:
+            std::string lastAuthHeader;
+            std::string lastUrl;
+            HttpResponse send(const HttpRequest& request) override {
+                lastUrl = request.url;
+                auto it = request.headers.find("Authorization");
+                if (it != request.headers.end()) {
+                    lastAuthHeader = it->second;
+                }
+                HttpResponse resp;
+                resp.statusCode = 200;
+                resp.success = true;
+                resp.body = R"({
+                    "ice_servers": [
+                        {"urls": "stun:stun.example.com:3478"},
+                        {"urls": ["turn:turn.example.com:3478"], "username": "u1", "credential": "p1"}
+                    ],
+                    "ttl_seconds": 3600
+                })";
+                return resp;
+            }
+        };
+
+        auto mockHttp = std::make_shared<MockTurnHttpClient>();
+        TurnConfigClient client(mockHttp);
+        WebRtcConfig fetchedCfg;
+        std::string fetchErr;
+        bool fetchOk = client.fetchTurnConfig(
+            "https://signaling.lan-drop.org",
+            "token-secret-xyz",
+            "client-abc",
+            fetchedCfg,
+            5,
+            &fetchErr
+        );
+        TEST_ASSERT(fetchOk, "fetchTurnConfig succeeds with mock HTTP response");
+        TEST_ASSERT(mockHttp->lastAuthHeader == "Bearer token-secret-xyz", "Bearer token sent in Authorization header");
+        TEST_ASSERT(mockHttp->lastUrl.find("/api/v1/turn-config?token=token-secret-xyz&client_id=client-abc") != std::string::npos,
+                    "Query parameters formatted correctly in request URL");
+        TEST_ASSERT(fetchedCfg.turnUsername == "u1" && fetchedCfg.turnPassword == "p1", "Fetched credentials mapped into WebRtcConfig");
+        TEST_ASSERT(fetchedCfg.iceServers.size() == 2, "Both STUN and TURN URIs mapped");
+    }
+
+    // -------------------------------------------------------------
+    // 2. TC-E2E-01: Mock Loopback WebRTC P2P Transfer (10 MB Memory Buffer)
+    // -------------------------------------------------------------
+    {
+        CoordinatorOptions opts;
+        opts.mockLoopbackMode = true;
+
+        auto initiator = std::make_shared<WebRtcSessionCoordinator>("alice", WebRtcConfig{}, opts);
+        auto joiner = std::make_shared<WebRtcSessionCoordinator>("bob", WebRtcConfig{}, opts);
+
+        initiator->enableLoopbackMode(joiner);
+
+        TEST_ASSERT(initiator->startAsInitiator("ws://mock/ws"), "Initiator start succeeds");
+        std::string roomCode = initiator->getRoomCode();
+        TEST_ASSERT(!roomCode.empty(), "Initiator creates room code");
+
+        TEST_ASSERT(joiner->startAsJoiner("ws://mock/ws", roomCode), "Joiner start succeeds with room code");
+
+        auto txChan = initiator->waitForConnection(std::chrono::milliseconds(2000));
+        auto rxChan = joiner->waitForConnection(std::chrono::milliseconds(2000));
+
+        TEST_ASSERT(txChan != nullptr && txChan->isConnected(), "Initiator WebRTC channel is connected");
+        TEST_ASSERT(rxChan != nullptr && rxChan->isConnected(), "Joiner WebRTC channel is connected");
+
+        // Transfer 10 MB in-memory buffer
+        constexpr size_t kPayloadSize = 10 * 1024 * 1024;
+        std::vector<uint8_t> sendData(kPayloadSize);
+        for (size_t i = 0; i < kPayloadSize; ++i) {
+            sendData[i] = static_cast<uint8_t>((i * 7 + 13) & 0xFF);
+        }
+
+        std::vector<uint8_t> recvData(kPayloadSize, 0);
+        std::atomic<bool> rxDone{false};
+        std::atomic<bool> rxError{false};
+
+        std::thread rxThread([&]() {
+            if (!rxChan->receiveExact(recvData.data(), kPayloadSize, 5000)) {
+                rxError.store(true);
+            }
+            rxDone.store(true);
+        });
+
+        // Send in 64 KB slices
+        constexpr size_t kChunkSize = 64 * 1024;
+        size_t totalSent = 0;
+        bool sendOk = true;
+        while (totalSent < kPayloadSize) {
+            size_t toSend = std::min(kChunkSize, kPayloadSize - totalSent);
+            if (!txChan->sendExact(sendData.data() + totalSent, toSend)) {
+                sendOk = false;
+                break;
+            }
+            totalSent += toSend;
+        }
+
+        rxThread.join();
+
+        TEST_ASSERT(sendOk, "10 MB in-memory send completed successfully");
+        TEST_ASSERT(!rxError.load() && rxDone.load(), "10 MB in-memory receive completed successfully");
+        TEST_ASSERT(sendData == recvData, "10 MB buffer data matches identically between peers");
+        TEST_ASSERT(txChan->getBytesSent() == kPayloadSize, "Channel bytesSent matches 10 MB");
+        TEST_ASSERT(rxChan->getBytesReceived() == kPayloadSize, "Channel bytesReceived matches 10 MB");
+
+        initiator->close();
+        joiner->close();
+    }
+
+    // -------------------------------------------------------------
+    // 3. TC-E2E-02: Real File Transfer Over WebRTC DataChannel Pipeline
+    // -------------------------------------------------------------
+    std::filesystem::path rootDir = "./unit_test_webrtc_e2e_tmp";
+    std::filesystem::remove_all(rootDir);
+    std::filesystem::create_directories(rootDir);
+    std::filesystem::path sendDir = rootDir / "sender";
+    std::filesystem::path recvDir = rootDir / "receiver";
+    std::filesystem::create_directories(sendDir);
+    std::filesystem::create_directories(recvDir);
+
+    FileChunkHasher hasher;
+    TransferEngine engine;
+
+    {
+        CoordinatorOptions opts;
+        opts.mockLoopbackMode = true;
+
+        auto initiator = std::make_shared<WebRtcSessionCoordinator>("alice", WebRtcConfig{}, opts);
+        auto joiner = std::make_shared<WebRtcSessionCoordinator>("bob", WebRtcConfig{}, opts);
+        initiator->enableLoopbackMode(joiner);
+
+        initiator->startAsInitiator("ws://mock/ws");
+        joiner->startAsJoiner("ws://mock/ws", initiator->getRoomCode());
+
+        auto txChan = initiator->waitForConnection(std::chrono::milliseconds(2000));
+        auto rxChan = joiner->waitForConnection(std::chrono::milliseconds(2000));
+
+        // Create a 4 MB binary file
+        std::string largeFile = (sendDir / "webrtc_payload.bin").string();
+        {
+            std::ofstream out(largeFile, std::ios::binary);
+            std::vector<char> blk(64 * 1024);
+            for (size_t i = 0; i < blk.size(); ++i) blk[i] = static_cast<char>((i * 17) & 0xFF);
+            for (int chunk = 0; chunk < 64; ++chunk) {
+                out.write(blk.data(), blk.size());
+            }
+        }
+        std::string expectedHash = hasher.computeFullFileHash(largeFile).value();
+
+        TransferOptions txOpts;
+        TransferOptions rxOpts;
+        std::atomic<bool> rxFinished{false};
+        std::string rxErr;
+        std::atomic<bool> rxSuccess{false};
+
+        std::thread rxThread([&]() {
+            bool ok = engine.receiveFileOverChannel(
+                "rx-task-rtc",
+                recvDir.string(),
+                rxChan,
+                rxOpts,
+                nullptr,
+                nullptr,
+                &rxErr
+            );
+            rxSuccess.store(ok);
+            rxFinished.store(true);
+        });
+
+        std::string txErr;
+        bool txOk = engine.sendFileOverChannel(
+            "tx-task-rtc",
+            largeFile,
+            txChan,
+            txOpts,
+            nullptr,
+            nullptr,
+            &txErr
+        );
+
+        rxThread.join();
+
+        TEST_ASSERT(txOk, "sendFileOverChannel succeeded over WebRTC channel");
+        TEST_ASSERT(rxSuccess.load(), "receiveFileOverChannel succeeded over WebRTC channel");
+        TEST_ASSERT(std::filesystem::exists(recvDir / "webrtc_payload.bin"), "Received file exists in destination directory");
+        TEST_ASSERT(!std::filesystem::exists(recvDir / "webrtc_payload.bin.part"), "Temporary .part file cleaned up");
+        TEST_ASSERT(hasher.computeFullFileHash((recvDir / "webrtc_payload.bin").string()).value() == expectedHash,
+                    "Destination file SHA-256 matches source hash exactly");
+
+        initiator->close();
+        joiner->close();
+    }
+
+    // -------------------------------------------------------------
+    // 4. TC-E2E-03: Cancellation Handling Over WebRTC DataChannel
+    // -------------------------------------------------------------
+    {
+        CoordinatorOptions opts;
+        opts.mockLoopbackMode = true;
+
+        auto initiator = std::make_shared<WebRtcSessionCoordinator>("alice", WebRtcConfig{}, opts);
+        auto joiner = std::make_shared<WebRtcSessionCoordinator>("bob", WebRtcConfig{}, opts);
+        initiator->enableLoopbackMode(joiner);
+
+        initiator->startAsInitiator("ws://mock/ws");
+        joiner->startAsJoiner("ws://mock/ws", initiator->getRoomCode());
+
+        auto txChan = initiator->waitForConnection(std::chrono::milliseconds(2000));
+        auto rxChan = joiner->waitForConnection(std::chrono::milliseconds(2000));
+
+        std::string cancelFile = (sendDir / "webrtc_cancel.bin").string();
+        {
+            std::ofstream out(cancelFile, std::ios::binary);
+            std::vector<char> blk(64 * 1024, 'X');
+            for (int i = 0; i < 16; ++i) out.write(blk.data(), blk.size());
+        }
+
+        std::atomic<bool> cancelToken{false};
+        TransferOptions txOpts;
+        txOpts.speedLimitKbps = 32; // throttle to allow mid-stream abort
+        TransferOptions rxOpts;
+
+        std::atomic<bool> rxFinished{false};
+        std::atomic<bool> rxSuccess{true};
+        std::string rxErr;
+
+        std::thread rxThread([&]() {
+            bool ok = engine.receiveFileOverChannel(
+                "rx-cancel-task",
+                recvDir.string(),
+                rxChan,
+                rxOpts,
+                nullptr,
+                &cancelToken,
+                &rxErr
+            );
+            rxSuccess.store(ok);
+            rxFinished.store(true);
+        });
+
+        std::string txErr;
+        bool txOk = engine.sendFileOverChannel(
+            "tx-cancel-task",
+            cancelFile,
+            txChan,
+            txOpts,
+            [&](const TransferProgressUpdate& upd) {
+                if (upd.bytesTransferred > 0) {
+                    cancelToken.store(true);
+                }
+            },
+            &cancelToken,
+            &txErr
+        );
+
+        rxThread.join();
+
+        TEST_ASSERT(!txOk, "Cancelled sendFileOverChannel returns false");
+        TEST_ASSERT(!rxSuccess.load(), "Cancelled receiveFileOverChannel returns false");
+        TEST_ASSERT(!std::filesystem::exists(recvDir / "webrtc_cancel.bin.part"), "Cancelled .part file purged cleanly");
+        TEST_ASSERT(!std::filesystem::exists(recvDir / "webrtc_cancel.bin"), "Destination file was not created on abort");
+
+        initiator->close();
+        joiner->close();
+    }
+
+    // -------------------------------------------------------------
+    // 5. TC-E2E-04: Duplicate Auto-Rename Over WebRTC DataChannel
+    // -------------------------------------------------------------
+    {
+        CoordinatorOptions opts;
+        opts.mockLoopbackMode = true;
+
+        auto initiator = std::make_shared<WebRtcSessionCoordinator>("alice", WebRtcConfig{}, opts);
+        auto joiner = std::make_shared<WebRtcSessionCoordinator>("bob", WebRtcConfig{}, opts);
+        initiator->enableLoopbackMode(joiner);
+
+        initiator->startAsInitiator("ws://mock/ws");
+        joiner->startAsJoiner("ws://mock/ws", initiator->getRoomCode());
+
+        auto txChan = initiator->waitForConnection(std::chrono::milliseconds(2000));
+        auto rxChan = joiner->waitForConnection(std::chrono::milliseconds(2000));
+
+        std::string originalFile = (sendDir / "webrtc_payload.bin").string();
+        std::string expectedHash = hasher.computeFullFileHash(originalFile).value();
+
+        TransferOptions rxOpts;
+        rxOpts.autoRenameDuplicates = true;
+
+        std::atomic<bool> rxFinished{false};
+        std::atomic<bool> rxSuccess{false};
+        std::string rxErr;
+
+        std::thread rxThread([&]() {
+            bool ok = engine.receiveFileOverChannel(
+                "rx-dup-task",
+                recvDir.string(),
+                rxChan,
+                rxOpts,
+                nullptr,
+                nullptr,
+                &rxErr
+            );
+            rxSuccess.store(ok);
+            rxFinished.store(true);
+        });
+
+        std::string txErr;
+        bool txOk = engine.sendFileOverChannel(
+            "tx-dup-task",
+            originalFile,
+            txChan,
+            TransferOptions{},
+            nullptr,
+            nullptr,
+            &txErr
+        );
+
+        rxThread.join();
+
+        TEST_ASSERT(txOk, "Duplicate send succeeds over WebRTC channel");
+        TEST_ASSERT(rxSuccess.load(), "Duplicate receive succeeds over WebRTC channel");
+        TEST_ASSERT(std::filesystem::exists(recvDir / "webrtc_payload (1).bin"), "Auto-renamed file webrtc_payload (1).bin exists");
+        TEST_ASSERT(!std::filesystem::exists(recvDir / "webrtc_payload (1).bin.part"), "Auto-renamed .part file removed");
+        TEST_ASSERT(hasher.computeFullFileHash((recvDir / "webrtc_payload (1).bin").string()).value() == expectedHash,
+                    "Auto-renamed file SHA-256 matches original file");
+
+        initiator->close();
+        joiner->close();
+    }
+
+    std::filesystem::remove_all(rootDir);
+    return true;
+}
+
+bool testMilestone2D_EndToEndWebRtcTransfer() {
+    // -------------------------------------------------------------
+    // 1. TC-ROOM-NORMALIZATION: Crockford Base32 Room Code Normalization
+    // -------------------------------------------------------------
+    {
+        std::string err;
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-K8M4-P9X2", &err) == "DROP-K8M4-P9X2",
+                    "Standard formatted room code passes unchanged");
+        TEST_ASSERT(err.empty(), "No error on valid room code");
+
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("k8m4p9x2") == "DROP-K8M4-P9X2",
+                    "Lowercase raw 8-character code normalized with DROP- prefix");
+
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode(" drop - k8m4 - p9x2 ") == "DROP-K8M4-P9X2",
+                    "Delimiters and whitespace stripped and standardized");
+
+        // Optical confusion corrections: O -> 0, I/L -> 1
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-K8M4-P9O2") == "DROP-K8M4-P902",
+                    "Letter 'O' automatically corrected to '0'");
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-K8M4-P9I2") == "DROP-K8M4-P912",
+                    "Letter 'I' automatically corrected to '1'");
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-K8M4-P9L2") == "DROP-K8M4-P912",
+                    "Letter 'L' automatically corrected to '1'");
+
+        // Invalid characters and invalid length
+        std::string badCharErr;
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-K8M4-P9U2", &badCharErr).empty(),
+                    "Letter 'U' rejected (excluded from Crockford alphabet)");
+        TEST_ASSERT(!badCharErr.empty(), "Descriptive error returned for invalid character");
+
+        std::string shortErr;
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-SHORT", &shortErr).empty(),
+                    "Short code rejected");
+        TEST_ASSERT(!shortErr.empty(), "Descriptive error returned for short code");
+    }
+
+    // -------------------------------------------------------------
+    // 2. TC-E2E-100MB: 100 MB Binary Transfer with Backpressure Flow Control & SHA-256 Validation
+    // -------------------------------------------------------------
+    {
+        std::filesystem::path rootDir = "./unit_test_webrtc_100mb_tmp";
+        std::filesystem::remove_all(rootDir);
+        std::filesystem::create_directories(rootDir);
+        std::filesystem::path sendDir = rootDir / "sender";
+        std::filesystem::path recvDir = rootDir / "receiver";
+        std::filesystem::create_directories(sendDir);
+        std::filesystem::create_directories(recvDir);
+
+        std::string largeFile = (sendDir / "big_payload_100mb.bin").string();
+        constexpr size_t kFileSize = 100 * 1024 * 1024; // 100 MB
+        constexpr size_t kBlockSize = 256 * 1024;       // 256 KB blocks
+        {
+            std::ofstream out(largeFile, std::ios::binary);
+            std::vector<char> block(kBlockSize);
+            for (size_t i = 0; i < kBlockSize; ++i) {
+                block[i] = static_cast<char>((i * 31 + 7) & 0xFF);
+            }
+            size_t written = 0;
+            while (written < kFileSize) {
+                size_t toWrite = std::min(kBlockSize, kFileSize - written);
+                out.write(block.data(), toWrite);
+                written += toWrite;
+            }
+        }
+
+        FileChunkHasher hasher;
+        std::string expectedHash = hasher.computeFullFileHash(largeFile).value();
+        TEST_ASSERT(!expectedHash.empty(), "Computed SHA-256 hash for 100 MB source file");
+
+        CoordinatorOptions opts;
+        opts.mockLoopbackMode = true;
+
+        auto initiator = std::make_shared<WebRtcSessionCoordinator>("alice-100mb", WebRtcConfig{}, opts);
+        auto joiner = std::make_shared<WebRtcSessionCoordinator>("bob-100mb", WebRtcConfig{}, opts);
+        initiator->enableLoopbackMode(joiner);
+
+        initiator->startAsInitiator("ws://mock/ws");
+        joiner->startAsJoiner("ws://mock/ws", initiator->getRoomCode());
+
+        auto txChan = initiator->waitForConnection(std::chrono::milliseconds(3000));
+        auto rxChan = joiner->waitForConnection(std::chrono::milliseconds(3000));
+        TEST_ASSERT(txChan != nullptr && rxChan != nullptr, "Channels connected for 100 MB transfer");
+
+        TransferEngine engine;
+        TransferOptions txOpts;
+        TransferOptions rxOpts;
+        rxOpts.autoRenameDuplicates = true;
+
+        std::atomic<bool> rxDone{false};
+        std::atomic<bool> rxSuccess{false};
+        std::string rxErr;
+
+        std::thread rxThread([&]() {
+            bool ok = engine.receiveFileOverChannel(
+                "rx-task-100mb",
+                recvDir.string(),
+                rxChan,
+                rxOpts,
+                nullptr,
+                nullptr,
+                &rxErr
+            );
+            rxSuccess.store(ok);
+            rxDone.store(true);
+        });
+
+        std::string txErr;
+        std::atomic<uint64_t> lastProgress{0};
+        bool txOk = engine.sendFileOverChannel(
+            "tx-task-100mb",
+            largeFile,
+            txChan,
+            txOpts,
+            [&](const TransferProgressUpdate& upd) {
+                lastProgress.store(upd.bytesTransferred);
+            },
+            nullptr,
+            &txErr
+        );
+
+        rxThread.join();
+
+        TEST_ASSERT(txOk, "sendFileOverChannel succeeded for 100 MB payload");
+        TEST_ASSERT(rxSuccess.load(), "receiveFileOverChannel succeeded for 100 MB payload");
+        TEST_ASSERT(std::filesystem::exists(recvDir / "big_payload_100mb.bin"),
+                    "100 MB received file exists on disk");
+        TEST_ASSERT(!std::filesystem::exists(recvDir / "big_payload_100mb.bin.part"),
+                    "Temporary .part file cleaned up after 100 MB transfer");
+
+        std::string actualHash = hasher.computeFullFileHash((recvDir / "big_payload_100mb.bin").string()).value();
+        TEST_ASSERT(actualHash == expectedHash, "100 MB destination file SHA-256 matches source hash exactly");
+        TEST_ASSERT(txChan->getBytesSent() >= kFileSize, "Transmitter recorded full 100 MB payload sent plus protocol frames");
+        TEST_ASSERT(rxChan->getBytesReceived() >= kFileSize, "Receiver recorded full 100 MB payload received plus protocol frames");
+
+        initiator->close();
+        joiner->close();
+        std::filesystem::remove_all(rootDir);
+    }
+
+    // -------------------------------------------------------------
+    // 3. TC-E2E-REAL-SIGNALING: Live Go Signaling Daemon E2E Integration Test
+    // -------------------------------------------------------------
+    {
+        std::string srvBin = "./backend/signaling/bin/signaling-server";
+        if (std::filesystem::exists(srvBin)) {
+            uint16_t testPort = 18090;
+            std::string cmd = "PORT=" + std::to_string(testPort) + " " + srvBin + " >/dev/null 2>&1 & echo $!";
+            FILE* pipe = popen(cmd.c_str(), "r");
+            pid_t serverPid = 0;
+            if (pipe) {
+                char buf[64];
+                if (fgets(buf, sizeof(buf), pipe)) {
+                    serverPid = std::stoi(buf);
+                }
+                pclose(pipe);
+            }
+
+            struct ServerProcessGuard {
+                pid_t pid{0};
+                ~ServerProcessGuard() {
+                    if (pid > 0) {
+                        kill(pid, SIGTERM);
+                    }
+                }
+            } procGuard{serverPid};
+
+            HttpClient http;
+            bool serverUp = false;
+            for (int i = 0; i < 50; ++i) {
+                HttpResponse resp = http.get("http://127.0.0.1:" + std::to_string(testPort) + "/healthz");
+                if (resp.success && resp.statusCode == 200) {
+                    serverUp = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            TEST_ASSERT(serverUp, "Go Signaling Server spawned and healthy on port 18090");
+
+            if (serverUp) {
+                std::string wsUrl = "ws://127.0.0.1:" + std::to_string(testPort) + "/ws/signaling";
+
+                CoordinatorOptions opts;
+                opts.signalingTimeoutMs = 5000;
+                opts.signalingHttpUrl = "http://127.0.0.1:" + std::to_string(testPort);
+
+                auto initiator = std::make_shared<WebRtcSessionCoordinator>("alice-live", WebRtcConfig{}, opts);
+                auto joiner = std::make_shared<WebRtcSessionCoordinator>("bob-live", WebRtcConfig{}, opts);
+
+                std::atomic<bool> roomCreated{false};
+                std::string generatedCode;
+                initiator->onRoomReady = [&](const std::string& code) {
+                    generatedCode = code;
+                    roomCreated.store(true);
+                };
+
+#if defined(LANDROP_HAVE_WEBRTC)
+                bool initOk = initiator->startAsInitiator(wsUrl);
+                TEST_ASSERT(initOk, "Initiator connected to live Go signaling server");
+
+                for (int i = 0; i < 50 && !roomCreated.load(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                TEST_ASSERT(roomCreated.load() && !generatedCode.empty(),
+                            "Go server created Crockford room code: " + generatedCode);
+                TEST_ASSERT(generatedCode.rfind("DROP-", 0) == 0,
+                            "Generated room code has DROP- prefix");
+
+                std::atomic<bool> joinerPeerJoined{false};
+                joiner->onPeerJoined = [&](const std::string&) {
+                    joinerPeerJoined.store(true);
+                };
+
+                bool joinOk = joiner->startAsJoiner(wsUrl, generatedCode);
+                TEST_ASSERT(joinOk, "Joiner connected and requested room via live Go signaling server");
+
+                for (int i = 0; i < 50 && !joinerPeerJoined.load(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                TEST_ASSERT(joinerPeerJoined.load(), "Go server relayed PEER_JOINED to both clients");
+
+                // Test peer disconnect notification
+                joiner->close();
+                for (int i = 0; i < 50; ++i) {
+                    if (initiator->getState() == CoordinatorState::Disconnected) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                TEST_ASSERT(initiator->getState() == CoordinatorState::Disconnected,
+                            "Initiator transitioned to Disconnected upon peer drop");
+
+                initiator->close();
+#else
+                bool initOk = initiator->startAsInitiator(wsUrl);
+                TEST_ASSERT(!initOk, "Initiator safely rejects WebSocket connect when WebRTC is not compiled in");
+                std::string normErr;
+                std::string normCode = WebRtcSessionCoordinator::normalizeRoomCode("k8m4p9x2", &normErr);
+                bool joinOk = joiner->startAsJoiner(wsUrl, normCode);
+                TEST_ASSERT(!joinOk, "Joiner safely rejects WebSocket connect when WebRTC is not compiled in");
+#endif
+            }
+
+            if (serverPid > 0) {
+                kill(serverPid, SIGTERM);
+            }
+        }
+    }
+
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -1807,7 +3160,14 @@ int main() {
         {"OpenSSL TLS Transport & Device Authentication", testTlsTransportAndDeviceAuth},
         {"REST/HTTP Client & Cloud Quota Synchronization", testHttpClientAndCloudSync},
         {"Live P2P Socket Pipeline & Error Recovery", testLiveSocketTransferPipeline},
-        {"TransferEngine Core Pipeline & Hardened Security", testTransferEngine}
+        {"TransferEngine Core Pipeline & Hardened Security", testTransferEngine},
+        {"Wire Protocol v2 Framing, Integrity & Backward Compatibility", testWireProtocolV2},
+        {"ITransportChannel & TcpSocketChannel Abstraction", testTransportChannelAbstraction},
+        {"libdatachannel WebRtcDataChannel Integration Preparation", testWebRtcDataChannelPrep},
+        {"WebRTC Flow Control & Candidate Queueing (TC-RTC-01, TC-RTC-02)", testCandidateQueueAndBackpressure},
+        {"SignalingClient Protocol & Glare Resolution (TC-RTC-03)", testSignalingClientAndGlareResolution},
+        {"Global WebRTC Transfer Pipeline & Coturn Config (Milestone 2C)", testMilestone2C_GlobalWebRtcTransferPipeline},
+        {"End-to-End File Transfer & Live Signaling Verification (Milestone 2D)", testMilestone2D_EndToEndWebRtcTransfer}
     };
 
 

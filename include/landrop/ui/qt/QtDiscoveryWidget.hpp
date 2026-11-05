@@ -28,6 +28,7 @@ public:
     QPushButton* getRefreshBtn() const { return m_refreshBtn; }
     QPushButton* getDirectConnectBtn() const { return m_directConnectBtn; }
     QPushButton* getLoopbackBtn() const { return m_loopbackBtn; }
+    QPushButton* getGlobalP2pBtn() const { return m_globalP2pBtn; }
     QLabel* getStatusLabel() const { return m_statusLabel; }
 
     // IDiscoveryView overrides
@@ -39,12 +40,15 @@ public:
 
 signals:
     void sendFileRequested(const QString& peerId, const QString& filePath);
+    void hostRoomRequested(const QString& filePath = QString());
+    void joinRoomRequested(const QString& roomCode);
 
 private slots:
     void onRefreshClicked();
     void onToggleScanClicked();
     void onDirectConnectClicked();
     void onAddLoopbackClicked();
+    void onGlobalP2pClicked();
     void onDeviceSendClicked(const QString& peerId);
     void onDeviceRemoveClicked(const QString& peerId);
 
@@ -57,12 +61,14 @@ private:
     QPushButton* m_refreshBtn{nullptr};
     QPushButton* m_directConnectBtn{nullptr};
     QPushButton* m_loopbackBtn{nullptr};
+    QPushButton* m_globalP2pBtn{nullptr};
 
     QWidget* m_cardsContainer{nullptr};
     QVBoxLayout* m_cardsLayout{nullptr};
     QWidget* m_emptyStateWidget{nullptr};
 
     std::vector<DeviceViewModel> m_lastDevices;
+    bool m_isScanning{true};
 
     void setupUi();
     void updateMyDeviceCard();

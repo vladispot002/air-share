@@ -1,5 +1,6 @@
 #include "landrop/ui/qt/QtDiscoveryWidget.hpp"
 #include "landrop/ui/DiscoveryPresenter.hpp"
+#include "landrop/core/WebRtcSessionCoordinator.hpp"
 
 #include <QFileDialog>
 #include <QInputDialog>
@@ -78,9 +79,14 @@ void QtDiscoveryWidget::setupUi() {
     m_directConnectBtn = new QPushButton("🌐 Direct IP Connect", this);
     connect(m_directConnectBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onDirectConnectClicked);
 
+    m_globalP2pBtn = new QPushButton("🌍 Global P2P Room", this);
+    m_globalP2pBtn->setToolTip("Establish global P2P transfer over WebRTC via 8-character Crockford room code");
+    connect(m_globalP2pBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onGlobalP2pClicked);
+
     actionsLayout->addWidget(m_refreshBtn);
     actionsLayout->addWidget(m_scanToggleBtn);
     actionsLayout->addWidget(m_directConnectBtn);
+    actionsLayout->addWidget(m_globalP2pBtn);
     actionsLayout->addStretch();
     mainLayout->addLayout(actionsLayout);
 
@@ -292,10 +298,9 @@ void QtDiscoveryWidget::onRefreshClicked() {
 }
 
 void QtDiscoveryWidget::onToggleScanClicked() {
-    static bool isScanning = true;
-    isScanning = !isScanning;
+    m_isScanning = !m_isScanning;
     if (m_presenter) {
-        m_presenter->onToggleScanClicked(isScanning);
+        m_presenter->onToggleScanClicked(m_isScanning);
     }
 }
 
@@ -343,6 +348,47 @@ void QtDiscoveryWidget::onDirectConnectClicked() {
 void QtDiscoveryWidget::onAddLoopbackClicked() {
     if (m_presenter) {
         m_presenter->onDirectConnectRequested("127.0.0.1", 8848);
+    }
+}
+
+void QtDiscoveryWidget::onGlobalP2pClicked() {
+    QMessageBox msgBox(this);
+    msgBox.setWindowTitle("Global P2P File Transfer (WebRTC)");
+    msgBox.setText("<b>Global P2P File Transfer (Zero-Config)</b><br><br>"
+                   "Transfer files across NATs and firewalls anywhere in the world without registration.<br>"
+                   "Choose an action:");
+    auto* sendBtn = msgBox.addButton("Send File (Host Room)", QMessageBox::ActionRole);
+    auto* receiveBtn = msgBox.addButton("Receive File (Enter Code)", QMessageBox::ActionRole);
+    auto* pairBtn = msgBox.addButton("Pair Devices (Host Room)", QMessageBox::ActionRole);
+    msgBox.addButton(QMessageBox::Cancel);
+
+    msgBox.exec();
+
+    if (msgBox.clickedButton() == sendBtn) {
+        QString filePath = QFileDialog::getOpenFileName(this, "Select File to Send via Global P2P");
+        if (filePath.isEmpty()) return;
+        emit hostRoomRequested(filePath);
+    } else if (msgBox.clickedButton() == receiveBtn) {
+        bool ok = false;
+        QString input = QInputDialog::getText(
+            this,
+            "Receive File (Join Global P2P Room)",
+            "Enter 8-Character Room Code from Sender (e.g. DROP-K8M4-P9X2):",
+            QLineEdit::Normal,
+            "",
+            &ok
+        );
+        if (ok && !input.trimmed().isEmpty()) {
+            std::string err;
+            std::string norm = WebRtcSessionCoordinator::normalizeRoomCode(input.trimmed().toStdString(), &err);
+            if (norm.empty()) {
+                QMessageBox::warning(this, "Invalid Room Code", QString::fromStdString("Error: " + err));
+                return;
+            }
+            emit joinRoomRequested(QString::fromStdString(norm));
+        }
+    } else if (msgBox.clickedButton() == pairBtn) {
+        emit hostRoomRequested(QString());
     }
 }
 

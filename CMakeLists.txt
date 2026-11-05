@@ -21,6 +21,12 @@ set(LANDROP_CORE_SOURCES
     src/core/SharedFolderManager.cpp
     src/core/TlsContext.cpp
     src/core/HttpClient.cpp
+    src/core/WireProtocolV2.cpp
+    src/core/TcpSocketChannel.cpp
+    src/core/WebRtcDataChannel.cpp
+    src/core/SignalingClient.cpp
+    src/core/TurnConfigClient.cpp
+    src/core/WebRtcSessionCoordinator.cpp
     src/peers/NetworkPeer.cpp
     src/peers/LocalPeer.cpp
     src/peers/CloudPeer.cpp
@@ -64,6 +70,12 @@ if (WIN32)
     target_link_libraries(landrop_core PUBLIC ws2_32 iphlpapi)
 else()
     target_link_libraries(landrop_core PUBLIC pthread)
+endif()
+
+# Optional WebRTC / libdatachannel integration module
+include(cmake/LibDataChannel.cmake)
+if (LANDROP_ENABLE_WEBRTC)
+    target_link_libraries(landrop_core PUBLIC LibDataChannel::LibDataChannel)
 endif()
 
 # Qt 6 UI Sources & Headers
