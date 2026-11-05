@@ -53,29 +53,46 @@ uint64_t WebRtcDataChannel::getBytesReceived() const {
     return m_bytesReceived.load();
 }
 
+void WebRtcDataChannel::notifyBufferedAmountLow() {
+    m_txCv.notify_all();
+}
+
 bool WebRtcDataChannel::sendExact(const uint8_t* data, size_t length) {
-    if (!m_connected.load() || !data) {
+    if (!m_connected.load() || !data || length == 0) {
         return false;
     }
 
-    // Backpressure flow control check against max configured send buffer
-    if (getBufferedAmount() + length > m_config.maxBufferedAmount) {
+    if (length > m_config.maxBufferedAmount) {
         return false;
+    }
+
+    // Non-failing backpressure flow control (TC-RTC-02):
+    // If send queue exceeds max limit, block and wait for buffer drain rather than failing
+    if (getBufferedAmount() + length > m_config.maxBufferedAmount) {
+        std::unique_lock<std::mutex> lock(m_txMutex);
+        bool drained = m_txCv.wait_for(lock, std::chrono::milliseconds(2000), [&]() {
+            return !m_connected.load() || (getBufferedAmount() + length <= m_config.maxBufferedAmount);
+        });
+
+        if (!drained || !m_connected.load()) {
+            return false;
+        }
     }
 
 #if defined(LANDROP_HAVE_WEBRTC)
-    if (m_dataChannel && m_dataChannel->isOpen()) {
+    if (m_dataChannel) {
+        if (!m_dataChannel->isOpen()) {
+            return false;
+        }
         bool ok = m_dataChannel->send(reinterpret_cast<const std::byte*>(data), length);
         if (ok) {
             m_bytesSent += length;
         }
         return ok;
     }
-    return false;
-#else
+#endif
     m_bytesSent += length;
     return true;
-#endif
 }
 
 bool WebRtcDataChannel::receiveExact(
@@ -131,6 +148,40 @@ void WebRtcDataChannel::injectIncomingBytes(const uint8_t* data, size_t length) 
     m_rxCv.notify_all();
 }
 
+#if defined(LANDROP_HAVE_WEBRTC)
+void WebRtcDataChannel::setRealDataChannel(
+    std::shared_ptr<rtc::DataChannel> channel,
+    std::shared_ptr<rtc::PeerConnection> pc
+) {
+    m_dataChannel = std::move(channel);
+    m_peerConnection = std::move(pc);
+
+    if (m_dataChannel) {
+        m_dataChannel->setBufferedAmountLowThreshold(m_config.lowWaterMark);
+
+        m_dataChannel->onBufferedAmountLow([this]() {
+            notifyBufferedAmountLow();
+        });
+
+        m_dataChannel->onMessage([this](auto msg) {
+            if (std::holds_alternative<rtc::binary>(msg)) {
+                auto& bin = std::get<rtc::binary>(msg);
+                injectIncomingBytes(reinterpret_cast<const uint8_t*>(bin.data()), bin.size());
+            } else if (std::holds_alternative<std::string>(msg)) {
+                auto& str = std::get<std::string>(msg);
+                injectIncomingBytes(reinterpret_cast<const uint8_t*>(str.data()), str.size());
+            }
+        });
+
+        m_dataChannel->onClosed([this]() {
+            close();
+        });
+
+        m_connected.store(m_dataChannel->isOpen());
+    }
+}
+#endif
+
 void WebRtcDataChannel::close() {
     m_connected.store(false);
 #if defined(LANDROP_HAVE_WEBRTC)
@@ -149,6 +200,7 @@ void WebRtcDataChannel::close() {
         m_rxOffset = 0;
     }
     m_rxCv.notify_all();
+    m_txCv.notify_all();
 }
 
 } // namespace landrop

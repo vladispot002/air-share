@@ -25,6 +25,8 @@
 #include "landrop/core/WireProtocolV2.hpp"
 #include "landrop/core/TcpSocketChannel.hpp"
 #include "landrop/core/WebRtcDataChannel.hpp"
+#include "landrop/core/CandidateQueue.hpp"
+#include "landrop/core/SignalingClient.hpp"
 
 
 #include "landrop/peers/NetworkPeer.hpp"
@@ -2153,6 +2155,268 @@ static bool testWebRtcDataChannelPrep() {
     return true;
 }
 
+static bool testCandidateQueueAndBackpressure() {
+    // ----------------------------------------------------
+    // TC-RTC-01: Remote ICE Candidate Queueing & Drain
+    // ----------------------------------------------------
+    CandidateQueue queue;
+    TEST_ASSERT(!queue.isRemoteDescriptionSet(), "Initially remote description not set");
+    TEST_ASSERT(queue.pendingCount() == 0, "Initially queue empty");
+
+    std::vector<std::string> deliveredCandidates;
+    queue.setOnCandidateReady([&](const IceCandidate& cand) {
+        deliveredCandidates.push_back(cand.candidate);
+    });
+
+    // Push 3 candidates before remote description is set
+    queue.push({"candidate:1 1 UDP 2122260223 192.168.1.50 50000 typ host", "0", 0});
+    queue.push({"candidate:2 1 UDP 2122260224 192.168.1.50 50001 typ host", "0", 1});
+    queue.push({"candidate:3 1 UDP 1686052607 198.51.100.1 50002 typ srflx", "0", 2});
+
+    TEST_ASSERT(queue.pendingCount() == 3, "All 3 trickle candidates buffered before description set");
+    TEST_ASSERT(deliveredCandidates.empty(), "No candidates delivered prior to remote description set");
+
+    // Set remote description -> should drain all 3 in order
+    queue.setRemoteDescriptionSet();
+    TEST_ASSERT(queue.isRemoteDescriptionSet(), "Remote description marked set");
+    TEST_ASSERT(queue.pendingCount() == 0, "Queue drained");
+    TEST_ASSERT(deliveredCandidates.size() == 3, "All 3 candidates flushed upon description set");
+    TEST_ASSERT(deliveredCandidates[0].find("50000") != std::string::npos, "First candidate matches order");
+    TEST_ASSERT(deliveredCandidates[1].find("50001") != std::string::npos, "Second candidate matches order");
+    TEST_ASSERT(deliveredCandidates[2].find("50002") != std::string::npos, "Third candidate matches order");
+
+    // Subsequent candidates arriving after remote description is set should be delivered immediately
+    queue.push({"candidate:4 1 UDP 2122260225 10.0.0.1 50003 typ host", "0", 3});
+    TEST_ASSERT(deliveredCandidates.size() == 4, "Post-description candidate delivered immediately without buffering");
+    TEST_ASSERT(queue.pendingCount() == 0, "Queue remains empty for immediate candidates");
+
+    // ----------------------------------------------------
+    // TC-RTC-02: WebRTC Backpressure Flow Control (Non-failing cv wait)
+    // ----------------------------------------------------
+    WebRtcConfig bpConfig;
+    bpConfig.maxBufferedAmount = 1000;
+    bpConfig.lowWaterMark = 400;
+
+    WebRtcDataChannel bpChannel("peer-bp-test", "bp-channel", bpConfig);
+    bpChannel.setConnected(true);
+
+    // Initial state: buffer empty
+    uint8_t payload[300];
+    std::memset(payload, 0x55, sizeof(payload));
+
+    // Send 300 bytes -> fits in 1000
+    TEST_ASSERT(bpChannel.sendExact(payload, sizeof(payload)), "Initial 300B send succeeds");
+
+    // Simulate socket/channel buffering: set buffered amount to 800 bytes
+    bpChannel.setBufferedAmount(800);
+
+    // Attempt to send 300 bytes -> 800 + 300 = 1100 > 1000 maxBufferedAmount.
+    // It must block until buffered amount drops to lowWaterMark!
+    std::atomic<bool> sendStarted{false};
+    std::atomic<bool> sendCompleted{false};
+    std::atomic<bool> sendResult{false};
+
+    std::thread senderThread([&]() {
+        sendStarted.store(true);
+        bool ok = bpChannel.sendExact(payload, sizeof(payload));
+        sendResult.store(ok);
+        sendCompleted.store(true);
+    });
+
+    // Wait for thread to enter wait state
+    while (!sendStarted.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    TEST_ASSERT(!sendCompleted.load(), "sendExact() is blocked on backpressure condition variable");
+
+    // Simulate drain event: buffer drops to 300 (< lowWaterMark 400)
+    bpChannel.setBufferedAmount(300); // setBufferedAmount calls notifyBufferedAmountLow() automatically
+
+    senderThread.join();
+
+    TEST_ASSERT(sendCompleted.load(), "sendExact() resumed after buffer drained");
+    TEST_ASSERT(sendResult.load(), "sendExact() succeeded after backpressure relief");
+
+    bpChannel.close();
+    return true;
+}
+
+static bool testSignalingClientAndGlareResolution() {
+    using namespace landrop::signaling;
+
+    SignalingClient alice("alice_client");
+    SignalingClient bob("bob_client");
+
+    std::vector<std::string> aliceSentEnvelopes;
+    std::vector<std::string> bobSentEnvelopes;
+
+    alice.setCustomSender([&](const std::string& msg) {
+        aliceSentEnvelopes.push_back(msg);
+        return true;
+    });
+
+    bob.setCustomSender([&](const std::string& msg) {
+        bobSentEnvelopes.push_back(msg);
+        return true;
+    });
+
+    TEST_ASSERT(alice.connect("ws://localhost:8080/ws"), "Alice connected with custom sender");
+    TEST_ASSERT(bob.connect("ws://localhost:8080/ws"), "Bob connected with custom sender");
+
+    // 1. Room Creation by Alice (Initiator)
+    TEST_ASSERT(alice.createRoom(), "Alice sends CREATE_ROOM");
+    TEST_ASSERT(aliceSentEnvelopes.size() == 1, "Alice sent 1 message");
+    TEST_ASSERT(aliceSentEnvelopes[0].find("CREATE_ROOM") != std::string::npos, "Envelope contains CREATE_ROOM action");
+
+    // Simulate Server -> Alice: ROOM_CREATED
+    std::string roomCreatedMsg = R"({
+        "version": "2.0",
+        "action": "ROOM_CREATED",
+        "client_id": "alice_client",
+        "timestamp": 1700000000,
+        "payload": {
+            "room_code": "DROP-TEST-7788",
+            "room_token": "token_alice_secret",
+            "role": "initiator",
+            "expires_at": 1700000600
+        }
+    })";
+
+    bool aliceRoomCreatedCalled = false;
+    alice.onRoomCreated = [&](const RoomCreatedInfo& info) {
+        aliceRoomCreatedCalled = true;
+        if (info.roomCode != "DROP-TEST-7788" || info.roomToken != "token_alice_secret" || info.role != "initiator") {
+            aliceRoomCreatedCalled = false;
+        }
+    };
+
+    TEST_ASSERT(alice.handleIncomingMessage(roomCreatedMsg), "Alice parsed ROOM_CREATED");
+    TEST_ASSERT(aliceRoomCreatedCalled, "onRoomCreated fired with valid data");
+    TEST_ASSERT(alice.getRole() == Role::Initiator, "Alice role is Initiator");
+    TEST_ASSERT(alice.getRoomCode() == "DROP-TEST-7788", "Alice room code stored");
+    TEST_ASSERT(alice.getRoomToken() == "token_alice_secret", "Alice room token stored");
+
+    // 2. Bob joins room
+    TEST_ASSERT(bob.joinRoom("DROP-TEST-7788"), "Bob sends JOIN_ROOM");
+    TEST_ASSERT(bobSentEnvelopes.size() == 1, "Bob sent 1 message");
+    TEST_ASSERT(bobSentEnvelopes[0].find("JOIN_ROOM") != std::string::npos, "Envelope contains JOIN_ROOM action");
+    TEST_ASSERT(bobSentEnvelopes[0].find("DROP-TEST-7788") != std::string::npos, "Envelope contains room code");
+
+    // Simulate Server -> Bob: PEER_JOINED (Bob as joiner)
+    std::string bobPeerJoinedMsg = R"({
+        "version": "2.0",
+        "action": "PEER_JOINED",
+        "client_id": "bob_client",
+        "timestamp": 1700000001,
+        "payload": {
+            "room_code": "DROP-TEST-7788",
+            "peer_id": "alice_client",
+            "role": "joiner",
+            "room_token": "token_bob_secret"
+        }
+    })";
+
+    bool bobPeerJoinedCalled = false;
+    bob.onPeerJoined = [&](const PeerJoinedInfo& info) {
+        if (info.peerId == "alice_client" && info.role == "joiner") {
+            bobPeerJoinedCalled = true;
+        }
+    };
+
+    TEST_ASSERT(bob.handleIncomingMessage(bobPeerJoinedMsg), "Bob parsed PEER_JOINED");
+    TEST_ASSERT(bobPeerJoinedCalled, "Bob onPeerJoined fired");
+    TEST_ASSERT(bob.getRole() == Role::Joiner, "Bob role is Joiner");
+    TEST_ASSERT(bob.getPeerId() == "alice_client", "Bob peer ID is Alice");
+
+    // 3. Glare Resolution Enforcement (TC-RTC-03)
+    // Rule: Joiner (Bob) cannot initiate SDP_OFFER
+    std::string bobErrorReceived;
+    bob.onError = [&](const ErrorInfo& err) {
+        bobErrorReceived = err.code;
+    };
+    TEST_ASSERT(!bob.sendSdpOffer("v=0\r\no=bob..."), "Bob (Joiner) sendSdpOffer is rejected to prevent glare");
+    TEST_ASSERT(bobErrorReceived == "ERR_GLARE_VIOLATION", "Bob received ERR_GLARE_VIOLATION for offer attempt");
+
+    // Rule: Initiator (Alice) cannot send SDP_ANSWER
+    std::string aliceErrorReceived;
+    alice.onError = [&](const ErrorInfo& err) {
+        aliceErrorReceived = err.code;
+    };
+    TEST_ASSERT(!alice.sendSdpAnswer("v=0\r\no=alice..."), "Alice (Initiator) sendSdpAnswer is rejected to prevent glare");
+    TEST_ASSERT(aliceErrorReceived == "ERR_GLARE_VIOLATION", "Alice received ERR_GLARE_VIOLATION for answer attempt");
+
+    // 4. Valid Negotiation Flow:
+    // Alice sends SDP offer -> Bob
+    size_t alicePrevSent = aliceSentEnvelopes.size();
+    TEST_ASSERT(alice.sendSdpOffer("v=0\r\no=alice 1000 2 IN IP4 127.0.0.1...", "e2ee_alice_key_hex"), "Alice sends SDP offer");
+    TEST_ASSERT(aliceSentEnvelopes.size() == alicePrevSent + 1, "Alice transmitted offer envelope");
+
+    bool bobReceivedOffer = false;
+    bob.onSdpOffer = [&](const SdpInfo& sdp) {
+        if (sdp.type == "offer" && sdp.sdp.find("alice") != std::string::npos && sdp.e2eePublicKey == "e2ee_alice_key_hex") {
+            bobReceivedOffer = true;
+        }
+    };
+    TEST_ASSERT(bob.handleIncomingMessage(aliceSentEnvelopes.back()), "Bob handles Alice's offer");
+    TEST_ASSERT(bobReceivedOffer, "Bob onSdpOffer fired with correct offer details");
+
+    // Bob sends SDP answer -> Alice
+    size_t bobPrevSent = bobSentEnvelopes.size();
+    TEST_ASSERT(bob.sendSdpAnswer("v=0\r\no=bob 2000 2 IN IP4 127.0.0.1...", "e2ee_bob_key_hex"), "Bob sends SDP answer");
+    TEST_ASSERT(bobSentEnvelopes.size() == bobPrevSent + 1, "Bob transmitted answer envelope");
+
+    bool aliceReceivedAnswer = false;
+    alice.onSdpAnswer = [&](const SdpInfo& sdp) {
+        if (sdp.type == "answer" && sdp.sdp.find("bob") != std::string::npos && sdp.e2eePublicKey == "e2ee_bob_key_hex") {
+            aliceReceivedAnswer = true;
+        }
+    };
+    TEST_ASSERT(alice.handleIncomingMessage(bobSentEnvelopes.back()), "Alice handles Bob's answer");
+    TEST_ASSERT(aliceReceivedAnswer, "Alice onSdpAnswer fired with correct answer details");
+
+    // ICE Candidate Exchange
+    TEST_ASSERT(alice.sendIceCandidate("candidate:udp:127.0.0.1:40000", "data", 0), "Alice sends candidate");
+    bool bobReceivedCandidate = false;
+    bob.onIceCandidate = [&](const IceCandidateInfo& cand) {
+        if (cand.candidate == "candidate:udp:127.0.0.1:40000" && cand.sdpMid == "data" && cand.sdpMLineIndex == 0) {
+            bobReceivedCandidate = true;
+        }
+    };
+    TEST_ASSERT(bob.handleIncomingMessage(aliceSentEnvelopes.back()), "Bob handles ICE candidate");
+    TEST_ASSERT(bobReceivedCandidate, "Bob onIceCandidate fired");
+
+    // 5. Leave Room and State Reset
+    bool alicePeerLeftCalled = false;
+    alice.onPeerLeft = [&](const PeerLeftInfo& info) {
+        if (info.reason == "user_exit") {
+            alicePeerLeftCalled = true;
+        }
+    };
+
+    TEST_ASSERT(bob.leaveRoom("user_exit"), "Bob leaves room");
+    TEST_ASSERT(bob.getRole() == Role::Unknown, "Bob role reset to Unknown after leaving");
+    TEST_ASSERT(bob.getRoomCode().empty(), "Bob room code cleared after leaving");
+
+    std::string peerLeftEnv = R"({
+        "version": "2.0",
+        "action": "PEER_LEFT",
+        "client_id": "server",
+        "timestamp": 1700000005,
+        "payload": {
+            "peer_id": "bob_client",
+            "reason": "user_exit"
+        }
+    })";
+    TEST_ASSERT(alice.handleIncomingMessage(peerLeftEnv), "Alice handles PEER_LEFT");
+    TEST_ASSERT(alicePeerLeftCalled, "Alice onPeerLeft fired");
+    TEST_ASSERT(alice.getPeerId().empty(), "Alice peerId cleared");
+
+    alice.disconnect();
+    bob.disconnect();
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -2187,7 +2451,9 @@ int main() {
         {"TransferEngine Core Pipeline & Hardened Security", testTransferEngine},
         {"Wire Protocol v2 Framing, Integrity & Backward Compatibility", testWireProtocolV2},
         {"ITransportChannel & TcpSocketChannel Abstraction", testTransportChannelAbstraction},
-        {"libdatachannel WebRtcDataChannel Integration Preparation", testWebRtcDataChannelPrep}
+        {"libdatachannel WebRtcDataChannel Integration Preparation", testWebRtcDataChannelPrep},
+        {"WebRTC Flow Control & Candidate Queueing (TC-RTC-01, TC-RTC-02)", testCandidateQueueAndBackpressure},
+        {"SignalingClient Protocol & Glare Resolution (TC-RTC-03)", testSignalingClientAndGlareResolution}
     };
 
 

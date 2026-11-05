@@ -24,6 +24,7 @@ set(LANDROP_CORE_SOURCES
     src/core/WireProtocolV2.cpp
     src/core/TcpSocketChannel.cpp
     src/core/WebRtcDataChannel.cpp
+    src/core/SignalingClient.cpp
     src/peers/NetworkPeer.cpp
     src/peers/LocalPeer.cpp
     src/peers/CloudPeer.cpp

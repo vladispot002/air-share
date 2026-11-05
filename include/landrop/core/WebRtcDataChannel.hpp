@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <functional>
+#include <memory>
 
 #if defined(LANDROP_HAVE_WEBRTC)
 #include <rtc/rtc.hpp>
@@ -26,13 +27,15 @@ struct WebRtcConfig {
     std::string turnServer;
     std::string turnUsername;
     std::string turnPassword;
-    uint32_t maxBufferedAmount{16 * 1024 * 1024}; // 16 MB max send queue
+    uint32_t maxBufferedAmount{16 * 1024 * 1024}; // 16 MB max send queue ceiling
+    uint32_t lowWaterMark{4 * 1024 * 1024};      // 4 MB low-water mark for resume
     bool enableMdns{true};
 };
 
 /**
  * @brief WebRTC DataChannel implementation of ITransportChannel.
- * Provides transparent high-performance P2P file transfers through NAT/Firewalls.
+ * Provides transparent high-performance P2P file transfers through NAT/Firewalls
+ * with non-failing backpressure flow control (TC-RTC-02).
  */
 class WebRtcDataChannel : public ITransportChannel {
 public:
@@ -65,19 +68,34 @@ public:
 
     void close() override;
 
-    // Simulation & signaling hooks for testing / pipeline integration
+    // Flow control & backpressure synchronization
+    void notifyBufferedAmountLow();
+
+    // Simulation & testing hooks
     void setConnected(bool connected) {
         m_connected.store(connected);
     }
 
     void setBufferedAmount(size_t amount) {
         m_bufferedAmount.store(amount);
+        if (amount <= m_config.lowWaterMark) {
+            notifyBufferedAmountLow();
+        }
     }
 
     void injectIncomingBytes(const uint8_t* data, size_t length);
 
     const WebRtcConfig& getConfig() const { return m_config; }
     const std::string& getLabel() const { return m_label; }
+
+#if defined(LANDROP_HAVE_WEBRTC)
+    void setRealDataChannel(
+        std::shared_ptr<rtc::DataChannel> channel,
+        std::shared_ptr<rtc::PeerConnection> pc
+    );
+    std::shared_ptr<rtc::DataChannel> getDataChannel() const { return m_dataChannel; }
+    std::shared_ptr<rtc::PeerConnection> getPeerConnection() const { return m_peerConnection; }
+#endif
 
 private:
     std::string m_peerId;
@@ -92,6 +110,9 @@ private:
     std::condition_variable m_rxCv;
     std::vector<uint8_t> m_rxBuffer;
     size_t m_rxOffset{0};
+
+    mutable std::mutex m_txMutex;
+    std::condition_variable m_txCv;
 
 #if defined(LANDROP_HAVE_WEBRTC)
     std::shared_ptr<rtc::PeerConnection> m_peerConnection;
