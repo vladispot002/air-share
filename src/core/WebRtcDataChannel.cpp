@@ -38,8 +38,13 @@ bool WebRtcDataChannel::isEncrypted() const {
 
 size_t WebRtcDataChannel::getBufferedAmount() const {
 #if defined(LANDROP_HAVE_WEBRTC)
-    if (m_dataChannel && m_dataChannel->isOpen()) {
-        return m_dataChannel->bufferedAmount();
+    std::shared_ptr<rtc::DataChannel> dc;
+    {
+        std::lock_guard<std::mutex> lock(m_channelMutex);
+        dc = m_dataChannel;
+    }
+    if (dc && dc->isOpen()) {
+        return dc->bufferedAmount();
     }
 #endif
     return m_bufferedAmount.load();
@@ -66,29 +71,46 @@ bool WebRtcDataChannel::sendExact(const uint8_t* data, size_t length) {
         return false;
     }
 
-    // Non-failing backpressure flow control (TC-RTC-02):
-    // If send queue exceeds max limit, block and wait for buffer drain rather than failing
+    // Non-failing backpressure flow control (TC-RTC-02 / F-03 / F-07):
+    // Wait in slices up to 30 seconds for buffer drain rather than failing
     if (getBufferedAmount() + length > m_config.maxBufferedAmount) {
         std::unique_lock<std::mutex> lock(m_txMutex);
-        bool drained = m_txCv.wait_for(lock, std::chrono::milliseconds(2000), [&]() {
-            return !m_connected.load() || (getBufferedAmount() + length <= m_config.maxBufferedAmount);
-        });
-
-        if (!drained || !m_connected.load()) {
-            return false;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (getBufferedAmount() + length > m_config.maxBufferedAmount) {
+            if (!m_connected.load()) {
+                return false;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            m_txCv.wait_for(lock, std::chrono::milliseconds(100), [&]() {
+                return !m_connected.load() || (getBufferedAmount() + length <= m_config.maxBufferedAmount);
+            });
         }
     }
 
 #if defined(LANDROP_HAVE_WEBRTC)
-    if (m_dataChannel) {
-        if (!m_dataChannel->isOpen()) {
+    std::shared_ptr<rtc::DataChannel> dc;
+    {
+        std::lock_guard<std::mutex> lock(m_channelMutex);
+        dc = m_dataChannel;
+    }
+    if (dc) {
+        if (!dc->isOpen()) {
             return false;
         }
-        bool ok = m_dataChannel->send(reinterpret_cast<const std::byte*>(data), length);
+        bool ok = dc->send(reinterpret_cast<const std::byte*>(data), length);
         if (ok) {
             m_bytesSent += length;
         }
         return ok;
+    } else if (!m_simulatedMode) {
+        // Prevent silent data loss if no real channel is attached in production (F-05)
+        return false;
+    }
+#else
+    if (!m_simulatedMode) {
+        return false;
     }
 #endif
     m_bytesSent += length;
@@ -153,17 +175,31 @@ void WebRtcDataChannel::setRealDataChannel(
     std::shared_ptr<rtc::DataChannel> channel,
     std::shared_ptr<rtc::PeerConnection> pc
 ) {
-    m_dataChannel = std::move(channel);
-    m_peerConnection = std::move(pc);
+    {
+        std::lock_guard<std::mutex> lock(m_channelMutex);
+        m_dataChannel = std::move(channel);
+        m_peerConnection = std::move(pc);
+    }
 
-    if (m_dataChannel) {
-        m_dataChannel->setBufferedAmountLowThreshold(m_config.lowWaterMark);
+    std::shared_ptr<rtc::DataChannel> dc;
+    {
+        std::lock_guard<std::mutex> lock(m_channelMutex);
+        dc = m_dataChannel;
+    }
 
-        m_dataChannel->onBufferedAmountLow([this]() {
+    if (dc) {
+        dc->setBufferedAmountLowThreshold(m_config.lowWaterMark);
+
+        // F-04: Register onOpen callback so m_connected transitions to true when channel opens
+        dc->onOpen([this]() {
+            m_connected.store(true);
+        });
+
+        dc->onBufferedAmountLow([this]() {
             notifyBufferedAmountLow();
         });
 
-        m_dataChannel->onMessage([this](auto msg) {
+        dc->onMessage([this](auto msg) {
             if (std::holds_alternative<rtc::binary>(msg)) {
                 auto& bin = std::get<rtc::binary>(msg);
                 injectIncomingBytes(reinterpret_cast<const uint8_t*>(bin.data()), bin.size());
@@ -173,25 +209,43 @@ void WebRtcDataChannel::setRealDataChannel(
             }
         });
 
-        m_dataChannel->onClosed([this]() {
+        dc->onClosed([this]() {
             close();
         });
 
-        m_connected.store(m_dataChannel->isOpen());
+        m_connected.store(dc->isOpen());
     }
+}
+
+std::shared_ptr<rtc::DataChannel> WebRtcDataChannel::getDataChannel() const {
+    std::lock_guard<std::mutex> lock(m_channelMutex);
+    return m_dataChannel;
+}
+
+std::shared_ptr<rtc::PeerConnection> WebRtcDataChannel::getPeerConnection() const {
+    std::lock_guard<std::mutex> lock(m_channelMutex);
+    return m_peerConnection;
 }
 #endif
 
 void WebRtcDataChannel::close() {
     m_connected.store(false);
 #if defined(LANDROP_HAVE_WEBRTC)
-    if (m_dataChannel) {
-        m_dataChannel->close();
-        m_dataChannel.reset();
+    std::shared_ptr<rtc::DataChannel> dc;
+    std::shared_ptr<rtc::PeerConnection> pc;
+    {
+        std::lock_guard<std::mutex> lock(m_channelMutex);
+        dc = std::move(m_dataChannel);
+        pc = std::move(m_peerConnection);
     }
-    if (m_peerConnection) {
-        m_peerConnection->close();
-        m_peerConnection.reset();
+    // F-06: resetCallbacks to prevent use-after-free on teardown
+    if (dc) {
+        dc->resetCallbacks();
+        dc->close();
+    }
+    if (pc) {
+        pc->resetCallbacks();
+        pc->close();
     }
 #endif
     {

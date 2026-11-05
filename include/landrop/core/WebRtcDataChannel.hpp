@@ -76,6 +76,14 @@ public:
         m_connected.store(connected);
     }
 
+    void setSimulatedMode(bool sim) {
+        m_simulatedMode = sim;
+    }
+
+    bool isSimulatedMode() const {
+        return m_simulatedMode;
+    }
+
     void setBufferedAmount(size_t amount) {
         m_bufferedAmount.store(amount);
         if (amount <= m_config.lowWaterMark) {
@@ -93,8 +101,8 @@ public:
         std::shared_ptr<rtc::DataChannel> channel,
         std::shared_ptr<rtc::PeerConnection> pc
     );
-    std::shared_ptr<rtc::DataChannel> getDataChannel() const { return m_dataChannel; }
-    std::shared_ptr<rtc::PeerConnection> getPeerConnection() const { return m_peerConnection; }
+    std::shared_ptr<rtc::DataChannel> getDataChannel() const;
+    std::shared_ptr<rtc::PeerConnection> getPeerConnection() const;
 #endif
 
 private:
@@ -102,6 +110,7 @@ private:
     std::string m_label;
     WebRtcConfig m_config;
     std::atomic<bool> m_connected{false};
+    bool m_simulatedMode{false};
     std::atomic<size_t> m_bufferedAmount{0};
     std::atomic<uint64_t> m_bytesSent{0};
     std::atomic<uint64_t> m_bytesReceived{0};
@@ -115,6 +124,7 @@ private:
     std::condition_variable m_txCv;
 
 #if defined(LANDROP_HAVE_WEBRTC)
+    mutable std::mutex m_channelMutex;
     std::shared_ptr<rtc::PeerConnection> m_peerConnection;
     std::shared_ptr<rtc::DataChannel> m_dataChannel;
 #endif

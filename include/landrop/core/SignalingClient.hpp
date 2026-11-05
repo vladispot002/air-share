@@ -125,6 +125,7 @@ private:
     SendFunc m_customSender;
 
 #if defined(LANDROP_HAVE_WEBRTC)
+    mutable std::mutex m_wsMutex;
     std::shared_ptr<rtc::WebSocket> m_ws;
 #endif
 };

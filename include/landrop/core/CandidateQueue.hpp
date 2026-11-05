@@ -23,48 +23,69 @@ struct IceCandidate {
  */
 class CandidateQueue {
 public:
+    static constexpr size_t kMaxQueueCapacity = 256;
+
     CandidateQueue() = default;
     ~CandidateQueue() = default;
 
     /**
-     * @brief Pushes an incoming candidate. If remote description is already set,
-     * the candidate callback is fired immediately. Otherwise, it is buffered.
+     * @brief Pushes an incoming candidate. If remote description is already set and
+     * a callback is registered, the candidate is delivered sequentially. Otherwise, it is buffered.
      */
-    void push(IceCandidate cand) {
-        std::function<void(const IceCandidate&)> callback;
+    bool push(IceCandidate cand) {
+        std::unique_lock<std::recursive_mutex> deliveryLock(m_deliveryMutex);
+        std::vector<IceCandidate> toDeliver;
+        std::function<void(const IceCandidate&)> cb;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_remoteDescriptionSet) {
-                callback = m_onCandidateReady;
-            } else {
+            if (!m_remoteDescriptionSet || !m_onCandidateReady) {
+                if (m_queue.size() >= kMaxQueueCapacity) {
+                    return false; // Bounded capacity: mitigate DoS flood (F-12)
+                }
                 m_queue.push(std::move(cand));
-                return;
+                return true;
+            }
+            cb = m_onCandidateReady;
+            while (!m_queue.empty()) {
+                toDeliver.push_back(std::move(m_queue.front()));
+                m_queue.pop();
+            }
+            toDeliver.push_back(std::move(cand));
+        }
+
+        if (cb) {
+            for (const auto& c : toDeliver) {
+                cb(c);
             }
         }
-        if (callback) {
-            callback(cand);
-        }
+        return true;
     }
 
     /**
-     * @brief Marks remote description as set and drains all buffered candidates
-     * sequentially to the registered callback.
+     * @brief Marks remote description as set. If a callback is registered, drains all
+     * buffered candidates sequentially. If not yet registered, candidates are preserved
+     * in queue until setOnCandidateReady is called (F-11).
      */
     void setRemoteDescriptionSet() {
-        std::vector<IceCandidate> pending;
-        std::function<void(const IceCandidate&)> callback;
+        std::unique_lock<std::recursive_mutex> deliveryLock(m_deliveryMutex);
+        std::vector<IceCandidate> toDeliver;
+        std::function<void(const IceCandidate&)> cb;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_remoteDescriptionSet = true;
-            callback = m_onCandidateReady;
+            if (!m_onCandidateReady) {
+                return; // Retain in queue until callback is attached (F-11)
+            }
+            cb = m_onCandidateReady;
             while (!m_queue.empty()) {
-                pending.push_back(std::move(m_queue.front()));
+                toDeliver.push_back(std::move(m_queue.front()));
                 m_queue.pop();
             }
         }
-        if (callback) {
-            for (const auto& cand : pending) {
-                callback(cand);
+
+        if (cb) {
+            for (const auto& cand : toDeliver) {
+                cb(cand);
             }
         }
     }
@@ -79,12 +100,35 @@ public:
         return m_queue.size();
     }
 
+    /**
+     * @brief Sets the callback for candidate delivery. If remote description is already
+     * set and candidates are buffered, drains them immediately (F-11).
+     */
     void setOnCandidateReady(std::function<void(const IceCandidate&)> cb) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_onCandidateReady = std::move(cb);
+        std::unique_lock<std::recursive_mutex> deliveryLock(m_deliveryMutex);
+        std::vector<IceCandidate> toDeliver;
+        std::function<void(const IceCandidate&)> targetCb;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_onCandidateReady = std::move(cb);
+            if (m_remoteDescriptionSet && m_onCandidateReady) {
+                targetCb = m_onCandidateReady;
+                while (!m_queue.empty()) {
+                    toDeliver.push_back(std::move(m_queue.front()));
+                    m_queue.pop();
+                }
+            }
+        }
+
+        if (targetCb) {
+            for (const auto& cand : toDeliver) {
+                targetCb(cand);
+            }
+        }
     }
 
     void reset() {
+        std::unique_lock<std::recursive_mutex> deliveryLock(m_deliveryMutex);
         std::lock_guard<std::mutex> lock(m_mutex);
         m_remoteDescriptionSet = false;
         while (!m_queue.empty()) {
@@ -94,6 +138,7 @@ public:
 
 private:
     mutable std::mutex m_mutex;
+    mutable std::recursive_mutex m_deliveryMutex;
     bool m_remoteDescriptionSet{false};
     std::queue<IceCandidate> m_queue;
     std::function<void(const IceCandidate&)> m_onCandidateReady;

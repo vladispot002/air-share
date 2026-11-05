@@ -2119,8 +2119,10 @@ static bool testWebRtcDataChannelPrep() {
     channel.setConnected(true);
     TEST_ASSERT(channel.isConnected(), "Channel connected");
 
-    // Send data
-    TEST_ASSERT(channel.sendExact(sampleData, sizeof(sampleData)), "Sent data on connected channel");
+    // Send data: fails if no real channel and not simulated (F-05)
+    TEST_ASSERT(!channel.sendExact(sampleData, sizeof(sampleData)), "Cannot send on connected channel without real channel in non-simulated mode");
+    channel.setSimulatedMode(true);
+    TEST_ASSERT(channel.sendExact(sampleData, sizeof(sampleData)), "Sent data on connected channel in simulated mode");
     TEST_ASSERT(channel.getBytesSent() == sizeof(sampleData), "Bytes sent accounted");
 
     // Backpressure: attempt to send > maxBufferedAmount
@@ -2190,6 +2192,27 @@ static bool testCandidateQueueAndBackpressure() {
     TEST_ASSERT(deliveredCandidates.size() == 4, "Post-description candidate delivered immediately without buffering");
     TEST_ASSERT(queue.pendingCount() == 0, "Queue remains empty for immediate candidates");
 
+    // Verify deferred callback registration (F-11)
+    CandidateQueue deferredQueue;
+    deferredQueue.push({"candidate:defer1", "0", 0});
+    deferredQueue.push({"candidate:defer2", "0", 1});
+    TEST_ASSERT(deferredQueue.pendingCount() == 2, "Candidates buffered without callback");
+    deferredQueue.setRemoteDescriptionSet();
+    TEST_ASSERT(deferredQueue.pendingCount() == 2, "Candidates retained when description set before callback");
+    std::vector<std::string> deferredDelivered;
+    deferredQueue.setOnCandidateReady([&](const IceCandidate& cand) {
+        deferredDelivered.push_back(cand.candidate);
+    });
+    TEST_ASSERT(deferredDelivered.size() == 2, "Candidates flushed immediately upon late callback attachment");
+    TEST_ASSERT(deferredQueue.pendingCount() == 0, "Deferred queue drained");
+
+    // Verify bounded capacity DoS prevention (F-12)
+    CandidateQueue boundedQueue;
+    for (size_t i = 0; i < CandidateQueue::kMaxQueueCapacity; ++i) {
+        TEST_ASSERT(boundedQueue.push({"cand", "0", 0}), "Push within capacity succeeds");
+    }
+    TEST_ASSERT(!boundedQueue.push({"overflow", "0", 0}), "Push beyond capacity is rejected");
+
     // ----------------------------------------------------
     // TC-RTC-02: WebRTC Backpressure Flow Control (Non-failing cv wait)
     // ----------------------------------------------------
@@ -2199,6 +2222,7 @@ static bool testCandidateQueueAndBackpressure() {
 
     WebRtcDataChannel bpChannel("peer-bp-test", "bp-channel", bpConfig);
     bpChannel.setConnected(true);
+    bpChannel.setSimulatedMode(true);
 
     // Initial state: buffer empty
     uint8_t payload[300];
@@ -2334,6 +2358,10 @@ static bool testSignalingClientAndGlareResolution() {
     std::string bobErrorReceived;
     bob.onError = [&](const ErrorInfo& err) {
         bobErrorReceived = err.code;
+        // F-01: Verify re-entrancy without deadlock
+        (void)bob.getRole();
+        (void)bob.getRoomCode();
+        (void)bob.getPeerId();
     };
     TEST_ASSERT(!bob.sendSdpOffer("v=0\r\no=bob..."), "Bob (Joiner) sendSdpOffer is rejected to prevent glare");
     TEST_ASSERT(bobErrorReceived == "ERR_GLARE_VIOLATION", "Bob received ERR_GLARE_VIOLATION for offer attempt");
@@ -2342,9 +2370,39 @@ static bool testSignalingClientAndGlareResolution() {
     std::string aliceErrorReceived;
     alice.onError = [&](const ErrorInfo& err) {
         aliceErrorReceived = err.code;
+        // F-01: Verify re-entrancy without deadlock
+        (void)alice.getRole();
+        (void)alice.getRoomCode();
+        (void)alice.getPeerId();
     };
     TEST_ASSERT(!alice.sendSdpAnswer("v=0\r\no=alice..."), "Alice (Initiator) sendSdpAnswer is rejected to prevent glare");
     TEST_ASSERT(aliceErrorReceived == "ERR_GLARE_VIOLATION", "Alice received ERR_GLARE_VIOLATION for answer attempt");
+
+    // F-09 Ingress Glare Check: Initiator must reject ingress SDP_OFFER
+    std::string aliceGlareError;
+    alice.onError = [&](const ErrorInfo& err) {
+        aliceGlareError = err.code;
+    };
+    TEST_ASSERT(!alice.handleIncomingMessage(R"({"version":"2.0","action":"SDP_OFFER","payload":{"type":"offer","sdp":"..."}})"), "Initiator rejects incoming SDP_OFFER to avoid glare");
+    TEST_ASSERT(aliceGlareError == "ERR_GLARE_VIOLATION", "Alice reports ERR_GLARE_VIOLATION on ingress offer");
+
+    // F-09 Ingress Glare Check: Joiner must reject ingress SDP_ANSWER
+    std::string bobGlareError;
+    bob.onError = [&](const ErrorInfo& err) {
+        bobGlareError = err.code;
+    };
+    TEST_ASSERT(!bob.handleIncomingMessage(R"({"version":"2.0","action":"SDP_ANSWER","payload":{"type":"answer","sdp":"..."}})"), "Joiner rejects incoming SDP_ANSWER to avoid glare");
+    TEST_ASSERT(bobGlareError == "ERR_GLARE_VIOLATION", "Bob reports ERR_GLARE_VIOLATION on ingress answer");
+
+    // F-02: Remote crash prevention on null/non-object payload
+    TEST_ASSERT(alice.handleIncomingMessage(R"({"version":"2.0","action":"ROOM_CREATED","payload":null})"), "Null payload does not throw exception or crash");
+
+    // F-08: Client role transition upon reuse
+    SignalingClient reusedClient("reused");
+    reusedClient.createRoom();
+    TEST_ASSERT(reusedClient.getRole() == Role::Initiator, "Role is Initiator after createRoom");
+    reusedClient.joinRoom("DROP-TEST-9999");
+    TEST_ASSERT(reusedClient.getRole() == Role::Joiner, "Role transitions to Joiner after joinRoom");
 
     // 4. Valid Negotiation Flow:
     // Alice sends SDP offer -> Bob
