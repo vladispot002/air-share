@@ -24,6 +24,7 @@
 #include "landrop/core/TransferEngine.hpp"
 #include "landrop/core/WireProtocolV2.hpp"
 #include "landrop/core/TcpSocketChannel.hpp"
+#include "landrop/core/WebRtcDataChannel.hpp"
 
 
 #include "landrop/peers/NetworkPeer.hpp"
@@ -2031,7 +2032,7 @@ static bool testTransportChannelAbstraction() {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-    clientChannel = std::make_shared<TcpSocketChannel>("127.0.0.1", testPort, false);
+    clientChannel = std::shared_ptr<TcpSocketChannel>(new TcpSocketChannel("127.0.0.1", testPort, false));
 
     if (serverThread.joinable()) {
         serverThread.join();
@@ -2075,6 +2076,61 @@ static bool testTransportChannelAbstraction() {
     return true;
 }
 
+static bool testWebRtcDataChannelPrep() {
+    using namespace landrop;
+
+    WebRtcConfig cfg;
+    cfg.iceServers = {"stun:stun.l.google.com:19302"};
+    cfg.maxBufferedAmount = 1024 * 1024; // 1MB limit for testing backpressure
+
+    WebRtcDataChannel channel("peer-uuid-webrtc-99", "lan-drop-file-channel", cfg);
+
+    TEST_ASSERT(channel.getTransportType() == TransportType::WebRtcDataChannel, "Transport type is WebRtcDataChannel");
+    TEST_ASSERT(channel.getRemoteAddress() == "peer-uuid-webrtc-99", "Remote address matches peer UUID");
+    TEST_ASSERT(channel.getRemotePort() == 0, "Remote port is 0 (ICE dynamic)");
+    TEST_ASSERT(channel.isEncrypted(), "WebRtcDataChannel reports encrypted (DTLS)");
+    TEST_ASSERT(!channel.isConnected(), "Initially disconnected");
+    TEST_ASSERT(channel.getLabel() == "lan-drop-file-channel", "Channel label matches");
+    TEST_ASSERT(channel.getConfig().iceServers.size() == 1, "Configured ICE servers present");
+
+    // Cannot send while disconnected
+    uint8_t sampleData[4] = {1, 2, 3, 4};
+    TEST_ASSERT(!channel.sendExact(sampleData, sizeof(sampleData)), "Cannot send on disconnected channel");
+
+    // Connect
+    channel.setConnected(true);
+    TEST_ASSERT(channel.isConnected(), "Channel connected");
+
+    // Send data
+    TEST_ASSERT(channel.sendExact(sampleData, sizeof(sampleData)), "Sent data on connected channel");
+    TEST_ASSERT(channel.getBytesSent() == sizeof(sampleData), "Bytes sent accounted");
+
+    // Backpressure: attempt to send > maxBufferedAmount
+    std::vector<uint8_t> oversizeData(2 * 1024 * 1024, 0xAA);
+    TEST_ASSERT(!channel.sendExact(oversizeData.data(), oversizeData.size()), "Backpressure rejects sending data exceeding maxBufferedAmount");
+
+    // Receive data
+    std::string testMsg = "WebRTC P2P Data Chunk Payload";
+    channel.injectIncomingBytes(reinterpret_cast<const uint8_t*>(testMsg.data()), testMsg.size());
+
+    std::vector<uint8_t> recvBuf(testMsg.size(), 0);
+    TEST_ASSERT(channel.receiveExact(recvBuf.data(), recvBuf.size(), 1000), "Received exact bytes from WebRtcDataChannel");
+    std::string recvStr(recvBuf.begin(), recvBuf.end());
+    TEST_ASSERT(recvStr == testMsg, "Received WebRTC payload matches sent payload");
+    TEST_ASSERT(channel.getBytesReceived() == testMsg.size(), "Bytes received accounted");
+
+    // Cancellation support
+    std::atomic<bool> cancelToken(true);
+    uint8_t cancelBuf[8];
+    TEST_ASSERT(!channel.receiveExact(cancelBuf, sizeof(cancelBuf), 500, &cancelToken), "Cancelled token aborts receiveExact immediately");
+
+    // Close channel
+    channel.close();
+    TEST_ASSERT(!channel.isConnected(), "Channel marked disconnected after close()");
+
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -2108,7 +2164,8 @@ int main() {
         {"Live P2P Socket Pipeline & Error Recovery", testLiveSocketTransferPipeline},
         {"TransferEngine Core Pipeline & Hardened Security", testTransferEngine},
         {"Wire Protocol v2 Framing, Integrity & Backward Compatibility", testWireProtocolV2},
-        {"ITransportChannel & TcpSocketChannel Abstraction", testTransportChannelAbstraction}
+        {"ITransportChannel & TcpSocketChannel Abstraction", testTransportChannelAbstraction},
+        {"libdatachannel WebRtcDataChannel Integration Preparation", testWebRtcDataChannelPrep}
     };
 
 
