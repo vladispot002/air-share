@@ -22,6 +22,7 @@
 #include "landrop/core/TlsContext.hpp"
 #include "landrop/core/HttpClient.hpp"
 #include "landrop/core/TransferEngine.hpp"
+#include "landrop/core/WireProtocolV2.hpp"
 
 
 #include "landrop/peers/NetworkPeer.hpp"
@@ -1837,6 +1838,156 @@ static bool testTransferEngine() {
     return true;
 }
 
+static bool testWireProtocolV2() {
+    using namespace landrop::protocol::v2;
+
+    // 1. Endianness checks
+    uint16_t val16 = 0x1234;
+    TEST_ASSERT(fromBigEndian16(toBigEndian16(val16)) == val16, "16-bit endianness round-trip");
+    uint32_t val32 = 0x12345678;
+    TEST_ASSERT(fromBigEndian32(toBigEndian32(val32)) == val32, "32-bit endianness round-trip");
+    uint64_t val64 = 0x0102030405060708ULL;
+    TEST_ASSERT(fromBigEndian64(toBigEndian64(val64)) == val64, "64-bit endianness round-trip");
+
+    // 2. IEEE 802.3 CRC32 verification against standard reference
+    const char* crcRef = "123456789";
+    uint32_t expectedCrc = 0xCBF43926;
+    uint32_t computedCrc = computeCrc32(reinterpret_cast<const uint8_t*>(crcRef), std::strlen(crcRef));
+    TEST_ASSERT(computedCrc == expectedCrc, "CRC32 matches IEEE 802.3 reference 0xCBF43926");
+
+    // 3. FrameHeader serialization & boundary/error protection
+    FrameHeader hdr;
+    hdr.version = PROTOCOL_VERSION;
+    hdr.msgType = MessageType::FileHeader;
+    hdr.payloadLength = 4096;
+    hdr.crc32OrSeq = 0xAABBCCDD;
+
+    uint8_t rawHdr[FRAME_HEADER_SIZE];
+    hdr.serialize(rawHdr);
+
+    FrameHeader parsedHdr;
+    std::string err;
+    TEST_ASSERT(FrameHeader::deserialize(rawHdr, parsedHdr, &err), "FrameHeader deserialized successfully");
+    TEST_ASSERT(parsedHdr.version == 2, "Parsed version is 2");
+    TEST_ASSERT(parsedHdr.msgType == MessageType::FileHeader, "Parsed msgType matches");
+    TEST_ASSERT(parsedHdr.payloadLength == 4096, "Parsed payloadLength matches");
+    TEST_ASSERT(parsedHdr.crc32OrSeq == 0xAABBCCDD, "Parsed CRC32 matches");
+
+    // Corrupted magic rejection
+    rawHdr[0] = 'X';
+    TEST_ASSERT(!FrameHeader::deserialize(rawHdr, parsedHdr, &err), "Rejects invalid magic");
+    TEST_ASSERT(!err.empty(), "Reports error message for invalid magic");
+    rawHdr[0] = 'L'; // restore
+
+    // Unsupported version rejection
+    uint16_t badVer = toBigEndian16(99);
+    std::memcpy(rawHdr + 4, &badVer, sizeof(uint16_t));
+    TEST_ASSERT(!FrameHeader::deserialize(rawHdr, parsedHdr, &err), "Rejects unsupported version");
+    uint16_t goodVer = toBigEndian16(PROTOCOL_VERSION);
+    std::memcpy(rawHdr + 4, &goodVer, sizeof(uint16_t)); // restore
+
+    // Oversized payload rejection (> 16MB)
+    uint32_t hugeLen = toBigEndian32(32 * 1024 * 1024);
+    std::memcpy(rawHdr + 8, &hugeLen, sizeof(uint32_t));
+    TEST_ASSERT(!FrameHeader::deserialize(rawHdr, parsedHdr, &err), "Rejects oversized payload (>16MB)");
+
+    // 4. HandshakeMessage
+    HandshakeMessage hs;
+    hs.capabilitiesFlags = 0x07;
+    hs.deviceId = "uuid-client-1234";
+    hs.deviceName = "MacBook Pro M3";
+    hs.clientVersion = "2.0.0-rc1";
+    std::vector<uint8_t> hsBytes = hs.serialize();
+
+    HandshakeMessage parsedHs;
+    TEST_ASSERT(HandshakeMessage::deserialize(hsBytes.data(), hsBytes.size(), parsedHs, &err), "Handshake parsed");
+    TEST_ASSERT(parsedHs.capabilitiesFlags == 0x07, "Handshake capabilities match");
+    TEST_ASSERT(parsedHs.deviceId == "uuid-client-1234", "Handshake deviceId matches");
+    TEST_ASSERT(parsedHs.deviceName == "MacBook Pro M3", "Handshake deviceName matches");
+    TEST_ASSERT(parsedHs.clientVersion == "2.0.0-rc1", "Handshake clientVersion matches");
+
+    // 5. FileHeaderMessage
+    FileHeaderMessage fh;
+    fh.fileSize = 104857600; // 100 MB
+    fh.chunkSize = 65536;
+    fh.flags = 0x01;
+    fh.fileName = "release_archive.tar.gz";
+    fh.sha256Hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    std::vector<uint8_t> fhBytes = fh.serialize();
+
+    FileHeaderMessage parsedFh;
+    TEST_ASSERT(FileHeaderMessage::deserialize(fhBytes.data(), fhBytes.size(), parsedFh, &err), "FileHeader parsed");
+    TEST_ASSERT(parsedFh.fileSize == 104857600, "File size matches");
+    TEST_ASSERT(parsedFh.chunkSize == 65536, "Chunk size matches");
+    TEST_ASSERT(parsedFh.flags == 0x01, "Flags match");
+    TEST_ASSERT(parsedFh.fileName == "release_archive.tar.gz", "Filename matches");
+    TEST_ASSERT(parsedFh.sha256Hex == fh.sha256Hex, "SHA-256 hex matches");
+
+    // Truncated buffer underflow check
+    TEST_ASSERT(!FileHeaderMessage::deserialize(fhBytes.data(), 10, parsedFh, &err), "Rejects truncated FileHeader buffer");
+
+    // 6. ChunkDataMessage & CRC integrity verification
+    ChunkDataMessage chunk;
+    chunk.offset = 131072;
+    chunk.chunkIndex = 2;
+    chunk.data = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80};
+    chunk.chunkCrc32 = computeCrc32(chunk.data.data(), chunk.data.size());
+    std::vector<uint8_t> chunkBytes = chunk.serialize();
+
+    ChunkDataMessage parsedChunk;
+    TEST_ASSERT(ChunkDataMessage::deserialize(chunkBytes.data(), chunkBytes.size(), parsedChunk, &err), "ChunkData parsed");
+    TEST_ASSERT(parsedChunk.offset == 131072, "Chunk offset matches");
+    TEST_ASSERT(parsedChunk.chunkIndex == 2, "Chunk index matches");
+    TEST_ASSERT(parsedChunk.data == chunk.data, "Chunk data payload matches");
+
+    // Tampered payload detection via CRC
+    chunkBytes.back() ^= 0xFF; // corrupt one byte
+    TEST_ASSERT(!ChunkDataMessage::deserialize(chunkBytes.data(), chunkBytes.size(), parsedChunk, &err), "Detects chunk corruption via CRC");
+
+    // 7. TransferAckMessage
+    TransferAckMessage ack;
+    ack.status = AckStatus::Success;
+    ack.receivedBytes = 104857600;
+    ack.message = "File verified and saved";
+    std::vector<uint8_t> ackBytes = ack.serialize();
+
+    TransferAckMessage parsedAck;
+    TEST_ASSERT(TransferAckMessage::deserialize(ackBytes.data(), ackBytes.size(), parsedAck, &err), "Ack parsed");
+    TEST_ASSERT(parsedAck.status == AckStatus::Success, "Ack status is Success");
+    TEST_ASSERT(parsedAck.receivedBytes == 104857600, "Ack receivedBytes matches");
+    TEST_ASSERT(parsedAck.message == "File verified and saved", "Ack message matches");
+
+    // 8. TransferCancelMessage
+    TransferCancelMessage cancel;
+    cancel.errorCode = 403;
+    cancel.reason = "Quota limit exceeded";
+    std::vector<uint8_t> cancelBytes = cancel.serialize();
+
+    TransferCancelMessage parsedCancel;
+    TEST_ASSERT(TransferCancelMessage::deserialize(cancelBytes.data(), cancelBytes.size(), parsedCancel, &err), "Cancel parsed");
+    TEST_ASSERT(parsedCancel.errorCode == 403, "Cancel error code matches");
+    TEST_ASSERT(parsedCancel.reason == "Quota limit exceeded", "Cancel reason matches");
+
+    // 9. Full wire frame builder
+    std::vector<uint8_t> pingPayload = {0x01, 0x02, 0x03, 0x04};
+    std::vector<uint8_t> wireFrame = buildFrame(MessageType::Ping, pingPayload);
+    TEST_ASSERT(wireFrame.size() == FRAME_HEADER_SIZE + pingPayload.size(), "Frame size matches header + payload");
+    FrameHeader pingHdr;
+    TEST_ASSERT(FrameHeader::deserialize(wireFrame.data(), pingHdr, &err), "Frame header parsed from wire frame");
+    TEST_ASSERT(pingHdr.msgType == MessageType::Ping, "Frame msgType is Ping");
+    TEST_ASSERT(pingHdr.payloadLength == pingPayload.size(), "Frame payloadLength matches");
+    TEST_ASSERT(pingHdr.crc32OrSeq == computeCrc32(pingPayload.data(), pingPayload.size()), "Frame CRC32 matches payload");
+
+    // 10. Legacy v1 detection & backward compatibility branching
+    const uint8_t v2Magic[4] = {'L', 'N', 'D', 'P'};
+    TEST_ASSERT(isProtocolV2(v2Magic), "Identifies v2 magic header");
+
+    const uint8_t v1HeaderSample[4] = {14, 0, 0, 0}; // Legacy v1 4-byte nameLen for "my_archive.zip"
+    TEST_ASSERT(!isProtocolV2(v1HeaderSample), "Distinguishes legacy v1 connection from v2");
+
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -1868,7 +2019,8 @@ int main() {
         {"OpenSSL TLS Transport & Device Authentication", testTlsTransportAndDeviceAuth},
         {"REST/HTTP Client & Cloud Quota Synchronization", testHttpClientAndCloudSync},
         {"Live P2P Socket Pipeline & Error Recovery", testLiveSocketTransferPipeline},
-        {"TransferEngine Core Pipeline & Hardened Security", testTransferEngine}
+        {"TransferEngine Core Pipeline & Hardened Security", testTransferEngine},
+        {"Wire Protocol v2 Framing, Integrity & Backward Compatibility", testWireProtocolV2}
     };
 
 
