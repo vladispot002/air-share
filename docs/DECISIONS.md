@@ -95,4 +95,15 @@
   3. **High-DPI & Contrast Guarantees**: Integer module scaling with `QPainter` eliminates interpolation blur. In dark mode, QR codes are isolated within an opaque white card container with a 4-module quiet zone to ensure camera decodability.
   4. **Full Web P2P Integration**: Web client automatically joins rooms detected in `window.location.hash`. Host Room button spawns an optical pairing modal, streaming files over `WebRtcCoordinator` and `FileStreamSender`/`FileStreamReceiver`.
 
+## ADR-016: Mobile Ecosystem C-ABI & Optical FFI Contract
+- **Status**: Approved & Specified.
+- **Context**: Milestone 3C requires embedding the high-performance C++20 core engine (`landrop_core`) into mobile application targets (iOS via Swift/ObjC FFI, Android via Kotlin/JNI or JNA, and Flutter via `dart:ffi`). Cross-language FFI requires strict memory boundaries, zero heap leaks across foreign runtimes, thread-safe context synchronization, non-blocking asynchronous WebRTC session management, zero external dependencies for QR generation and Crockford Base32 normalization, and deterministic negative integer error handling.
+- **Decision**:
+  1. **Caller-Allocated Buffer Model**: All string and binary outputs adhere to caller-allocated memory buffers (`char* out_buf, int buf_cap, int* out_required_len`). Callee never allocates memory for caller ownership. On insufficient capacity, functions guarantee null-termination, output required size, and return `LANDROP_ERR_BUFFER_TOO_SMALL` (-2).
+  2. **Synchronized Opaque Context**: `LandropMobileContext` wraps an internal `std::recursive_mutex` that synchronizes discovery, WebRTC session coordination, and active transfer pipelines across concurrent UI runloops and worker threads.
+  3. **Zero-Dependency Native QR & Base32 FFI Exports**: Directly expose `landrop::ui::QrCodeGenerator` (ISO/IEC 18004:2015) via `landrop_mobile_qr_generate_svg` and `landrop_mobile_qr_generate_matrix`, and `WebRtcSessionCoordinator::normalizeRoomCode` via `landrop_mobile_normalize_room_code`. Eliminates external mobile QR/Base32 dependencies.
+  4. **Non-Blocking Ephemeral WebRTC & Transfer Lifecycle**: Room creation, joining, and file transfers execute on dedicated C++ worker threads. Mobile runloops monitor lifecycle via `landrop_mobile_webrtc_get_state` and `landrop_mobile_webrtc_get_transfer_snapshot` or optional callback registration, ensuring 0ms blocking of main UI threads.
+  5. **Explicit Error Code Hierarchy**: Defined negative return codes (`0` Success, `-1` Invalid Arg, `-2` Buffer Too Small, `-3` Invalid Handle, `-4` Invalid Room Code, `-5` Network Disconnected, `-6` Timeout, `-7` Illegal State, `-8` Not Supported, `-9` File I/O, `-10` Cancelled, `-11` Checksum Mismatch).
+
+
 
