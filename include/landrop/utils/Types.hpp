@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include <string_view>
+#include <cctype>
 #include <cstdint>
 #include <vector>
 #include <chrono>

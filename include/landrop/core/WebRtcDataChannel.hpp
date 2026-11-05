@@ -70,6 +70,10 @@ public:
         m_connected.store(connected);
     }
 
+    void setBufferedAmount(size_t amount) {
+        m_bufferedAmount.store(amount);
+    }
+
     void injectIncomingBytes(const uint8_t* data, size_t length);
 
     const WebRtcConfig& getConfig() const { return m_config; }
@@ -87,6 +91,7 @@ private:
     mutable std::mutex m_rxMutex;
     std::condition_variable m_rxCv;
     std::vector<uint8_t> m_rxBuffer;
+    size_t m_rxOffset{0};
 
 #if defined(LANDROP_HAVE_WEBRTC)
     std::shared_ptr<rtc::PeerConnection> m_peerConnection;

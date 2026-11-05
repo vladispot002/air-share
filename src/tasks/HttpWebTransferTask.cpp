@@ -4,33 +4,34 @@
 #include <utility>
 #include <vector>
 #include <cstdio>
+#include <stdexcept>
 
 namespace landrop {
 
 static std::string generateSecureRandomPin() {
     uint32_t val = 0;
-    if (RAND_bytes(reinterpret_cast<unsigned char*>(&val), sizeof(val)) == 1) {
-        val = val % 1000000;
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%06u", val);
-        return std::string(buf);
+    if (RAND_bytes(reinterpret_cast<unsigned char*>(&val), sizeof(val)) != 1) {
+        throw std::runtime_error("CSPRNG failure: OpenSSL RAND_bytes failed for PIN generation");
     }
-    return "000000";
+    val = val % 1000000;
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%06u", val);
+    return std::string(buf);
 }
 
 static std::string generateSecureRandomToken(size_t numBytes = 16) {
     std::vector<unsigned char> buf(numBytes);
-    if (RAND_bytes(buf.data(), static_cast<int>(numBytes)) == 1) {
-        std::string hex;
-        hex.reserve(numBytes * 2);
-        static const char hexChars[] = "0123456789abcdef";
-        for (unsigned char b : buf) {
-            hex.push_back(hexChars[(b >> 4) & 0x0F]);
-            hex.push_back(hexChars[b & 0x0F]);
-        }
-        return hex;
+    if (RAND_bytes(buf.data(), static_cast<int>(numBytes)) != 1) {
+        throw std::runtime_error("CSPRNG failure: OpenSSL RAND_bytes failed for token generation");
     }
-    return "token-fallback";
+    std::string hex;
+    hex.reserve(numBytes * 2);
+    static const char hexChars[] = "0123456789abcdef";
+    for (unsigned char b : buf) {
+        hex.push_back(hexChars[(b >> 4) & 0x0F]);
+        hex.push_back(hexChars[b & 0x0F]);
+    }
+    return hex;
 }
 
 HttpWebTransferTask::HttpWebTransferTask(
@@ -50,7 +51,7 @@ HttpWebTransferTask::HttpWebTransferTask(
 
 bool HttpWebTransferTask::initialize() {
     m_state = TransferState::Transferring;
-    m_currentDownloadCount = 0;
+    m_currentDownloadCount.store(0);
     return true;
 }
 
@@ -80,19 +81,29 @@ bool HttpWebTransferTask::validateAccessToken(const std::string& token) const {
     return CRYPTO_memcmp(m_webToken.data(), token.data(), m_webToken.size()) == 0;
 }
 
-bool HttpWebTransferTask::registerDownload() {
-    if (isExpired()) {
+bool HttpWebTransferTask::validateSessionPin(const std::string& pin) const {
+    if (m_sessionPin.empty() || m_sessionPin.size() != pin.size()) {
         return false;
     }
-    ++m_currentDownloadCount;
-    if (m_currentDownloadCount >= m_maxDownloadCount) {
-        m_state = TransferState::Completed;
+    return CRYPTO_memcmp(m_sessionPin.data(), pin.data(), m_sessionPin.size()) == 0;
+}
+
+bool HttpWebTransferTask::registerDownload() {
+    uint32_t current = m_currentDownloadCount.load();
+    while (current < m_maxDownloadCount) {
+        if (m_currentDownloadCount.compare_exchange_weak(current, current + 1)) {
+            if (current + 1 >= m_maxDownloadCount) {
+                m_state = TransferState::Completed;
+            }
+            return true;
+        }
     }
-    return true;
+    m_state = TransferState::Completed;
+    return false;
 }
 
 bool HttpWebTransferTask::isExpired() const {
-    return m_currentDownloadCount >= m_maxDownloadCount || m_state == TransferState::Cancelled;
+    return m_currentDownloadCount.load() >= m_maxDownloadCount || m_state == TransferState::Cancelled;
 }
 
 }

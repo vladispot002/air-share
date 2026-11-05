@@ -234,6 +234,11 @@ static bool testHttpWebTransferTask() {
         TEST_ASSERT(c >= '0' && c <= '9', "PIN contains only digits");
     }
 
+    // Constant-time PIN validation
+    TEST_ASSERT(defaultTask.validateSessionPin(defaultTask.getSessionPin()), "Accepts matching random session PIN");
+    TEST_ASSERT(!defaultTask.validateSessionPin("999999"), "Rejects invalid session PIN");
+    TEST_ASSERT(!defaultTask.validateSessionPin(""), "Rejects empty session PIN");
+
     return true;
 }
 
@@ -2108,6 +2113,12 @@ static bool testWebRtcDataChannelPrep() {
     // Backpressure: attempt to send > maxBufferedAmount
     std::vector<uint8_t> oversizeData(2 * 1024 * 1024, 0xAA);
     TEST_ASSERT(!channel.sendExact(oversizeData.data(), oversizeData.size()), "Backpressure rejects sending data exceeding maxBufferedAmount");
+
+    // Dynamic buffered amount control
+    channel.setBufferedAmount(500000);
+    TEST_ASSERT(channel.getBufferedAmount() == 500000, "Simulated buffered amount reflects queue state");
+    channel.setBufferedAmount(0);
+    TEST_ASSERT(channel.getBufferedAmount() == 0, "Buffered amount successfully drained");
 
     // Receive data
     std::string testMsg = "WebRTC P2P Data Chunk Payload";
