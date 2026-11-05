@@ -6,6 +6,7 @@ import {
   ChunkDataMessage,
   TransferAckMessage,
   TransferCancelMessage,
+  ResumeRequestMessage,
   MessageType,
   AckStatus,
   buildFrame,
@@ -161,6 +162,40 @@ describe('Wire Protocol v2 Framing & Messages', () => {
     expect(isProtocolV2(new Uint8Array([0x4c, 0x4e, 0x44, 0x50]))).toBe(true);
     expect(isProtocolV2(new Uint8Array([14, 0, 0, 0]))).toBe(false);
     expect(isProtocolV2(new Uint8Array([0, 0]))).toBe(false);
+  });
+
+  it('TC-WP2-12: ResumeRequestMessage serialization roundtrip and fixed 136 bytes size', () => {
+    const req = new ResumeRequestMessage();
+    req.fileHash = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+    req.bytesReceivedSoFar = 1048576n; // 1 MB
+    req.partialSha256 = '11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff';
+
+    const bytes = req.serialize();
+    expect(bytes.length).toBe(136);
+
+    const parsed = ResumeRequestMessage.deserialize(bytes);
+    expect(parsed.fileHash).toBe(req.fileHash);
+    expect(parsed.bytesReceivedSoFar).toBe(1048576n);
+    expect(parsed.partialSha256).toBe(req.partialSha256);
+  });
+
+  it('TC-WP2-13: ResumeRequestMessage underflow rejection (< 136 bytes)', () => {
+    expect(() => ResumeRequestMessage.deserialize(new Uint8Array(135))).toThrow(/Buffer underflow/);
+    expect(() => ResumeRequestMessage.deserialize(new Uint8Array(0))).toThrow(/Buffer underflow/);
+    expect(() => ResumeRequestMessage.deserialize(null as any)).toThrow(/Buffer underflow/);
+  });
+
+  it('TC-WP2-14: ResumeRequestMessage preserves 64-bit offsets > 4GB', () => {
+    const req = new ResumeRequestMessage();
+    req.fileHash = 'a'.repeat(64);
+    req.bytesReceivedSoFar = 10737418240n; // 10 GB
+    req.partialSha256 = 'b'.repeat(64);
+
+    const bytes = req.serialize();
+    expect(bytes.length).toBe(136);
+
+    const parsed = ResumeRequestMessage.deserialize(bytes);
+    expect(parsed.bytesReceivedSoFar).toBe(10737418240n);
   });
 });
 

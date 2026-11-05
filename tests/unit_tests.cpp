@@ -3357,6 +3357,117 @@ static bool testSuite28_MobileEcosystemBridgeFfi() {
     return true;
 }
 
+static bool testSuite29_ResilientStreamingResumptionSuite() {
+    using namespace landrop::protocol::v2;
+
+    // 1. TC-3D-PROT-01: C++ ResumeRequestMessage serialization & deserialization (136 bytes)
+    {
+        ResumeRequestMessage req;
+        req.fileHash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        req.bytesReceivedSoFar = 1048576ULL;
+        req.partialSha256 = "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff";
+
+        std::vector<uint8_t> raw = req.serialize();
+        TEST_ASSERT(raw.size() == 136, "TC-3D-PROT-01: Serialized ResumeRequestMessage is strictly 136 bytes");
+
+        ResumeRequestMessage parsed;
+        std::string err;
+        bool ok = ResumeRequestMessage::deserialize(raw.data(), raw.size(), parsed, &err);
+        TEST_ASSERT(ok, "TC-3D-PROT-01: Deserialization of valid ResumeRequestMessage succeeds");
+        TEST_ASSERT(parsed.fileHash == req.fileHash, "TC-3D-PROT-01: fileHash matches");
+        TEST_ASSERT(parsed.bytesReceivedSoFar == 1048576ULL, "TC-3D-PROT-01: bytesReceivedSoFar matches");
+        TEST_ASSERT(parsed.partialSha256 == req.partialSha256, "TC-3D-PROT-01: partialSha256 matches");
+
+        // Padding check: when hashes are < 64 chars, they are zero-padded to 64 chars
+        ResumeRequestMessage shortReq;
+        shortReq.fileHash = "abc";
+        shortReq.bytesReceivedSoFar = 42;
+        shortReq.partialSha256 = "def";
+        std::vector<uint8_t> shortRaw = shortReq.serialize();
+        TEST_ASSERT(shortRaw.size() == 136, "TC-3D-PROT-01: Short hashes are zero-padded to 136 bytes");
+
+        ResumeRequestMessage parsedShort;
+        TEST_ASSERT(ResumeRequestMessage::deserialize(shortRaw.data(), shortRaw.size(), parsedShort), "TC-3D-PROT-01: Deserializes padded message");
+        TEST_ASSERT(parsedShort.fileHash.rfind("abc", 0) == 0, "TC-3D-PROT-01: Padded fileHash starts with abc");
+        TEST_ASSERT(parsedShort.bytesReceivedSoFar == 42, "TC-3D-PROT-01: Padded bytesReceivedSoFar is 42");
+
+        // Upper 32 bits offset check (> 4GB)
+        ResumeRequestMessage largeReq;
+        largeReq.fileHash = std::string(64, 'a');
+        largeReq.bytesReceivedSoFar = 10ULL * 1024 * 1024 * 1024; // 10 GB
+        largeReq.partialSha256 = std::string(64, 'b');
+        std::vector<uint8_t> largeRaw = largeReq.serialize();
+        TEST_ASSERT(largeRaw.size() == 136, "TC-3D-PROT-01: 10GB offset serializes to 136 bytes");
+
+        ResumeRequestMessage parsedLarge;
+        TEST_ASSERT(ResumeRequestMessage::deserialize(largeRaw.data(), largeRaw.size(), parsedLarge), "TC-3D-PROT-01: Deserializes 10GB offset message");
+        TEST_ASSERT(parsedLarge.bytesReceivedSoFar == 10ULL * 1024 * 1024 * 1024, "TC-3D-PROT-01: 10GB offset preserves upper 32 bits");
+    }
+
+    // 2. TC-3D-PROT-02: Buffer underflow returns false and populates outError
+    {
+        ResumeRequestMessage parsed;
+        std::string err;
+        std::vector<uint8_t> undersized(135, 0);
+        bool ok = ResumeRequestMessage::deserialize(undersized.data(), undersized.size(), parsed, &err);
+        TEST_ASSERT(!ok, "TC-3D-PROT-02: 135 bytes returns false");
+        TEST_ASSERT(!err.empty(), "TC-3D-PROT-02: Error message populated for 135 bytes");
+
+        ok = ResumeRequestMessage::deserialize(nullptr, 136, parsed, &err);
+        TEST_ASSERT(!ok, "TC-3D-PROT-02: nullptr data returns false");
+
+        ok = ResumeRequestMessage::deserialize(undersized.data(), 0, parsed, &err);
+        TEST_ASSERT(!ok, "TC-3D-PROT-02: 0 bytes returns false");
+    }
+
+    // 3. TC-3D-HASH-01: computePartialFileHash verification
+    {
+        FileChunkHasher hasher;
+
+        // A. 0-byte slice returns empty string SHA-256
+        auto zeroHash = hasher.computePartialFileHash("nonexistent_file_path.bin", 0);
+        TEST_ASSERT(zeroHash.has_value(), "TC-3D-HASH-01: 0-byte slice has value without file open");
+        TEST_ASSERT(*zeroHash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "TC-3D-HASH-01: 0-byte slice equals sha256 of empty string");
+
+        // B. Nonexistent file with maxBytes > 0 returns nullopt
+        auto nonExistent = hasher.computePartialFileHash("this_file_definitely_does_not_exist_xyz.bin", 100);
+        TEST_ASSERT(!nonExistent.has_value(), "TC-3D-HASH-01: Nonexistent file returns std::nullopt");
+
+        // C. Create a temporary file with known content
+        std::filesystem::path tempDir = "./unit_test_resumption_tmp";
+        std::filesystem::remove_all(tempDir);
+        std::filesystem::create_directories(tempDir);
+        std::filesystem::path testFile = tempDir / "test_partial.bin";
+
+        std::string testData = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!@#$%^&*()";
+        {
+            std::ofstream out(testFile, std::ios::binary);
+            out.write(testData.data(), testData.size());
+        }
+
+        // Partial slice: first 32 bytes
+        auto partialHash = hasher.computePartialFileHash(testFile.string(), 32);
+        TEST_ASSERT(partialHash.has_value(), "TC-3D-HASH-01: Partial hash of 32 bytes computed");
+
+        std::string expectedPartial = hasher.computeStringHash(testData.substr(0, 32));
+        TEST_ASSERT(*partialHash == expectedPartial, "TC-3D-HASH-01: Partial hash matches computeStringHash for leading 32 bytes");
+
+        // Full file slice: exact size
+        auto fullSliceHash = hasher.computePartialFileHash(testFile.string(), testData.size());
+        TEST_ASSERT(fullSliceHash.has_value(), "TC-3D-HASH-01: Exact size partial hash computed");
+        auto fullHash = hasher.computeFullFileHash(testFile.string());
+        TEST_ASSERT(fullSliceHash == fullHash, "TC-3D-HASH-01: Full slice hash matches computeFullFileHash");
+
+        // Oversized slice (maxBytes > fileSize): returns nullopt
+        auto overHash = hasher.computePartialFileHash(testFile.string(), testData.size() + 100);
+        TEST_ASSERT(!overHash.has_value(), "TC-3D-HASH-01: maxBytes > fileSize returns std::nullopt");
+
+        std::filesystem::remove_all(tempDir);
+    }
+
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -3397,7 +3508,8 @@ int main() {
         {"Global WebRTC Transfer Pipeline & Coturn Config (Milestone 2C)", testMilestone2C_GlobalWebRtcTransferPipeline},
         {"End-to-End File Transfer & Live Signaling Verification (Milestone 2D)", testMilestone2D_EndToEndWebRtcTransfer},
         {"Optical Pairing & QrCodeGenerator Suite (Milestone 3B)", testSuite27_OpticalPairingAndQrCode},
-        {"Mobile Ecosystem Bridge FFI Suite (Milestone 3C)", testSuite28_MobileEcosystemBridgeFfi}
+        {"Mobile Ecosystem Bridge FFI Suite (Milestone 3C)", testSuite28_MobileEcosystemBridgeFfi},
+        {"Resilient Streaming & Byte-Offset Resumption Suite (Milestone 3D)", testSuite29_ResilientStreamingResumptionSuite}
     };
 
 

@@ -2,8 +2,10 @@ import {
   FileHeaderMessage,
   ChunkDataMessage,
   TransferAckMessage,
+  ResumeRequestMessage,
   MessageType,
   AckStatus,
+  FileHeaderFlags,
   buildFrame,
   FrameReassembler,
   ReassembledFrame,
@@ -14,6 +16,12 @@ import { Sha256Stream } from '../crypto/Sha256';
 export interface FileStreamReceiverOptions {
   onProgress?: (bytesReceived: number, totalBytes: number) => void;
   onFileHeader?: (header: FileHeaderMessage) => Promise<boolean> | boolean; // User confirmation
+  resumeContext?: {
+    fileHash: string;
+    bytesReceivedSoFar: number;
+    partialSha256: string;
+    partialChunks?: Uint8Array[];
+  };
 }
 
 export interface ReceivedFileResult {
@@ -83,6 +91,7 @@ export function sanitizeFileName(name: string): string {
 }
 
 export class FileStreamReceiver {
+  private options: FileStreamReceiverOptions;
   private onProgress?: (bytesReceived: number, totalBytes: number) => void;
   private onFileHeader?: (header: FileHeaderMessage) => Promise<boolean> | boolean;
 
@@ -90,6 +99,7 @@ export class FileStreamReceiver {
     private channel: RTCDataChannel,
     options: FileStreamReceiverOptions = {}
   ) {
+    this.options = options;
     this.onProgress = options.onProgress;
     this.onFileHeader = options.onFileHeader;
   }
@@ -109,7 +119,18 @@ export class FileStreamReceiver {
       let isWaitingForConfirmation = false;
       const pendingChunkFrames: ReassembledFrame[] = [];
 
+      enum ReceiverPhase {
+        AwaitingHeader,
+        AwaitingResumeAck,
+        AwaitingUserConfirm,
+        StreamingChunks,
+      }
+
+      let phase = ReceiverPhase.AwaitingHeader;
+      let resumeTimer: any = null;
+
       const cleanup = () => {
+        if (resumeTimer) clearTimeout(resumeTimer);
         this.channel.removeEventListener('message', onMessage);
         this.channel.removeEventListener('close', onClose);
         this.channel.removeEventListener('error', onError);
@@ -217,6 +238,65 @@ export class FileStreamReceiver {
         });
       };
 
+      const proceedAfterResumeResolution = async (resumed: boolean, acceptedOffset?: bigint) => {
+        if (settled) return;
+        if (resumed && acceptedOffset !== undefined) {
+          const offsetNum = Number(acceptedOffset);
+          receivedBytes = offsetNum;
+          expectedOffset = acceptedOffset;
+          expectedChunkIndex = Math.floor(offsetNum / header!.chunkSize);
+          if (this.options.resumeContext?.partialChunks) {
+            for (const ch of this.options.resumeContext.partialChunks) {
+              hasher.update(ch);
+              chunks.push(ch);
+            }
+          }
+        } else {
+          receivedBytes = 0;
+          expectedOffset = 0n;
+          expectedChunkIndex = 0;
+        }
+
+        // 2. User confirmation callback with DEF-05 race protection
+        if (this.onFileHeader) {
+          phase = ReceiverPhase.AwaitingUserConfirm;
+          try {
+            const accepted = await this.onFileHeader(header!);
+            if (!accepted) {
+              const ack = new TransferAckMessage();
+              ack.status = AckStatus.Rejected;
+              ack.receivedBytes = 0n;
+              ack.message = 'Transfer rejected by user';
+              (this.channel as any).send(buildFrame(MessageType.TransferAck, ack.serialize()));
+              settled = true;
+              cleanup();
+              pendingChunkFrames.length = 0;
+              return reject(new Error('Transfer rejected by user'));
+            }
+          } catch (err) {
+            settled = true;
+            cleanup();
+            pendingChunkFrames.length = 0;
+            return reject(err);
+          }
+        }
+
+        // DEF-02: Support 0-byte file without deadlock
+        if (header!.fileSize === 0n) {
+          completeTransfer();
+          return;
+        }
+
+        phase = ReceiverPhase.StreamingChunks;
+
+        // Drain chunks buffered while confirmation or resumption was pending (DEF-05 & Finding 3)
+        while (pendingChunkFrames.length > 0) {
+          const queued = pendingChunkFrames.shift()!;
+          processChunkFrame(queued);
+          if (settled) return;
+        }
+      };
+
       const onMessage = async (event: MessageEvent) => {
         try {
           const raw = new Uint8Array(event.data as ArrayBuffer);
@@ -224,6 +304,9 @@ export class FileStreamReceiver {
 
           for (const frame of frames) {
             if (frame.header.msgType === MessageType.FileHeader) {
+              if (phase !== ReceiverPhase.AwaitingHeader) {
+                continue;
+              }
               header = FileHeaderMessage.deserialize(frame.payload);
 
               // 1. Sanitize file name (DEF-11)
@@ -240,45 +323,83 @@ export class FileStreamReceiver {
                 return reject(err);
               }
 
-              // 2. User confirmation callback with DEF-05 race protection
-              if (this.onFileHeader) {
-                isWaitingForConfirmation = true;
-                const accepted = await this.onFileHeader(header);
-                isWaitingForConfirmation = false;
+              // Milestone 3D: Resumption Negotiation
+              const canResume =
+                Boolean(this.options.resumeContext) &&
+                (header.flags & FileHeaderFlags.RESUME_SUPPORTED) !== 0 &&
+                this.options.resumeContext!.fileHash.toLowerCase() === header.sha256Hex.toLowerCase() &&
+                this.options.resumeContext!.bytesReceivedSoFar > 0 &&
+                this.options.resumeContext!.bytesReceivedSoFar < Number(header.fileSize);
 
-                if (!accepted) {
-                  const ack = new TransferAckMessage();
-                  ack.status = AckStatus.Rejected;
-                  ack.receivedBytes = 0n;
-                  ack.message = 'Transfer rejected by user';
-                  (this.channel as any).send(buildFrame(MessageType.TransferAck, ack.serialize()));
-                  settled = true;
-                  cleanup();
-                  pendingChunkFrames.length = 0;
-                  return reject(new Error('Transfer rejected by user'));
-                }
+              if (canResume) {
+                // Align to chunkSize boundary (ADR-017)
+                const alignedOffset =
+                  Math.floor(this.options.resumeContext!.bytesReceivedSoFar / header.chunkSize) * header.chunkSize;
 
-                // Process chunks buffered while confirmation was pending (DEF-05)
-                while (pendingChunkFrames.length > 0) {
-                  const queuedFrame = pendingChunkFrames.shift()!;
-                  processChunkFrame(queuedFrame);
-                  if (settled) return;
+                if (alignedOffset > 0) {
+                  const resumeReq = new ResumeRequestMessage();
+                  resumeReq.fileHash = header.sha256Hex;
+                  resumeReq.bytesReceivedSoFar = BigInt(alignedOffset);
+                  resumeReq.partialSha256 = this.options.resumeContext!.partialSha256;
+                  (this.channel as any).send(buildFrame(MessageType.ResumeRequest, resumeReq.serialize()));
+
+                  phase = ReceiverPhase.AwaitingResumeAck;
+                  resumeTimer = setTimeout(() => {
+                    if (phase === ReceiverPhase.AwaitingResumeAck) {
+                      resumeTimer = null;
+                      proceedAfterResumeResolution(false);
+                    }
+                  }, 15000);
+                  continue;
                 }
               }
 
-              // DEF-02: Support 0-byte file without deadlock
-              if (header.fileSize === 0n) {
-                completeTransfer();
-                return;
+              // Clean transfer without resumption (No phantom TransferAck!)
+              await proceedAfterResumeResolution(false);
+
+            } else if (frame.header.msgType === MessageType.TransferAck) {
+              if (phase === ReceiverPhase.AwaitingResumeAck) {
+                if (resumeTimer) {
+                  clearTimeout(resumeTimer);
+                  resumeTimer = null;
+                }
+                const ack = TransferAckMessage.deserialize(frame.payload);
+                if (ack.status === AckStatus.ResumeAccepted) {
+                  const alignedOffset =
+                    Math.floor(this.options.resumeContext!.bytesReceivedSoFar / header!.chunkSize) * header!.chunkSize;
+                  let validResume = ack.receivedBytes === BigInt(alignedOffset);
+
+                  // Validate partial chunks total bytes match alignedOffset if provided
+                  if (validResume && this.options.resumeContext?.partialChunks) {
+                    let totalPartialBytes = 0;
+                    for (const c of this.options.resumeContext.partialChunks) totalPartialBytes += c.length;
+                    if (totalPartialBytes !== alignedOffset) {
+                      validResume = false;
+                    }
+                  }
+
+                  if (validResume) {
+                    await proceedAfterResumeResolution(true, ack.receivedBytes);
+                  } else {
+                    await proceedAfterResumeResolution(false);
+                  }
+                } else {
+                  // ResumeRejected or error: fallback to fresh transfer from offset 0
+                  await proceedAfterResumeResolution(false);
+                }
               }
             } else if (frame.header.msgType === MessageType.ChunkData) {
-              if (isWaitingForConfirmation) {
-                // Buffer chunks while user confirmation is pending (DEF-05)
+              if (
+                phase === ReceiverPhase.AwaitingResumeAck ||
+                phase === ReceiverPhase.AwaitingUserConfirm
+              ) {
+                // Buffer chunks while resumption or user confirmation is pending (DEF-05 & Finding 3)
                 pendingChunkFrames.push(frame);
-              } else {
+              } else if (phase === ReceiverPhase.StreamingChunks) {
                 processChunkFrame(frame);
               }
             } else if (frame.header.msgType === MessageType.TransferCancel) {
+              if (resumeTimer) clearTimeout(resumeTimer);
               settled = true;
               cleanup();
               reject(new Error('Transfer cancelled by sender'));
@@ -287,6 +408,7 @@ export class FileStreamReceiver {
           }
         } catch (err) {
           if (!settled) {
+            if (resumeTimer) clearTimeout(resumeTimer);
             settled = true;
             cleanup();
             reject(err);

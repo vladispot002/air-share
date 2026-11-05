@@ -177,3 +177,30 @@ export async function computeFileSha256(
 
   return hasher.digestHex();
 }
+
+/**
+ * Computes SHA-256 over a leading slice of a file [0 .. maxBytes) without loading entire file.
+ */
+export async function computePartialFileSha256(
+  file: Blob,
+  maxBytes: number,
+  chunkSize = 1024 * 1024
+): Promise<string> {
+  if (maxBytes > file.size) {
+    throw new Error(`Requested partial hash offset ${maxBytes} exceeds file size ${file.size}`);
+  }
+  const hasher = new Sha256Stream();
+  let offset = 0;
+  const total = maxBytes;
+  if (total === 0) {
+    return hasher.digestHex();
+  }
+  while (offset < total) {
+    const end = Math.min(offset + chunkSize, total);
+    const slice = file.slice(offset, end);
+    const buf = await slice.arrayBuffer();
+    hasher.update(new Uint8Array(buf));
+    offset = end;
+  }
+  return hasher.digestHex();
+}

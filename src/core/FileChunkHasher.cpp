@@ -87,6 +87,34 @@ std::optional<std::string> FileChunkHasher::computeFullFileHash(const std::strin
     return sha.finalize();
 }
 
+std::optional<std::string> FileChunkHasher::computePartialFileHash(const std::string& filePath, uint64_t maxBytes) {
+    if (maxBytes == 0) {
+        crypto::Sha256 sha;
+        return sha.finalize();
+    }
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file.is_open()) {
+        return std::nullopt;
+    }
+
+    crypto::Sha256 sha;
+    std::vector<uint8_t> buffer(64 * 1024);
+    uint64_t remaining = maxBytes;
+    while (remaining > 0) {
+        size_t toRead = static_cast<size_t>(std::min<uint64_t>(remaining, buffer.size()));
+        file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(toRead));
+        size_t bytes = static_cast<size_t>(file.gcount());
+        if (bytes == 0) break;
+        sha.update(buffer.data(), bytes);
+        m_totalBytesHashed += bytes;
+        remaining -= bytes;
+    }
+    if (remaining > 0) {
+        return std::nullopt;
+    }
+    return sha.finalize();
+}
+
 std::vector<size_t> FileChunkHasher::findCorruptedChunks(
     const std::vector<ChunkInfo>& receivedChunks,
     const std::vector<std::string>& targetHashes

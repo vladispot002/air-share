@@ -15,6 +15,7 @@ export enum MessageType {
   TransferCancel = 0x0005,
   Ping = 0x0006,
   Pong = 0x0007,
+  ResumeRequest = 0x0008,
 }
 
 export enum AckStatus {
@@ -24,7 +25,14 @@ export enum AckStatus {
   Rejected = 0x03,
   PathUnsafe = 0x04,
   GenericError = 0x05,
+  ResumeAccepted = 0x06,
+  ResumeRejected = 0x07,
 }
+
+export const FileHeaderFlags = {
+  NONE: 0x0000,
+  RESUME_SUPPORTED: 0x0001,
+} as const;
 
 export function isProtocolV2(first4Bytes: Uint8Array): boolean {
   if (first4Bytes.length < 4) return false;
@@ -416,6 +424,38 @@ export class TransferCancelMessage {
     const msg = new TransferCancelMessage();
     msg.errorCode = errorCode;
     msg.reason = reason;
+    return msg;
+  }
+}
+
+// ResumeRequestMessage (0x0008, fixed 136 bytes)
+export class ResumeRequestMessage {
+  fileHash: string = '';
+  bytesReceivedSoFar: bigint = 0n;
+  partialSha256: string = '';
+
+  serialize(): Uint8Array {
+    const buf = new Uint8Array(136);
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const enc = new TextEncoder();
+
+    buf.set(enc.encode(this.fileHash.padEnd(64, '0').slice(0, 64)), 0);
+    view.setBigUint64(64, this.bytesReceivedSoFar, false);
+    buf.set(enc.encode(this.partialSha256.padEnd(64, '0').slice(0, 64)), 72);
+    return buf;
+  }
+
+  static deserialize(data: Uint8Array): ResumeRequestMessage {
+    if (!data || data.length < 136) {
+      throw new Error(`Buffer underflow parsing ResumeRequestMessage: expected 136 bytes, got ${data ? data.length : 0}`);
+    }
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const dec = new TextDecoder();
+
+    const msg = new ResumeRequestMessage();
+    msg.fileHash = dec.decode(data.subarray(0, 64));
+    msg.bytesReceivedSoFar = view.getBigUint64(64, false);
+    msg.partialSha256 = dec.decode(data.subarray(72, 136));
     return msg;
   }
 }

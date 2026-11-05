@@ -104,6 +104,26 @@
   3. **Zero-Dependency Native QR & Base32 FFI Exports**: Directly expose `landrop::ui::QrCodeGenerator` (ISO/IEC 18004:2015) via `landrop_mobile_qr_generate_svg` and `landrop_mobile_qr_generate_matrix`, and `WebRtcSessionCoordinator::normalizeRoomCode` via `landrop_mobile_normalize_room_code`. Eliminates external mobile QR/Base32 dependencies.
   4. **Non-Blocking Ephemeral WebRTC & Transfer Lifecycle**: Room creation, joining, and file transfers execute on dedicated C++ worker threads. Mobile runloops monitor lifecycle via `landrop_mobile_webrtc_get_state` and `landrop_mobile_webrtc_get_transfer_snapshot` or optional callback registration, ensuring 0ms blocking of main UI threads.
   5. **Explicit Error Code Hierarchy**: Defined negative return codes (`0` Success, `-1` Invalid Arg, `-2` Buffer Too Small, `-3` Invalid Handle, `-4` Invalid Room Code, `-5` Network Disconnected, `-6` Timeout, `-7` Illegal State, `-8` Not Supported, `-9` File I/O, `-10` Cancelled, `-11` Checksum Mismatch).
-
-
+## ADR-017: Resilient Streaming & Byte-Offset Resumption for Wire Protocol v2
+- **Status**: Approved & Specified.
+- **Context**: Large file transfers across TCP/TLS and WebRTC DataChannels are subject to transient network failures, Wi-Fi roaming, cellular handoffs, and client restarts. Re-transmitting entire multi-gigabyte files from byte 0 imposes severe bandwidth and latency penalties. Milestone 3D mandates a resilient streaming and byte-offset resumption architecture across both C++ `TransferEngine` and TypeScript `FileStreamSender`/`FileStreamReceiver`.
+- **Decision**:
+  1. **Wire Protocol v2 Framing Extension**:
+     - Defined opcode `MessageType::ResumeRequest = 0x0008`.
+     - Extended `AckStatus` with `ResumeAccepted = 0x06` and `ResumeRejected = 0x07`.
+     - Added `FileHeaderFlags::RESUME_SUPPORTED = 0x0001` to `FileHeaderMessage.flags` to declare resumption capability without protocol version bumps.
+  2. **Fixed-Length Cryptographic Payload Serialization**:
+     - `ResumeRequestMessage` payload is strictly 136 bytes: 64-byte ASCII target `fileHash`, 8-byte big-endian `bytesReceivedSoFar`, and 64-byte ASCII `partialSha256` digest of `[0 .. bytesReceivedSoFar)`. Eliminates variable-length string vulnerabilities and ensures deterministic parsing across C++20 and TypeScript runtimes.
+  3. **Strict Chunk Alignment & Crash Resilience**:
+     - Resumption offsets are strictly aligned to negotiated `chunkSize` boundaries (`chunkIndex = offset / chunkSize`).
+     - Receiver stages in-flight files as `<fileName>.part` alongside atomic `<fileName>.part.meta` metadata.
+     - Incomplete/unaligned writes from abrupt crashes are truncated back to the last verified chunk boundary prior to sending `ResumeRequest`.
+  4. **Cryptographic Handshake & Fallback State Machine**:
+     - Receiver inspects local storage upon receiving `FileHeaderMessage`. If a valid partial file exists, it emits `ResumeRequestMessage`.
+     - Sender validates the partial offset against its local source file and independently computes SHA-256 over `[0 .. bytesReceivedSoFar)`.
+     - If digests match: Sender replies `TransferAck(ResumeAccepted, offset)`, seeks its source file, and resumes streaming `ChunkDataMessage` starting at `offset` with `chunkIndex = offset / chunkSize`.
+     - If digests mismatch, file size differs, or source file was modified: Sender replies `TransferAck(ResumeRejected, 0)`. Receiver purges `.part` and `.part.meta`, and sender streams cleanly from byte 0.
+  5. **Cross-Platform Parity**:
+     - Implemented identically across C++ (`TransferEngine`, `WireProtocolV2`, `FileChunkHasher`) and Web TypeScript (`FileStreamSender`, `FileStreamReceiver`, `WireProtocolV2`, `Sha256Stream`).
+     - Preserves existing backpressure throttling (`bufferedAmountLowThreshold`) and atomic finalization semantics.
 

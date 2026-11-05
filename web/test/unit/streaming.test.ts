@@ -203,4 +203,181 @@ describe('FileStreamSender & FileStreamReceiver Suite (DEF-13)', () => {
     // Unicode RTLO spoofing
     expect(() => sanitizeFileName('invoice\u202Ecod.exe')).toThrow(/spoofing/);
   });
+
+  it('TC-STR-07: Resilient resumption seeks to byte offset with partial chunk context', async () => {
+    const [senderCh, receiverCh] = createChannelPair();
+    const payload = new Uint8Array(128);
+    for (let i = 0; i < 128; i++) payload[i] = (i * 7 + 13) & 0xff;
+    const file = new File([payload], 'resumed_file.bin');
+
+    const fullSha = new Sha256Stream().update(payload).digestHex();
+    const partialOffset = 48;
+    const partialSlice = payload.subarray(0, partialOffset);
+    const partialSha = new Sha256Stream().update(partialSlice).digestHex();
+
+    // Receiver has partial chunks for the first 48 bytes
+    const receiver = new FileStreamReceiver(receiverCh as any, {
+      resumeContext: {
+        fileHash: fullSha,
+        bytesReceivedSoFar: partialOffset,
+        partialSha256: partialSha,
+        partialChunks: [partialSlice],
+      },
+    });
+
+    const sender = new FileStreamSender(senderCh as any, {
+      chunkSize: 16,
+      enableResumption: true,
+    });
+
+    // Track chunk offsets sent
+    const offsetsSent: number[] = [];
+    const origSend = senderCh.send.bind(senderCh);
+    senderCh.send = (data: Uint8Array | ArrayBuffer) => {
+      const arr = new Uint8Array(data);
+      if (arr.length > 20 && arr[6] === 0x00 && arr[7] === 0x03) {
+        const view = new DataView(arr.buffer, arr.byteOffset, arr.byteLength);
+        offsetsSent.push(Number(view.getBigUint64(16, false)));
+      }
+      origSend(arr);
+    };
+
+    const [ack, received] = await Promise.all([
+      sender.sendFile(file),
+      receiver.receiveFile(),
+    ]);
+
+    expect(ack.status).toBe(AckStatus.Success);
+    expect(received.fileName).toBe('resumed_file.bin');
+    expect(received.size).toBe(128);
+    expect(received.sha256Hex).toBe(fullSha);
+
+    // Verify sender did not stream bytes [0..48)
+    expect(offsetsSent.length).toBeGreaterThan(0);
+    expect(offsetsSent[0]).toBe(48);
+  });
+
+  it('TC-STR-08: Resumption rejected when partial hash mismatches; falls back to offset 0', async () => {
+    const [senderCh, receiverCh] = createChannelPair();
+    const payload = new Uint8Array(64);
+    for (let i = 0; i < 64; i++) payload[i] = i;
+    const file = new File([payload], 'mismatch_resume.bin');
+    const fullSha = new Sha256Stream().update(payload).digestHex();
+
+    // Receiver has corrupt/invalid partial SHA
+    const receiver = new FileStreamReceiver(receiverCh as any, {
+      resumeContext: {
+        fileHash: fullSha,
+        bytesReceivedSoFar: 20,
+        partialSha256: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+      },
+    });
+
+    const sender = new FileStreamSender(senderCh as any, {
+      chunkSize: 16,
+      enableResumption: true,
+    });
+
+    const offsetsSent: number[] = [];
+    const origSend = senderCh.send.bind(senderCh);
+    senderCh.send = (data: Uint8Array | ArrayBuffer) => {
+      const arr = new Uint8Array(data);
+      if (arr.length > 20 && arr[6] === 0x00 && arr[7] === 0x03) {
+        const view = new DataView(arr.buffer, arr.byteOffset, arr.byteLength);
+        offsetsSent.push(Number(view.getBigUint64(16, false)));
+      }
+      origSend(arr);
+    };
+
+    const [ack, received] = await Promise.all([
+      sender.sendFile(file),
+      receiver.receiveFile(),
+    ]);
+
+    expect(ack.status).toBe(AckStatus.Success);
+    expect(received.size).toBe(64);
+    expect(received.sha256Hex).toBe(fullSha);
+    // Verified fallback to offset 0
+    expect(offsetsSent[0]).toBe(0);
+  });
+
+  it('TC-STR-09: Sender rejects misaligned ResumeRequest and restarts from offset 0', async () => {
+    const [senderCh, receiverCh] = createChannelPair();
+    const payload = new Uint8Array(64).fill(42);
+    const file = new File([payload], 'unaligned.bin');
+    const fullSha = new Sha256Stream().update(payload).digestHex();
+
+    const sender = new FileStreamSender(senderCh as any, {
+      chunkSize: 16,
+      enableResumption: true,
+      negotiationTimeoutMs: 100,
+    });
+
+    const receivedAcks: any[] = [];
+    receiverCh.addEventListener('message', async (ev) => {
+      const { FrameReassembler, buildFrame, MessageType, ResumeRequestMessage, TransferAckMessage } = await import('../../src/core/protocol/WireProtocolV2');
+      const reassembler = new FrameReassembler();
+      const frames = reassembler.push(new Uint8Array(ev.data));
+      for (const f of frames) {
+        if (f.header.msgType === MessageType.FileHeader) {
+          // Send intentionally misaligned resume request (offset 25 when chunkSize is 16)
+          const req = new ResumeRequestMessage();
+          req.fileHash = fullSha;
+          req.bytesReceivedSoFar = 25n;
+          req.partialSha256 = '0'.repeat(64);
+          receiverCh.send(buildFrame(MessageType.ResumeRequest, req.serialize()));
+        } else if (f.header.msgType === MessageType.TransferAck) {
+          const ack = TransferAckMessage.deserialize(f.payload);
+          receivedAcks.push(ack);
+        }
+      }
+    });
+
+    // Start sender in background
+    sender.sendFile(file).catch(() => {});
+
+    await new Promise((r) => setTimeout(r, 60));
+    expect(receivedAcks.length).toBeGreaterThan(0);
+    expect(receivedAcks[0].status).toBe(AckStatus.ResumeRejected);
+    expect(receivedAcks[0].message).toContain('misaligned');
+  });
+
+  it('TC-STR-10: Fresh transfer emits zero phantom ACKs prior to full reception', async () => {
+    const [senderCh, receiverCh] = createChannelPair();
+    const payload = new Uint8Array(128).fill(99);
+    const file = new File([payload], 'fresh.bin');
+
+    const receiver = new FileStreamReceiver(receiverCh as any);
+    const sender = new FileStreamSender(senderCh as any, {
+      chunkSize: 32,
+      enableResumption: true,
+      negotiationTimeoutMs: 50,
+    });
+
+    const receiverAcksSent: any[] = [];
+    const origReceiverSend = receiverCh.send.bind(receiverCh);
+    receiverCh.send = async (data: any) => {
+      const { FrameReassembler, MessageType, TransferAckMessage } = await import('../../src/core/protocol/WireProtocolV2');
+      const reassembler = new FrameReassembler();
+      const frames = reassembler.push(new Uint8Array(data));
+      for (const f of frames) {
+        if (f.header.msgType === MessageType.TransferAck) {
+          receiverAcksSent.push(TransferAckMessage.deserialize(f.payload));
+        }
+      }
+      origReceiverSend(data);
+    };
+
+    const [ack, received] = await Promise.all([
+      sender.sendFile(file),
+      receiver.receiveFile(),
+    ]);
+
+    expect(ack.status).toBe(AckStatus.Success);
+    expect(received.size).toBe(128);
+    // Exactly ONE ACK emitted at the very end with full byte count
+    expect(receiverAcksSent.length).toBe(1);
+    expect(receiverAcksSent[0].status).toBe(AckStatus.Success);
+    expect(receiverAcksSent[0].receivedBytes).toBe(128n);
+  });
 });

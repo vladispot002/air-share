@@ -21,6 +21,7 @@ public:
     
     std::vector<ChunkInfo> partitionAndHashFile(const std::string& filePath, size_t chunkSize = 0);
     std::optional<std::string> computeFullFileHash(const std::string& filePath);
+    std::optional<std::string> computePartialFileHash(const std::string& filePath, uint64_t maxBytes);
 
     std::vector<size_t> findCorruptedChunks(
         const std::vector<ChunkInfo>& receivedChunks,
