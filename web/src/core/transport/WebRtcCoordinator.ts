@@ -17,7 +17,7 @@ export async function fetchTurnConfig(
   clientId?: string
 ): Promise<RTCConfiguration> {
   const url = new URL('/api/v1/turn-config', signalingHttpUrl);
-  url.searchParams.set('token', token);
+  // DEF-12: Never expose secret token in URL query string
   if (clientId) {
     url.searchParams.set('client_id', clientId);
   }
@@ -40,17 +40,54 @@ export async function fetchTurnConfig(
   };
 }
 
-export function waitForBufferedAmountLow(channel: RTCDataChannel, threshold: number = 1024 * 1024): Promise<void> {
+/**
+ * Wait for RTCDataChannel buffered amount to drop below threshold, with timeout and error resilience (DEF-07).
+ */
+export function waitForBufferedAmountLow(
+  channel: RTCDataChannel,
+  threshold: number = 1024 * 1024,
+  timeoutMs: number = 30000
+): Promise<void> {
   if (channel.bufferedAmount <= threshold) {
     return Promise.resolve();
   }
-  return new Promise<void>((resolve) => {
+  return new Promise<void>((resolve, reject) => {
     channel.bufferedAmountLowThreshold = threshold;
-    const onLow = () => {
+    let timer: any = null;
+
+    const cleanup = () => {
       channel.removeEventListener('bufferedamountlow', onLow);
+      channel.removeEventListener('close', onClose);
+      channel.removeEventListener('error', onError);
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const onLow = () => {
+      cleanup();
       resolve();
     };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error('RTCDataChannel closed while waiting for backpressure relief'));
+    };
+
+    const onError = () => {
+      cleanup();
+      reject(new Error('RTCDataChannel error while waiting for backpressure relief'));
+    };
+
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timeout (${timeoutMs}ms) waiting for bufferedamountlow on RTCDataChannel`));
+    }, timeoutMs);
+
     channel.addEventListener('bufferedamountlow', onLow);
+    channel.addEventListener('close', onClose);
+    channel.addEventListener('error', onError);
   });
 }
 
@@ -60,6 +97,13 @@ export class WebRtcCoordinator {
   private pendingRemoteCandidates: RTCIceCandidateInit[] = [];
   private hasRemoteDescription: boolean = false;
   private isInitiator: boolean = false;
+
+  // Stored listener references for unbinding in close() (DEF-04)
+  private onIceCandidateHandler?: (payload: any) => Promise<void>;
+  private onSdpAnswerHandler?: (payload: any) => Promise<void>;
+  private onSdpOfferHandler?: (payload: any) => Promise<void>;
+  private onErrorHandler?: (payload: any) => void;
+  private onPeerLeftHandler?: (payload: any) => void;
 
   constructor(
     private signalingClient: SignalingClient,
@@ -78,7 +122,6 @@ export class WebRtcCoordinator {
     return this.isInitiator;
   }
 
-
   async setupPeerConnection(customConfig?: RTCConfiguration): Promise<RTCPeerConnection> {
     const rtcConfig = customConfig || this.config || {
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
@@ -95,14 +138,20 @@ export class WebRtcCoordinator {
       }
     };
 
-    this.signalingClient.on('ice_candidate', async (payload) => {
+    if (this.onIceCandidateHandler) {
+      this.signalingClient.off('ice_candidate', this.onIceCandidateHandler as any);
+    }
+
+    this.onIceCandidateHandler = async (payload) => {
       const candidateInit: RTCIceCandidateInit = {
         candidate: payload.candidate,
         sdpMid: payload.sdp_mid,
         sdpMLineIndex: payload.sdp_mline_index,
       };
       await this.handleRemoteCandidate(candidateInit);
-    });
+    };
+
+    this.signalingClient.on('ice_candidate', this.onIceCandidateHandler);
 
     return pc;
   }
@@ -147,23 +196,78 @@ export class WebRtcCoordinator {
     this.signalingClient.sendSdpOffer(offer.sdp!);
 
     return new Promise((resolve, reject) => {
-      this.signalingClient.on('sdp_answer', async (payload) => {
+      let settled = false;
+
+      const cleanup = () => {
+        if (this.onSdpAnswerHandler) {
+          this.signalingClient.off('sdp_answer', this.onSdpAnswerHandler as any);
+          this.onSdpAnswerHandler = undefined;
+        }
+        if (this.onErrorHandler) {
+          this.signalingClient.off('error', this.onErrorHandler as any);
+          this.onErrorHandler = undefined;
+        }
+        if (this.onPeerLeftHandler) {
+          this.signalingClient.off('peer_left', this.onPeerLeftHandler as any);
+          this.onPeerLeftHandler = undefined;
+        }
+      };
+
+      // DEF-03: Listen for glare or signaling errors and reject immediately
+      this.onErrorHandler = (errPayload: any) => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error(`Signaling error during initiator setup: [${errPayload.code}] ${errPayload.message}`));
+        }
+      };
+      this.signalingClient.on('error', this.onErrorHandler);
+
+      this.onPeerLeftHandler = (peerPayload: any) => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error(`Peer left during connection setup: ${peerPayload.reason || 'disconnected'}`));
+        }
+      };
+      this.signalingClient.on('peer_left', this.onPeerLeftHandler);
+
+      this.onSdpAnswerHandler = async (payload) => {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: payload.sdp }));
           this.hasRemoteDescription = true;
           await this.flushPendingCandidates();
         } catch (err) {
-          reject(err);
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(err);
+          }
         }
-      });
+      };
+      this.signalingClient.on('sdp_answer', this.onSdpAnswerHandler);
 
       dc.onopen = () => {
-        resolve(dc);
+        if (!settled) {
+          settled = true;
+          cleanup();
+          resolve(dc);
+        }
       };
       dc.onerror = () => {
-        reject(new Error('DataChannel error before opening'));
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error('DataChannel error before opening'));
+        }
       };
-
+      dc.onclose = () => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error('DataChannel closed before opening'));
+        }
+      };
     });
   }
 
@@ -172,17 +276,70 @@ export class WebRtcCoordinator {
     const pc = await this.setupPeerConnection();
 
     return new Promise((resolve, reject) => {
+      let settled = false;
+
+      const cleanup = () => {
+        if (this.onSdpOfferHandler) {
+          this.signalingClient.off('sdp_offer', this.onSdpOfferHandler as any);
+          this.onSdpOfferHandler = undefined;
+        }
+        if (this.onErrorHandler) {
+          this.signalingClient.off('error', this.onErrorHandler as any);
+          this.onErrorHandler = undefined;
+        }
+        if (this.onPeerLeftHandler) {
+          this.signalingClient.off('peer_left', this.onPeerLeftHandler as any);
+          this.onPeerLeftHandler = undefined;
+        }
+      };
+
+      // DEF-03: Glare / error detection
+      this.onErrorHandler = (errPayload: any) => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error(`Signaling error during joiner setup: [${errPayload.code}] ${errPayload.message}`));
+        }
+      };
+      this.signalingClient.on('error', this.onErrorHandler);
+
+      this.onPeerLeftHandler = (peerPayload: any) => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error(`Peer left during connection setup: ${peerPayload.reason || 'disconnected'}`));
+        }
+      };
+      this.signalingClient.on('peer_left', this.onPeerLeftHandler);
+
       pc.ondatachannel = (ev) => {
         const dc = ev.channel;
         this.configureDataChannel(dc);
         if (dc.readyState === 'open') {
-          resolve(dc);
+          if (!settled) {
+            settled = true;
+            cleanup();
+            resolve(dc);
+          }
         } else {
-          dc.onopen = () => resolve(dc);
+          dc.onopen = () => {
+            if (!settled) {
+              settled = true;
+              cleanup();
+              resolve(dc);
+            }
+          };
+          dc.onerror = () => {
+            if (!settled) {
+              settled = true;
+              cleanup();
+              reject(new Error('DataChannel error on joiner'));
+            }
+          };
         }
       };
 
-      this.signalingClient.on('sdp_offer', async (payload) => {
+      this.onSdpOfferHandler = async (payload) => {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: payload.sdp }));
           this.hasRemoteDescription = true;
@@ -192,9 +349,14 @@ export class WebRtcCoordinator {
           await pc.setLocalDescription(answer);
           this.signalingClient.sendSdpAnswer(answer.sdp!);
         } catch (err) {
-          reject(err);
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(err);
+          }
         }
-      });
+      };
+      this.signalingClient.on('sdp_offer', this.onSdpOfferHandler);
     });
   }
 
@@ -205,6 +367,27 @@ export class WebRtcCoordinator {
   }
 
   close(): void {
+    if (this.onIceCandidateHandler) {
+      this.signalingClient.off('ice_candidate', this.onIceCandidateHandler as any);
+      this.onIceCandidateHandler = undefined;
+    }
+    if (this.onSdpAnswerHandler) {
+      this.signalingClient.off('sdp_answer', this.onSdpAnswerHandler as any);
+      this.onSdpAnswerHandler = undefined;
+    }
+    if (this.onSdpOfferHandler) {
+      this.signalingClient.off('sdp_offer', this.onSdpOfferHandler as any);
+      this.onSdpOfferHandler = undefined;
+    }
+    if (this.onErrorHandler) {
+      this.signalingClient.off('error', this.onErrorHandler as any);
+      this.onErrorHandler = undefined;
+    }
+    if (this.onPeerLeftHandler) {
+      this.signalingClient.off('peer_left', this.onPeerLeftHandler as any);
+      this.onPeerLeftHandler = undefined;
+    }
+
     if (this.dataChannel) {
       this.dataChannel.close();
       this.dataChannel = null;

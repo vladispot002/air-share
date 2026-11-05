@@ -151,7 +151,11 @@ export class SignalingClient {
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.pingInterval = setInterval(() => {
-      // Periodic ping if websocket is active
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        if (typeof (this.ws as any).ping === 'function') {
+          (this.ws as any).ping();
+        }
+      }
     }, 25000);
   }
 

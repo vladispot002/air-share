@@ -455,10 +455,14 @@ export class FrameReassembler {
   push(incoming: Uint8Array): ReassembledFrame[] {
     if (incoming.length === 0) return [];
 
-    const combined = new Uint8Array(this.buffer.length + incoming.length);
-    combined.set(this.buffer, 0);
-    combined.set(incoming, this.buffer.length);
-    this.buffer = combined;
+    if (this.buffer.length === 0) {
+      this.buffer = incoming;
+    } else {
+      const combined = new Uint8Array(this.buffer.length + incoming.length);
+      combined.set(this.buffer, 0);
+      combined.set(incoming, this.buffer.length);
+      this.buffer = combined;
+    }
 
     const frames: ReassembledFrame[] = [];
 
@@ -480,7 +484,15 @@ export class FrameReassembler {
         }
       }
 
-      const header = FrameHeader.deserialize(this.buffer.subarray(0, FRAME_HEADER_SIZE));
+      let header: FrameHeader;
+      try {
+        header = FrameHeader.deserialize(this.buffer.subarray(0, FRAME_HEADER_SIZE));
+      } catch {
+        // Discard 4 magic bytes to advance and search for the next valid frame
+        this.buffer = this.buffer.slice(4);
+        continue;
+      }
+
       const frameTotalSize = FRAME_HEADER_SIZE + header.payloadLength;
 
       if (this.buffer.length < frameTotalSize) {
