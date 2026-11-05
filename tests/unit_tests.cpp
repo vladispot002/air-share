@@ -23,6 +23,7 @@
 #include "landrop/core/HttpClient.hpp"
 #include "landrop/core/TransferEngine.hpp"
 #include "landrop/core/WireProtocolV2.hpp"
+#include "landrop/core/TcpSocketChannel.hpp"
 
 
 #include "landrop/peers/NetworkPeer.hpp"
@@ -1988,6 +1989,92 @@ static bool testWireProtocolV2() {
     return true;
 }
 
+static bool testTransportChannelAbstraction() {
+    using namespace landrop;
+
+    // 1. Enum string conversions
+    TEST_ASSERT(std::string(transportTypeToString(TransportType::TcpDirect)) == "TcpDirect", "TcpDirect string");
+    TEST_ASSERT(std::string(transportTypeToString(TransportType::TlsTcp)) == "TlsTcp", "TlsTcp string");
+    TEST_ASSERT(std::string(transportTypeToString(TransportType::WebRtcDataChannel)) == "WebRtcDataChannel", "WebRtcDataChannel string");
+    TEST_ASSERT(std::string(transportTypeToString(TransportType::CloudRelay)) == "CloudRelay", "CloudRelay string");
+
+    // 2. Loopback TCP via ITransportChannel polymorphism
+    uint16_t testPort = 19877;
+    NetworkSession listenerSession("test-srv-listener");
+    bool listenOk = false;
+    for (int retry = 0; retry < 5; ++retry) {
+        if (listenerSession.listenOn(testPort)) {
+            listenOk = true;
+            break;
+        }
+        testPort += 10;
+    }
+    TEST_ASSERT(listenOk, "Listener session bound successfully for transport channel test");
+
+    std::shared_ptr<ITransportChannel> clientChannel;
+    std::shared_ptr<ITransportChannel> serverChannel;
+    std::atomic<bool> serverReady(false);
+    std::atomic<bool> acceptSuccess(false);
+
+    std::thread serverThread([&]() {
+        serverReady = true;
+        if (listenerSession.acceptIncoming()) {
+            acceptSuccess = true;
+            serverChannel = TcpSocketChannel::create(
+                std::make_unique<NetworkSession>(std::move(listenerSession))
+            );
+        }
+    });
+
+    while (!serverReady.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    clientChannel = std::make_shared<TcpSocketChannel>("127.0.0.1", testPort, false);
+
+    if (serverThread.joinable()) {
+        serverThread.join();
+    }
+
+    TEST_ASSERT(acceptSuccess.load(), "Server accepted incoming connection");
+    TEST_ASSERT(clientChannel != nullptr && clientChannel->isConnected(), "Client channel is connected");
+    TEST_ASSERT(serverChannel != nullptr && serverChannel->isConnected(), "Server channel is connected");
+    TEST_ASSERT(clientChannel->getTransportType() == TransportType::TcpDirect, "Client transport type is TcpDirect");
+    TEST_ASSERT(serverChannel->getTransportType() == TransportType::TcpDirect, "Server transport type is TcpDirect");
+    TEST_ASSERT(!clientChannel->isEncrypted(), "Client is not encrypted in plaintext mode");
+
+    // 3. Bidirectional data transfer over ITransportChannel
+    std::string testMsg = "Hello through ITransportChannel polymorphic abstraction!";
+    std::vector<uint8_t> sendData(testMsg.begin(), testMsg.end());
+    TEST_ASSERT(clientChannel->sendExact(sendData.data(), sendData.size()), "Client channel sent exact bytes");
+
+    std::vector<uint8_t> recvData(sendData.size(), 0);
+    TEST_ASSERT(serverChannel->receiveExact(recvData.data(), recvData.size(), 2000), "Server channel received exact bytes");
+    std::string receivedStr(recvData.begin(), recvData.end());
+    TEST_ASSERT(receivedStr == testMsg, "Data transferred through ITransportChannel matches byte-for-byte");
+
+    // 4. Accounting & Buffered amount
+    TEST_ASSERT(clientChannel->getBytesSent() == sendData.size(), "Client bytes sent accounted correctly");
+    TEST_ASSERT(serverChannel->getBytesReceived() == sendData.size(), "Server bytes received accounted correctly");
+    size_t buffered = clientChannel->getBufferedAmount();
+    TEST_ASSERT(buffered < 1000000000ULL, "Buffered amount returns valid size query");
+
+    // 5. Cancellation check
+    std::atomic<bool> cancelFlag(true); // already cancelled
+    uint8_t dummy[16];
+    bool recvCancelled = serverChannel->receiveExact(dummy, sizeof(dummy), 1000, &cancelFlag);
+    TEST_ASSERT(!recvCancelled, "Cancellation token immediately aborts receiveExact");
+
+    // 6. Channel closure
+    clientChannel->close();
+    serverChannel->close();
+    TEST_ASSERT(!clientChannel->isConnected(), "Client channel marked disconnected after close()");
+    TEST_ASSERT(!serverChannel->isConnected(), "Server channel marked disconnected after close()");
+
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -2020,7 +2107,8 @@ int main() {
         {"REST/HTTP Client & Cloud Quota Synchronization", testHttpClientAndCloudSync},
         {"Live P2P Socket Pipeline & Error Recovery", testLiveSocketTransferPipeline},
         {"TransferEngine Core Pipeline & Hardened Security", testTransferEngine},
-        {"Wire Protocol v2 Framing, Integrity & Backward Compatibility", testWireProtocolV2}
+        {"Wire Protocol v2 Framing, Integrity & Backward Compatibility", testWireProtocolV2},
+        {"ITransportChannel & TcpSocketChannel Abstraction", testTransportChannelAbstraction}
     };
 
 

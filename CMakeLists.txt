@@ -22,6 +22,7 @@ set(LANDROP_CORE_SOURCES
     src/core/TlsContext.cpp
     src/core/HttpClient.cpp
     src/core/WireProtocolV2.cpp
+    src/core/TcpSocketChannel.cpp
     src/peers/NetworkPeer.cpp
     src/peers/LocalPeer.cpp
     src/peers/CloudPeer.cpp
