@@ -12,8 +12,9 @@ public:
         uint64_t fileSize,
         TransferDirection direction,
         uint16_t httpPort = 8080,
-        std::string webToken = "landrop-token-auto",
-        uint32_t maxDownloadCount = 5
+        std::string webToken = "",
+        uint32_t maxDownloadCount = 5,
+        std::string sessionPin = ""
     );
 
     ~HttpWebTransferTask() override = default;
@@ -43,7 +44,7 @@ private:
     uint16_t m_httpPort;
     uint32_t m_maxDownloadCount;
     uint32_t m_currentDownloadCount{0};
-    std::string m_sessionPin{"4242"};
+    std::string m_sessionPin;
 };
 
 }

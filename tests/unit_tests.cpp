@@ -215,6 +215,22 @@ static bool testHttpWebTransferTask() {
     TEST_ASSERT(task.getWebToken() == "qr-auth-token-xyz", "QR token matches");
     TEST_ASSERT(task.getTaskType() == "HttpWebTransferTask", "Task type is HttpWeb");
     TEST_ASSERT(task.initialize(), "Initialized");
+
+    // Constant-time token validation checks
+    TEST_ASSERT(task.validateAccessToken("qr-auth-token-xyz"), "Accepts exact matching token");
+    TEST_ASSERT(!task.validateAccessToken("qr-auth-token-xyw"), "Rejects single-byte mismatch token");
+    TEST_ASSERT(!task.validateAccessToken("qr-auth-token"), "Rejects truncated token");
+    TEST_ASSERT(!task.validateAccessToken(""), "Rejects empty token");
+
+    // Default task security (random token and 6-digit random PIN, NOT static 4242)
+    HttpWebTransferTask defaultTask("T-0100", "doc.pdf", 1024, TransferDirection::Upload);
+    TEST_ASSERT(!defaultTask.getWebToken().empty(), "Default task generates non-empty token");
+    TEST_ASSERT(defaultTask.getSessionPin() != "4242", "Default task does NOT use hardcoded 4242 PIN");
+    TEST_ASSERT(defaultTask.getSessionPin().size() == 6, "Default task generates 6-digit PIN");
+    for (char c : defaultTask.getSessionPin()) {
+        TEST_ASSERT(c >= '0' && c <= '9', "PIN contains only digits");
+    }
+
     return true;
 }
 
@@ -610,6 +626,51 @@ static bool testReceiverSecurityValidation() {
     TEST_ASSERT(isSafeFileName("valid_report.pdf"), "Accepts valid filename");
     TEST_ASSERT(isSafeFileName("my-image.tar.gz"), "Accepts multi-dot extension");
     TEST_ASSERT(isSafeFileName("document (final).docx"), "Accepts filename with spaces and parentheses");
+
+    // Windows ADS (Alternate Data Streams)
+    TEST_ASSERT(!isSafeFileName("test.txt:stream"), "Rejects Windows ADS colon in filename");
+    TEST_ASSERT(!isSafeFileName("invoice.pdf:Zone.Identifier"), "Rejects Windows ADS Zone.Identifier");
+    TEST_ASSERT(!isSafeFileName(":hidden"), "Rejects leading colon");
+
+    // Win32 reserved device names (case-insensitive and with extensions)
+    TEST_ASSERT(!isSafeFileName("CON"), "Rejects Win32 CON device");
+    TEST_ASSERT(!isSafeFileName("con.txt"), "Rejects Win32 con.txt device");
+    TEST_ASSERT(!isSafeFileName("PRN"), "Rejects Win32 PRN device");
+    TEST_ASSERT(!isSafeFileName("prn.pdf"), "Rejects Win32 prn.pdf device");
+    TEST_ASSERT(!isSafeFileName("AUX"), "Rejects Win32 AUX device");
+    TEST_ASSERT(!isSafeFileName("aux.c"), "Rejects Win32 aux.c device");
+    TEST_ASSERT(!isSafeFileName("NUL"), "Rejects Win32 NUL device");
+    TEST_ASSERT(!isSafeFileName("nul.dat"), "Rejects Win32 nul.dat device");
+    TEST_ASSERT(!isSafeFileName("COM1"), "Rejects Win32 COM1 device");
+    TEST_ASSERT(!isSafeFileName("com9.log"), "Rejects Win32 com9.log device");
+    TEST_ASSERT(!isSafeFileName("LPT1"), "Rejects Win32 LPT1 device");
+    TEST_ASSERT(!isSafeFileName("lpt8.bin"), "Rejects Win32 lpt8.bin device");
+
+    // Valid names starting with device substrings (must not be rejected)
+    TEST_ASSERT(isSafeFileName("constant.txt"), "Accepts constant.txt (starts with CON)");
+    TEST_ASSERT(isSafeFileName("printer.pdf"), "Accepts printer.pdf (starts with PRN)");
+    TEST_ASSERT(isSafeFileName("auxiliary.cpp"), "Accepts auxiliary.cpp (starts with AUX)");
+    TEST_ASSERT(isSafeFileName("nullable.hpp"), "Accepts nullable.hpp (starts with NUL)");
+    TEST_ASSERT(isSafeFileName("computer.png"), "Accepts computer.png (starts with COM)");
+
+    // Win32 forbidden characters < > " | ? *
+    TEST_ASSERT(!isSafeFileName("<tag>.txt"), "Rejects < character");
+    TEST_ASSERT(!isSafeFileName("tag>.txt"), "Rejects > character");
+    TEST_ASSERT(!isSafeFileName("quote\"name.txt"), "Rejects double quote character");
+    TEST_ASSERT(!isSafeFileName("pipe|name.txt"), "Rejects pipe character");
+    TEST_ASSERT(!isSafeFileName("wild*card.txt"), "Rejects asterisk character");
+    TEST_ASSERT(!isSafeFileName("question?mark.txt"), "Rejects question mark character");
+
+    // Leading and trailing spaces and dots
+    TEST_ASSERT(!isSafeFileName(" leading_space.txt"), "Rejects leading space");
+    TEST_ASSERT(!isSafeFileName("trailing_space.txt "), "Rejects trailing space");
+    TEST_ASSERT(!isSafeFileName("trailing_dot."), "Rejects trailing dot");
+    TEST_ASSERT(!isSafeFileName("multiple_trailing_dots..."), "Rejects multiple trailing dots");
+
+    // Unicode RTLO, bidirectional override, and zero-width spoofing
+    TEST_ASSERT(!isSafeFileName("invoice\xE2\x80\xAE" "fdp.exe"), "Rejects Unicode RTLO spoofing");
+    TEST_ASSERT(!isSafeFileName("sample\xE2\x81\xA6test\xE2\x81\xA9.txt"), "Rejects Unicode directional isolate");
+    TEST_ASSERT(!isSafeFileName("zero\xE2\x80\x8Bwidth.txt"), "Rejects zero-width space spoofing");
 
     constexpr uint32_t kMaxChunk = 4 * 1024 * 1024;
     uint64_t fileSize = 1000;
