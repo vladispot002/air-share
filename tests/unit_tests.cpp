@@ -1992,6 +1992,17 @@ static bool testWireProtocolV2() {
     const uint8_t v1HeaderSample[4] = {14, 0, 0, 0}; // Legacy v1 4-byte nameLen for "my_archive.zip"
     TEST_ASSERT(!isProtocolV2(v1HeaderSample), "Distinguishes legacy v1 connection from v2");
 
+    // 11. Anti-downgrade policy controls
+    TransferOptions defaultOpts;
+    TEST_ASSERT(defaultOpts.allowLegacyV1Fallback, "Default options allow legacy fallback for backward compatibility");
+    TEST_ASSERT(!defaultOpts.requireProtocolV2, "Default options do not strictly require v2");
+
+    TransferOptions strictOpts;
+    strictOpts.requireProtocolV2 = true;
+    strictOpts.allowLegacyV1Fallback = false;
+    TEST_ASSERT(strictOpts.requireProtocolV2, "Strict options enforce protocol v2");
+    TEST_ASSERT(!strictOpts.allowLegacyV1Fallback, "Strict options prohibit legacy v1 downgrade");
+
     return true;
 }
 

@@ -48,6 +48,10 @@ Every transmission in Protocol v2 consists of a **16-byte fixed frame header** i
 | `payloadLength` | 4 bytes | `uint32_t` | Big-Endian | Size of subsequent payload in bytes (`0 <= N <= 16,777,216`). |
 | `crc32OrSeq` | 4 bytes | `uint32_t` | Big-Endian | IEEE 802.3 CRC32 of payload (or frame sequence number). |
 
+> [!NOTE]
+> **Transport vs Cryptographic Integrity**:
+> CRC-32 is utilized strictly as a lightweight transport integrity check to catch transmission bit-flips, network truncation, and framing errors before deserializing buffers. **CRC-32 is NOT a cryptographic checksum and does not replace authentication**. Cryptographic data integrity and non-repudiation are guaranteed by SHA-256 digests in `FILE_HEADER` and authenticated encryption provided by TLS 1.3 / DTLS 1.3 session keys.
+
 ---
 
 ## 3. Message Types
@@ -124,3 +128,8 @@ In Protocol v2:
   2. If `magic != "LNDP"` and `uint32_t(first 4 bytes) <= 255`, the receiver transparently routes the stream to the legacy v1 transfer parser.
 
 This ensures existing v1.0.0 and v1.0.1 installations continue to function with newer v2 servers.
+
+### 5.1 Downgrade Attack Prevention Policy
+To prevent a malicious adversary on the local network from forcing peers to downgrade from authenticated Protocol v2 to legacy v1:
+1. **Capability Pinning**: During multicast/mDNS beacon discovery, v2-capable peers publish a capability flag (`CAP_PROTOCOL_V2 = 0x0001`). When connecting to a known v2-advertising peer, clients enforce `requireProtocolV2 = true`. If the handshake does not supply `'LNDP'`, the transfer is aborted immediately with `TRANSFER_CANCEL (ERR_DOWNGRADE_ATTACK_REJECTED)`.
+2. **Strict Mode Configuration**: Endpoints operating in hardened environments or with `useTls = true` can set `allowLegacyV1Fallback = false`. In strict mode, any connection lacking the `'LNDP'` header is rejected without processing.

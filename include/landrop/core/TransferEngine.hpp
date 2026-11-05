@@ -37,6 +37,8 @@ struct TransferOptions {
     uint64_t maxFileSizeLimit{10ULL * 1024 * 1024 * 1024}; // 10 GB limit
     uint32_t speedLimitKbps{0}; // 0 = unlimited
     bool autoRenameDuplicates{false}; // When true, rename file (1).ext on duplicate instead of failing
+    bool allowLegacyV1Fallback{true}; // Allows transparent interop with legacy LAN-Drop v1.x clients
+    bool requireProtocolV2{false};     // When true, strictly aborts if incoming connection does not negotiate Protocol v2
 };
 
 class TransferEngine {

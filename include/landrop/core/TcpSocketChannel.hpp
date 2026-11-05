@@ -4,6 +4,7 @@
 #include "landrop/core/NetworkSession.hpp"
 #include <memory>
 #include <atomic>
+#include <mutex>
 
 namespace landrop {
 
@@ -52,6 +53,8 @@ public:
 private:
     std::unique_ptr<NetworkSession> m_session;
     mutable std::atomic<size_t> m_pendingInFlightBytes{0};
+    mutable std::mutex m_sendMutex;
+    mutable std::mutex m_recvMutex;
 };
 
 } // namespace landrop

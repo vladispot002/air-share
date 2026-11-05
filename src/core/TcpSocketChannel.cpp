@@ -2,6 +2,7 @@
 #include <chrono>
 #include <thread>
 #include <algorithm>
+#include <mutex>
 
 #if !defined(_WIN32) && !defined(_WIN64)
 #include <sys/ioctl.h>
@@ -57,6 +58,7 @@ bool TcpSocketChannel::sendExact(const uint8_t* data, size_t length) {
     if (!isConnected()) {
         return false;
     }
+    std::lock_guard<std::mutex> lock(m_sendMutex);
     m_pendingInFlightBytes += length;
     bool ok = m_session->sendAll(data, length);
     m_pendingInFlightBytes -= length;
@@ -72,6 +74,7 @@ bool TcpSocketChannel::receiveExact(
     if (!isConnected()) {
         return false;
     }
+    std::lock_guard<std::mutex> lock(m_recvMutex);
 
     if (!cancelToken) {
         if (timeoutMs > 0 && m_session) {
