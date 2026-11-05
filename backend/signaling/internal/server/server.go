@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -19,6 +20,14 @@ import (
 	"landrop/signaling/internal/turn"
 )
 
+const (
+	maxMessageSize = 64 * 1024       // 64 KB max WebSocket frame payload
+	readWait       = 60 * time.Second // Time allowed to read the next pong message from the peer
+	writeWait      = 5 * time.Second  // Time allowed to write a message to the peer
+	pingPeriod     = 25 * time.Second // Send pings to peer with this period (must be < readWait)
+	sendQueueSize  = 64               // Buffered outbound queue size per client
+)
+
 type Config struct {
 	Port        string
 	TurnSecret  string
@@ -28,6 +37,7 @@ type Config struct {
 	MaxFailures int
 	RateWindow  time.Duration
 	BlockTime   time.Duration
+	TrustProxy  bool
 }
 
 type Server struct {
@@ -63,7 +73,7 @@ func NewServer(cfg Config) *Server {
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
 			CheckOrigin: func(r *http.Request) bool {
-				return true // Guest mode allows all origins
+				return true // Guest mode allows cross-origin requests
 			},
 		},
 		mux: http.NewServeMux(),
@@ -99,6 +109,16 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTurnConfig(w http.ResponseWriter, r *http.Request) {
+	// Enable CORS for web clients
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	token := r.Header.Get("Authorization")
 	token = strings.TrimPrefix(token, "Bearer ")
 	if token == "" {
@@ -110,9 +130,15 @@ func (s *Server) handleTurnConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, exists := s.roomMgr.GetRoomByToken(token)
+	targetRoom, exists := s.roomMgr.GetRoomByToken(token)
 	if !exists {
 		http.Error(w, `{"error":"invalid or expired room token"}`, http.StatusUnauthorized)
+		return
+	}
+
+	remaining := time.Until(targetRoom.ExpiresAt)
+	if remaining <= 0 {
+		http.Error(w, `{"error":"room has expired"}`, http.StatusUnauthorized)
 		return
 	}
 
@@ -121,32 +147,89 @@ func (s *Server) handleTurnConfig(w http.ResponseWriter, r *http.Request) {
 		clientID = "client-" + randomID()[:8]
 	}
 
-	servers := turn.GenerateIceConfig(s.cfg.TurnSecret, clientID, s.cfg.StunURLs, s.cfg.TurnURLs, 1*time.Hour)
+	// Bound TURN credentials TTL to remaining room lifetime
+	turnTTL := remaining
+	if turnTTL > 1*time.Hour {
+		turnTTL = 1 * time.Hour
+	}
+
+	servers := turn.GenerateIceConfig(s.cfg.TurnSecret, clientID, s.cfg.StunURLs, s.cfg.TurnURLs, turnTTL)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ice_servers": servers,
-		"ttl_seconds": 3600,
+		"ttl_seconds": int64(turnTTL.Seconds()),
 	})
 }
 
-// wsSender implements room.Sender over gorilla/websocket.
+// wsSender implements an asynchronous, non-blocking room.Sender with outbound queue and heartbeats.
 type wsSender struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
+	conn      *websocket.Conn
+	sendQueue chan *protocol.Envelope
+	closeOnce sync.Once
+	closed    chan struct{}
+}
+
+func newWsSender(conn *websocket.Conn) *wsSender {
+	s := &wsSender{
+		conn:      conn,
+		sendQueue: make(chan *protocol.Envelope, sendQueueSize),
+		closed:    make(chan struct{}),
+	}
+	go s.writePump()
+	return s
 }
 
 func (w *wsSender) SendEnvelope(env *protocol.Envelope) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.conn.WriteJSON(env)
+	select {
+	case <-w.closed:
+		return errors.New("sender closed")
+	case w.sendQueue <- env:
+		return nil
+	default:
+		// Queue full: peer is not consuming messages, drop to avoid HoL blocking
+		return errors.New("send queue saturated; dropping message")
+	}
 }
 
 func (w *wsSender) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.conn.Close()
+	w.closeOnce.Do(func() {
+		close(w.closed)
+		_ = w.conn.Close()
+	})
+	return nil
+}
+
+func (w *wsSender) writePump() {
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		_ = w.conn.Close()
+	}()
+
+	for {
+		select {
+		case <-w.closed:
+			return
+
+		case env, ok := <-w.sendQueue:
+			_ = w.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if !ok {
+				_ = w.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			if err := w.conn.WriteJSON(env); err != nil {
+				return
+			}
+
+		case <-ticker.C:
+			_ = w.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := w.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -156,9 +239,17 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := extractClientIP(r)
+	// Enforce strict read limit (64 KB) to mitigate OOM attacks
+	conn.SetReadLimit(maxMessageSize)
+	_ = conn.SetReadDeadline(time.Now().Add(readWait))
+	conn.SetPongHandler(func(string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(readWait))
+		return nil
+	})
+
+	ip := extractClientIP(r, s.cfg.TrustProxy)
 	clientID := "c-" + randomID()
-	sender := &wsSender{conn: conn}
+	sender := newWsSender(conn)
 	client := room.NewClient(clientID, ip, sender)
 
 	defer func() {
@@ -172,6 +263,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
+		// Reset read deadline on every message received
+		_ = conn.SetReadDeadline(time.Now().Add(readWait))
 
 		s.processMessage(client, &env)
 	}
@@ -213,6 +306,16 @@ func (s *Server) processMessage(client *room.Client, env *protocol.Envelope) {
 }
 
 func (s *Server) handleCreateRoom(client *room.Client) {
+	if client.RoomCode != "" {
+		_ = client.Send(protocol.NewErrorEnvelope(
+			"ERR_ALREADY_IN_ROOM",
+			"client is already participating in a room",
+			client.RoomCode,
+			client.ID,
+		))
+		return
+	}
+
 	r, err := s.roomMgr.CreateRoom(client)
 	if err != nil {
 		_ = client.Send(protocol.NewErrorEnvelope(
@@ -236,6 +339,16 @@ func (s *Server) handleCreateRoom(client *room.Client) {
 }
 
 func (s *Server) handleJoinRoom(client *room.Client, targetCode string) {
+	if client.RoomCode != "" {
+		_ = client.Send(protocol.NewErrorEnvelope(
+			"ERR_ALREADY_IN_ROOM",
+			"client is already participating in a room",
+			client.RoomCode,
+			client.ID,
+		))
+		return
+	}
+
 	if !s.limiter.Allow(client.IP) {
 		_ = client.Send(protocol.NewErrorEnvelope(
 			protocol.ErrCodeRateLimited,
@@ -252,6 +365,8 @@ func (s *Server) handleJoinRoom(client *room.Client, targetCode string) {
 		code := protocol.ErrCodeRoomNotFound
 		if err == room.ErrRoomFull {
 			code = protocol.ErrCodeRoomFull
+		} else if err == room.ErrCannotJoinOwn {
+			code = "ERR_CANNOT_JOIN_OWN_ROOM"
 		}
 		_ = client.Send(protocol.NewErrorEnvelope(code, err.Error(), targetCode, client.ID))
 		return
@@ -259,11 +374,12 @@ func (s *Server) handleJoinRoom(client *room.Client, targetCode string) {
 
 	s.limiter.RecordSuccess(client.IP)
 
-	// Notify Joiner
+	// Notify Joiner (supplying room token for TURN access)
 	joinerPayload := protocol.PeerJoinedPayload{
-		RoomCode: r.Code,
-		PeerID:   r.Initiator.ID,
-		Role:     protocol.RoleJoiner,
+		RoomCode:  r.Code,
+		PeerID:    r.Initiator.ID,
+		Role:      protocol.RoleJoiner,
+		RoomToken: r.Token,
 	}
 	joinerEnv, _ := protocol.NewEnvelope(protocol.ActionPeerJoined, r.Code, client.ID, joinerPayload)
 	_ = client.Send(joinerEnv)
@@ -301,6 +417,26 @@ func (s *Server) handleSdpRelay(client *room.Client, env *protocol.Envelope) {
 		return
 	}
 
+	// Enforce strict envelope action vs payload type synchronization
+	if env.Action == protocol.ActionSdpOffer && sdpPayload.Type != "offer" {
+		_ = client.Send(protocol.NewErrorEnvelope(
+			protocol.ErrCodeGlareViolation,
+			"action SDP_OFFER requires payload type 'offer'",
+			client.RoomCode,
+			client.ID,
+		))
+		return
+	}
+	if env.Action == protocol.ActionSdpAnswer && sdpPayload.Type != "answer" {
+		_ = client.Send(protocol.NewErrorEnvelope(
+			protocol.ErrCodeGlareViolation,
+			"action SDP_ANSWER requires payload type 'answer'",
+			client.RoomCode,
+			client.ID,
+		))
+		return
+	}
+
 	// Enforce Glare Prevention
 	if err := r.ValidateSdpRole(client.ID, sdpPayload.Type); err != nil {
 		_ = client.Send(protocol.NewErrorEnvelope(
@@ -327,6 +463,10 @@ func (s *Server) handleSdpRelay(client *room.Client, env *protocol.Envelope) {
 		r.SetEstablished()
 	}
 
+	// Sanitize client ID and room code to prevent spoofing
+	env.ClientID = client.ID
+	env.RoomCode = client.RoomCode
+
 	// Forward envelope to peer
 	_ = peer.Send(env)
 }
@@ -337,10 +477,25 @@ func (s *Server) handleIceCandidateRelay(client *room.Client, env *protocol.Enve
 		return
 	}
 
+	var candPayload protocol.IceCandidatePayload
+	if err := json.Unmarshal(env.Payload, &candPayload); err != nil || candPayload.Candidate == "" {
+		_ = client.Send(protocol.NewErrorEnvelope(
+			protocol.ErrCodeInvalidMessage,
+			"malformed or empty ICE candidate payload",
+			client.RoomCode,
+			client.ID,
+		))
+		return
+	}
+
 	peer, err := r.GetPeer(client.ID)
 	if err != nil {
 		return
 	}
+
+	// Sanitize client ID and room code
+	env.ClientID = client.ID
+	env.RoomCode = client.RoomCode
 
 	_ = peer.Send(env)
 }
@@ -383,10 +538,12 @@ func (s *Server) cleanupClient(client *room.Client) {
 	}
 }
 
-func extractClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		return strings.TrimSpace(parts[0])
+func extractClientIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			return strings.TrimSpace(parts[0])
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

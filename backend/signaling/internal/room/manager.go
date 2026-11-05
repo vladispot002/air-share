@@ -21,8 +21,13 @@ type Manager struct {
 	stopClean chan struct{}
 }
 
-// NewManager creates a room manager with specified room TTL.
+// NewManager creates a room manager with default 30-second cleanup ticker.
 func NewManager(ttl time.Duration) *Manager {
+	return NewManagerWithInterval(ttl, 30*time.Second)
+}
+
+// NewManagerWithInterval creates a room manager with a custom cleanup interval.
+func NewManagerWithInterval(ttl, cleanupInterval time.Duration) *Manager {
 	m := &Manager{
 		rooms:     make(map[string]*Room),
 		tokens:    make(map[string]string),
@@ -30,7 +35,7 @@ func NewManager(ttl time.Duration) *Manager {
 		stopClean: make(chan struct{}),
 	}
 
-	go m.cleanupLoop(30 * time.Second)
+	go m.cleanupLoop(cleanupInterval)
 	return m
 }
 
@@ -87,7 +92,7 @@ func (m *Manager) JoinRoom(rawCode string, joiner *Client) (*Room, error) {
 	r, exists := m.rooms[canonicalCode]
 	m.mu.Unlock()
 
-	if !exists {
+	if !exists || r.IsClosed() {
 		return nil, ErrRoomNotFound
 	}
 
@@ -98,7 +103,7 @@ func (m *Manager) JoinRoom(rawCode string, joiner *Client) (*Room, error) {
 	return r, nil
 }
 
-// GetRoom retrieves a room by canonical code.
+// GetRoom retrieves an active room by canonical code.
 func (m *Manager) GetRoom(rawCode string) (*Room, bool) {
 	canonicalCode, err := NormalizeRoomCode(rawCode)
 	if err != nil {
@@ -109,10 +114,13 @@ func (m *Manager) GetRoom(rawCode string) (*Room, bool) {
 	defer m.mu.RUnlock()
 
 	r, exists := m.rooms[canonicalCode]
-	return r, exists
+	if !exists || r.IsClosed() {
+		return nil, false
+	}
+	return r, true
 }
 
-// GetRoomByToken retrieves an active room using its authorization token.
+// GetRoomByToken retrieves an active, non-expired room using its authorization token.
 func (m *Manager) GetRoomByToken(token string) (*Room, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -123,7 +131,11 @@ func (m *Manager) GetRoomByToken(token string) (*Room, bool) {
 	}
 
 	r, exists := m.rooms[code]
-	return r, exists
+	if !exists || r.IsClosed() || r.IsExpired(time.Now()) {
+		return nil, false
+	}
+
+	return r, true
 }
 
 // RemoveRoom deletes a room and its associated token.
@@ -162,7 +174,7 @@ func (m *Manager) cleanupLoop(interval time.Duration) {
 		case now := <-ticker.C:
 			m.mu.Lock()
 			for code, r := range m.rooms {
-				if r.IsExpired(now) || r.State == StateClosed {
+				if r.IsExpired(now) || r.IsClosed() {
 					delete(m.tokens, r.Token)
 					delete(m.rooms, code)
 					r.Close()

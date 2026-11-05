@@ -43,7 +43,7 @@ func TestLimiterBlocking(t *testing.T) {
 	}
 }
 
-func TestLimiterSuccessClears(t *testing.T) {
+func TestLimiterSuccessPenaltyReduction(t *testing.T) {
 	limiter := NewLimiter(3, 1*time.Minute, 1*time.Minute)
 	defer limiter.Close()
 
@@ -51,16 +51,27 @@ func TestLimiterSuccessClears(t *testing.T) {
 	limiter.RecordFailure(ip)
 	limiter.RecordFailure(ip)
 
-	// Record success should clear history
+	// Record success reduces 1 failure penalty
 	limiter.RecordSuccess(ip)
 
-	for i := 0; i < 2; i++ {
-		if !limiter.Allow(ip) {
-			t.Fatalf("expected attempt %d after success to be allowed", i+1)
-		}
-		limiter.RecordFailure(ip)
-	}
+	// 1 failure remains, so 1 more failure should still be allowed
 	if !limiter.Allow(ip) {
-		t.Fatalf("should still allow after 2 failures")
+		t.Fatalf("expected attempt after single success to be allowed")
+	}
+	limiter.RecordFailure(ip) // total 2 failures
+
+	if !limiter.Allow(ip) {
+		t.Fatalf("should still allow after total 2 failures (threshold 3)")
+	}
+
+	// Another success clears remaining penalty
+	limiter.RecordSuccess(ip)
+	limiter.RecordSuccess(ip)
+
+	// Can now endure 2 full failures without hitting threshold 3
+	limiter.RecordFailure(ip)
+	limiter.RecordFailure(ip)
+	if !limiter.Allow(ip) {
+		t.Fatalf("should allow after clean reset and 2 failures")
 	}
 }

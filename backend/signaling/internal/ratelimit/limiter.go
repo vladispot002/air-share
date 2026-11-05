@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const defaultMaxCapacity = 50000
+
 type ipRecord struct {
 	failures  []time.Time
 	blockedTo time.Time
@@ -16,6 +18,7 @@ type Limiter struct {
 	maxFailures int
 	window      time.Duration
 	blockTime   time.Duration
+	maxCapacity int
 	records     map[string]*ipRecord
 	stopCleanup chan struct{}
 }
@@ -26,6 +29,7 @@ func NewLimiter(maxFailures int, window, blockTime time.Duration) *Limiter {
 		maxFailures: maxFailures,
 		window:      window,
 		blockTime:   blockTime,
+		maxCapacity: defaultMaxCapacity,
 		records:     make(map[string]*ipRecord),
 		stopCleanup: make(chan struct{}),
 	}
@@ -58,7 +62,7 @@ func (l *Limiter) Allow(ip string) bool {
 		return false
 	}
 
-	// Filter out failures outside the window
+	// Filter out failures outside the sliding window
 	validFailures := rec.failures[:0]
 	cutoff := now.Add(-l.window)
 	for _, t := range rec.failures {
@@ -79,6 +83,10 @@ func (l *Limiter) RecordFailure(ip string) {
 	now := time.Now()
 	rec, exists := l.records[ip]
 	if !exists {
+		// Enforce capacity bound to prevent OOM
+		if len(l.records) >= l.maxCapacity {
+			l.pruneOldestLocked(now)
+		}
 		rec = &ipRecord{}
 		l.records[ip] = rec
 	}
@@ -98,16 +106,48 @@ func (l *Limiter) RecordFailure(ip string) {
 	}
 }
 
-// RecordSuccess clears or reduces the penalty for an IP upon successful action.
+// RecordSuccess decrements the failure penalty without allowing instant brute-force bypass.
 func (l *Limiter) RecordSuccess(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	delete(l.records, ip)
+	rec, exists := l.records[ip]
+	if !exists {
+		return
+	}
+
+	if len(rec.failures) > 0 {
+		// Reduce failure penalty by 1
+		rec.failures = rec.failures[1:]
+	}
+	if len(rec.failures) == 0 && time.Now().After(rec.blockedTo) {
+		delete(l.records, ip)
+	}
+}
+
+func (l *Limiter) pruneOldestLocked(now time.Time) {
+	cutoff := now.Add(-l.window)
+	for ip, rec := range l.records {
+		if now.After(rec.blockedTo) {
+			validCount := 0
+			for _, t := range rec.failures {
+				if t.After(cutoff) {
+					validCount++
+				}
+			}
+			if validCount == 0 {
+				delete(l.records, ip)
+			}
+		}
+		// If capacity is recovered, break early
+		if len(l.records) < l.maxCapacity {
+			return
+		}
+	}
 }
 
 func (l *Limiter) cleanupLoop() {
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {

@@ -33,7 +33,7 @@ func TestCrockfordBase32CodeGeneration(t *testing.T) {
 		if !codeRegex.MatchString(code) {
 			t.Fatalf("code %s does not match expected Crockford format", code)
 		}
-		// Confirm characters I, L, O, U are strictly excluded
+		// Confirm characters I, L, O, U are strictly excluded from generated payload
 		if strings.ContainsAny(strings.TrimPrefix(code, "DROP-"), "ILOU") {
 			t.Fatalf("code %s contains ambiguous characters (ILOU)", code)
 		}
@@ -53,6 +53,7 @@ func TestNormalizeRoomCode(t *testing.T) {
 		{"DROP-K8M4-P9XO", "DROP-K8M4-P9X0", true}, // 'O' corrected to '0'
 		{"DROP-K8M4-P9XL", "DROP-K8M4-P9X1", true}, // 'L' corrected to '1'
 		{"DROP-K8M4-P9XI", "DROP-K8M4-P9X1", true}, // 'I' corrected to '1'
+		{"DROP-DROP-K8M4", "DROP-DR0P-K8M4", true}, // 'O' in code suffix converted to '0'
 		{"DROP-SHORT", "", false},                  // Invalid length
 		{"DROP-INVALID-CODE-TOO-LONG", "", false},  // Invalid length
 	}
@@ -93,6 +94,11 @@ func TestRoomLifecycleAndGlarePrevention(t *testing.T) {
 
 	if room.State != StateWaiting {
 		t.Errorf("expected StateWaiting, got %s", room.State)
+	}
+
+	// Self-join must be rejected
+	if err := room.AddJoiner(initiator); err != ErrCannotJoinOwn {
+		t.Fatalf("expected ErrCannotJoinOwn when initiator tries to join own room, got: %v", err)
 	}
 
 	// Token lookup should find the room
@@ -146,7 +152,8 @@ func TestRoomLifecycleAndGlarePrevention(t *testing.T) {
 }
 
 func TestManagerCleanup(t *testing.T) {
-	mgr := NewManager(50 * time.Millisecond)
+	// 50ms TTL, 20ms cleanup interval
+	mgr := NewManagerWithInterval(50*time.Millisecond, 20*time.Millisecond)
 	defer mgr.Close()
 
 	initiator := NewClient("init-1", "127.0.0.1", &mockSender{})
@@ -159,11 +166,18 @@ func TestManagerCleanup(t *testing.T) {
 		t.Fatalf("expected active count 1, got %d", mgr.ActiveCount())
 	}
 
-	// Wait for TTL expiration and cleanup ticker
+	// Wait for TTL expiration and cleanup loop ticker to evict
 	time.Sleep(100 * time.Millisecond)
 
-	// Explicit cleanup trigger via close/expiration check
-	if !room.IsExpired(time.Now()) {
-		t.Fatalf("room should be expired after 100ms with 50ms TTL")
+	if mgr.ActiveCount() != 0 {
+		t.Fatalf("expected active count 0 after cleanup, got %d", mgr.ActiveCount())
+	}
+
+	// Querying by code or token should return not found
+	if _, exists := mgr.GetRoom(room.Code); exists {
+		t.Errorf("expired room should not be retrievable")
+	}
+	if _, exists := mgr.GetRoomByToken(room.Token); exists {
+		t.Errorf("expired room token should not be valid")
 	}
 }

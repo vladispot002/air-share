@@ -22,6 +22,7 @@ var (
 	ErrRoomFull       = errors.New(protocol.ErrCodeRoomFull)
 	ErrGlareViolation = errors.New(protocol.ErrCodeGlareViolation)
 	ErrNotParticipant = errors.New("client is not a participant in this room")
+	ErrCannotJoinOwn  = errors.New("client cannot join their own room")
 )
 
 // Room manages point-to-point negotiation between two peers.
@@ -57,6 +58,10 @@ func NewRoom(code, token string, initiator *Client, ttl time.Duration) *Room {
 func (r *Room) AddJoiner(joiner *Client) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.Initiator != nil && r.Initiator.ID == joiner.ID {
+		return ErrCannotJoinOwn
+	}
 
 	if r.State != StateWaiting || r.Joiner != nil {
 		return ErrRoomFull
@@ -130,6 +135,14 @@ func (r *Room) IsExpired(now time.Time) bool {
 	defer r.mu.RUnlock()
 
 	return now.After(r.ExpiresAt)
+}
+
+// IsClosed thread-safely reports if the room state is closed.
+func (r *Room) IsClosed() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.State == StateClosed
 }
 
 // Close marks room as closed.

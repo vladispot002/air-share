@@ -59,9 +59,10 @@ type JoinRoomPayload struct {
 
 // PeerJoinedPayload is broadcast to peers when two endpoints are connected.
 type PeerJoinedPayload struct {
-	RoomCode string `json:"room_code"`
-	PeerID   string `json:"peer_id"`
-	Role     string `json:"role"`
+	RoomCode  string `json:"room_code"`
+	PeerID    string `json:"peer_id"`
+	Role      string `json:"role"`
+	RoomToken string `json:"room_token,omitempty"`
 }
 
 // SdpPayload contains WebRTC SDP offer or answer string and optional E2EE public key.

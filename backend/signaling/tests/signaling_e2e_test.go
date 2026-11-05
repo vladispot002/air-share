@@ -23,6 +23,7 @@ func setupTestServer() (*server.Server, *httptest.Server) {
 		MaxFailures: 5,
 		RateWindow:  10 * time.Minute,
 		BlockTime:   10 * time.Minute,
+		TrustProxy:  false,
 	}
 
 	srv := server.NewServer(cfg)
@@ -40,6 +41,18 @@ func dialWS(t *testing.T, serverURL string) *websocket.Conn {
 	return conn
 }
 
+func readEnvelopeWithTimeout(t *testing.T, conn *websocket.Conn, timeout time.Duration) protocol.Envelope {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("failed to set read deadline: %v", err)
+	}
+	var env protocol.Envelope
+	if err := conn.ReadJSON(&env); err != nil {
+		t.Fatalf("failed to read json envelope within %v: %v", timeout, err)
+	}
+	return env
+}
+
 // TC-SIG-01: Room Creation, 8-char Crockford Base32 formatting, duplicate rejection & TTL cleanup
 func TestTCSIG01_RoomLifecycle(t *testing.T) {
 	srv, ts := setupTestServer()
@@ -55,11 +68,7 @@ func TestTCSIG01_RoomLifecycle(t *testing.T) {
 		t.Fatalf("failed to write CREATE_ROOM: %v", err)
 	}
 
-	var respEnv protocol.Envelope
-	if err := connA.ReadJSON(&respEnv); err != nil {
-		t.Fatalf("failed to read response: %v", err)
-	}
-
+	respEnv := readEnvelopeWithTimeout(t, connA, 2*time.Second)
 	if respEnv.Action != protocol.ActionRoomCreated {
 		t.Fatalf("expected Action ROOM_CREATED, got %s", respEnv.Action)
 	}
@@ -79,7 +88,7 @@ func TestTCSIG01_RoomLifecycle(t *testing.T) {
 		t.Fatalf("room token must not be empty")
 	}
 
-	// 2. Verify token access to /api/v1/turn-config
+	// 2. Verify Initiator token access to /api/v1/turn-config (with CORS headers)
 	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/turn-config", nil)
 	req.Header.Set("Authorization", "Bearer "+payload.RoomToken)
 	turnResp, err := http.DefaultClient.Do(req)
@@ -91,8 +100,22 @@ func TestTCSIG01_RoomLifecycle(t *testing.T) {
 	if turnResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected status 200 for valid token, got %d", turnResp.StatusCode)
 	}
+	if origin := turnResp.Header.Get("Access-Control-Allow-Origin"); origin != "*" {
+		t.Errorf("expected CORS Access-Control-Allow-Origin: *, got %s", origin)
+	}
 
-	// 3. Verify unauthorized access without token
+	// 3. Verify OPTIONS preflight request handling
+	optReq, _ := http.NewRequest("OPTIONS", ts.URL+"/api/v1/turn-config", nil)
+	optResp, err := http.DefaultClient.Do(optReq)
+	if err != nil {
+		t.Fatalf("OPTIONS /api/v1/turn-config error: %v", err)
+	}
+	defer optResp.Body.Close()
+	if optResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected status 204 for OPTIONS preflight, got %d", optResp.StatusCode)
+	}
+
+	// 4. Verify unauthorized access without token
 	badReq, _ := http.NewRequest("GET", ts.URL+"/api/v1/turn-config", nil)
 	badResp, err := http.DefaultClient.Do(badReq)
 	if err != nil {
@@ -120,10 +143,7 @@ func TestTCSIG02_RateLimiting(t *testing.T) {
 			t.Fatalf("failed to write JOIN_ROOM attempt %d: %v", i+1, err)
 		}
 
-		var resp protocol.Envelope
-		if err := conn.ReadJSON(&resp); err != nil {
-			t.Fatalf("failed to read error response: %v", err)
-		}
+		resp := readEnvelopeWithTimeout(t, conn, 2*time.Second)
 		if resp.Action != protocol.ActionError {
 			t.Fatalf("expected ERROR action, got %s", resp.Action)
 		}
@@ -135,11 +155,7 @@ func TestTCSIG02_RateLimiting(t *testing.T) {
 		t.Fatalf("failed to write 6th JOIN_ROOM: %v", err)
 	}
 
-	var throttledResp protocol.Envelope
-	if err := conn.ReadJSON(&throttledResp); err != nil {
-		t.Fatalf("failed to read throttled response: %v", err)
-	}
-
+	throttledResp := readEnvelopeWithTimeout(t, conn, 2*time.Second)
 	var errPayload protocol.ErrorPayload
 	if err := json.Unmarshal(throttledResp.Payload, &errPayload); err != nil {
 		t.Fatalf("failed to parse error payload: %v", err)
@@ -150,7 +166,7 @@ func TestTCSIG02_RateLimiting(t *testing.T) {
 	}
 }
 
-// TC-SIG-03: Glare Prevention & Disconnect Notification
+// TC-SIG-03: Glare Prevention, Joiner Token Delivery & Disconnect Notification
 func TestTCSIG03_GlareAndDisconnect(t *testing.T) {
 	srv, ts := setupTestServer()
 	defer srv.Close()
@@ -164,25 +180,50 @@ func TestTCSIG03_GlareAndDisconnect(t *testing.T) {
 
 	// 1. Node A creates room
 	createEnv, _ := protocol.NewEnvelope(protocol.ActionCreateRoom, "", "node-a", nil)
-	_ = connA.WriteJSON(createEnv)
+	if err := connA.WriteJSON(createEnv); err != nil {
+		t.Fatalf("failed to send CREATE_ROOM: %v", err)
+	}
 
-	var roomCreated protocol.Envelope
-	_ = connA.ReadJSON(&roomCreated)
+	roomCreated := readEnvelopeWithTimeout(t, connA, 2*time.Second)
 	var createdPayload protocol.RoomCreatedPayload
-	_ = json.Unmarshal(roomCreated.Payload, &createdPayload)
+	if err := json.Unmarshal(roomCreated.Payload, &createdPayload); err != nil {
+		t.Fatalf("failed to parse room created payload: %v", err)
+	}
 	roomCode := createdPayload.RoomCode
 
 	// 2. Node B joins room
 	joinEnv, _ := protocol.NewEnvelope(protocol.ActionJoinRoom, roomCode, "node-b", nil)
-	_ = connB.WriteJSON(joinEnv)
+	if err := connB.WriteJSON(joinEnv); err != nil {
+		t.Fatalf("failed to send JOIN_ROOM: %v", err)
+	}
 
 	// Both receive PEER_JOINED
-	var bJoined, aJoined protocol.Envelope
-	_ = connB.ReadJSON(&bJoined)
-	_ = connA.ReadJSON(&aJoined)
+	bJoined := readEnvelopeWithTimeout(t, connB, 2*time.Second)
+	aJoined := readEnvelopeWithTimeout(t, connA, 2*time.Second)
 
 	if bJoined.Action != protocol.ActionPeerJoined || aJoined.Action != protocol.ActionPeerJoined {
-		t.Fatalf("expected PEER_JOINED for both peers")
+		t.Fatalf("expected PEER_JOINED for both peers, got %s and %s", bJoined.Action, aJoined.Action)
+	}
+
+	// Verify Joiner receives RoomToken for TURN access (SEC-06 remediation)
+	var bPayload protocol.PeerJoinedPayload
+	if err := json.Unmarshal(bJoined.Payload, &bPayload); err != nil {
+		t.Fatalf("failed to parse joiner payload: %v", err)
+	}
+	if bPayload.RoomToken == "" {
+		t.Fatalf("joiner must receive room token for TURN access")
+	}
+
+	// Joiner authenticates against /api/v1/turn-config
+	joinerReq, _ := http.NewRequest("GET", ts.URL+"/api/v1/turn-config", nil)
+	joinerReq.Header.Set("Authorization", "Bearer "+bPayload.RoomToken)
+	joinerTurnResp, err := http.DefaultClient.Do(joinerReq)
+	if err != nil {
+		t.Fatalf("joiner turn config request failed: %v", err)
+	}
+	defer joinerTurnResp.Body.Close()
+	if joinerTurnResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for joiner turn config, got %d", joinerTurnResp.StatusCode)
 	}
 
 	// 3. Glare test: Node B (joiner) attempts to send SDP_OFFER -> must be rejected
@@ -190,10 +231,11 @@ func TestTCSIG03_GlareAndDisconnect(t *testing.T) {
 		Type: "offer",
 		Sdp:  "v=0 mock-offer",
 	})
-	_ = connB.WriteJSON(badOffer)
+	if err := connB.WriteJSON(badOffer); err != nil {
+		t.Fatalf("failed to send bad offer: %v", err)
+	}
 
-	var glareErr protocol.Envelope
-	_ = connB.ReadJSON(&glareErr)
+	glareErr := readEnvelopeWithTimeout(t, connB, 2*time.Second)
 	if glareErr.Action != protocol.ActionError {
 		t.Fatalf("expected ERROR on glare violation, got %s", glareErr.Action)
 	}
@@ -208,10 +250,11 @@ func TestTCSIG03_GlareAndDisconnect(t *testing.T) {
 		Type: "offer",
 		Sdp:  "v=0 valid-offer",
 	})
-	_ = connA.WriteJSON(validOffer)
+	if err := connA.WriteJSON(validOffer); err != nil {
+		t.Fatalf("failed to send valid offer: %v", err)
+	}
 
-	var bOfferReceived protocol.Envelope
-	_ = connB.ReadJSON(&bOfferReceived)
+	bOfferReceived := readEnvelopeWithTimeout(t, connB, 2*time.Second)
 	if bOfferReceived.Action != protocol.ActionSdpOffer {
 		t.Fatalf("expected Node B to receive SDP_OFFER, got %s", bOfferReceived.Action)
 	}
@@ -221,10 +264,11 @@ func TestTCSIG03_GlareAndDisconnect(t *testing.T) {
 		Type: "answer",
 		Sdp:  "v=0 valid-answer",
 	})
-	_ = connB.WriteJSON(validAnswer)
+	if err := connB.WriteJSON(validAnswer); err != nil {
+		t.Fatalf("failed to send valid answer: %v", err)
+	}
 
-	var aAnswerReceived protocol.Envelope
-	_ = connA.ReadJSON(&aAnswerReceived)
+	aAnswerReceived := readEnvelopeWithTimeout(t, connA, 2*time.Second)
 	if aAnswerReceived.Action != protocol.ActionSdpAnswer {
 		t.Fatalf("expected Node A to receive SDP_ANSWER, got %s", aAnswerReceived.Action)
 	}
@@ -235,10 +279,11 @@ func TestTCSIG03_GlareAndDisconnect(t *testing.T) {
 		SdpMid:        "0",
 		SdpMLineIndex: 0,
 	})
-	_ = connA.WriteJSON(candidateEnv)
+	if err := connA.WriteJSON(candidateEnv); err != nil {
+		t.Fatalf("failed to send ICE candidate: %v", err)
+	}
 
-	var bCandReceived protocol.Envelope
-	_ = connB.ReadJSON(&bCandReceived)
+	bCandReceived := readEnvelopeWithTimeout(t, connB, 2*time.Second)
 	if bCandReceived.Action != protocol.ActionIceCandidate {
 		t.Fatalf("expected Node B to receive ICE_CANDIDATE, got %s", bCandReceived.Action)
 	}
@@ -246,9 +291,36 @@ func TestTCSIG03_GlareAndDisconnect(t *testing.T) {
 	// 7. Disconnect Notification: Node A abruptly closes connection
 	connA.Close()
 
-	var bLeftReceived protocol.Envelope
-	_ = connB.ReadJSON(&bLeftReceived)
+	bLeftReceived := readEnvelopeWithTimeout(t, connB, 2*time.Second)
 	if bLeftReceived.Action != protocol.ActionPeerLeft {
 		t.Fatalf("expected Node B to receive PEER_LEFT, got %s", bLeftReceived.Action)
+	}
+}
+
+// TestOversizedPayloadRejection verifies 64 KB read limit prevents OOM
+func TestOversizedPayloadRejection(t *testing.T) {
+	srv, ts := setupTestServer()
+	defer srv.Close()
+	defer ts.Close()
+
+	conn := dialWS(t, ts.URL)
+	defer conn.Close()
+
+	// Send a payload larger than 64 KB
+	oversized := strings.Repeat("A", 70*1024)
+	errEnv := protocol.Envelope{
+		Version:  protocol.CurrentVersion,
+		Action:   protocol.ActionCreateRoom,
+		ClientID: oversized,
+	}
+
+	_ = conn.WriteJSON(errEnv)
+
+	// Server should close connection due to read limit exceeded
+	_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	var resp protocol.Envelope
+	err := conn.ReadJSON(&resp)
+	if err == nil {
+		t.Fatalf("expected connection to fail on oversized frame")
 	}
 }

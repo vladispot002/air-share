@@ -32,22 +32,25 @@ func GenerateRoomCode() (string, error) {
 
 // NormalizeRoomCode cleanses, standardizes, and corrects common transcription confusions.
 func NormalizeRoomCode(input string) (string, error) {
-	cleaned := strings.ToUpper(strings.TrimSpace(input))
-	cleaned = strings.TrimPrefix(cleaned, "DROP-")
-	cleaned = strings.TrimPrefix(cleaned, "DROP")
-	cleaned = strings.ReplaceAll(cleaned, "-", "")
-	cleaned = strings.ReplaceAll(cleaned, " ", "")
+	raw := strings.ToUpper(strings.TrimSpace(input))
+	// Strip all hyphens and spaces first to normalize delimiters
+	raw = strings.ReplaceAll(raw, "-", "")
+	raw = strings.ReplaceAll(raw, " ", "")
 
-	// Fix common transcription mistakes
+	// If prefixed with DROP and length is 12 (4 for DROP + 8 code chars), strip prefix once
+	if strings.HasPrefix(raw, "DROP") && len(raw) == 12 {
+		raw = raw[4:]
+	}
+
+	// Fix common transcription mistakes and validate characters
 	var sb strings.Builder
-	for _, ch := range cleaned {
+	for _, ch := range raw {
 		switch ch {
 		case 'O':
 			sb.WriteByte('0')
 		case 'I', 'L':
 			sb.WriteByte('1')
 		default:
-			// Check if character is in Crockford alphabet
 			if strings.ContainsRune(CrockfordBase32Alphabet, ch) {
 				sb.WriteRune(ch)
 			} else {
