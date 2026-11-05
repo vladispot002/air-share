@@ -75,3 +75,14 @@
   1. **Unified Radar Discovery (`DiscoveryPresenter` & `QtDiscoveryWidget`)**: Added "🌍 Global P2P Room" action to the radar view. Hosts can create a room, view the generated room code with one-click clipboard copying, and wait for peer connection. Joiners can enter or paste a room code.
   2. **Dynamic WebRTC Peer Registration**: Upon establishing the WebRTC DataChannel session, `DiscoveryPresenter::onGlobalPeerConnected` injects the remote peer into the discovery radar with endpoint `webrtc:<room_code>`. Transfers directed at this peer in `QtDesktopApp` automatically route through `TransferEngine::sendFileOverChannel()`.
   3. **Bidirectional Background Channel Receiver**: Both host and joiner launch asynchronous receiver listener threads on the established `WebRtcDataChannel`. When the remote peer initiates a transfer, files are received, validated via SHA-256, staged atomically, and logged to the UI transfer list with desktop notifications.
+
+## ADR-014: Web Client Architecture, Wire Protocol v2 Framing & Browser P2P Streaming Engine
+- **Status**: Accepted & Verified.
+- **Context**: Enabling zero-install browser-to-desktop and browser-to-browser P2P file transfers over WebRTC DataChannels with Wire Protocol v2 framing, memory-safe large file streaming (>2GB), glare-free signaling, and zero-telemetry security.
+- **Decision**:
+  1. **Wire Protocol v2 Binary Framing**: Implement strict 16-byte frame header (`LNDP` magic [0x4C, 0x4E, 0x44, 0x50], 2-byte BE Version [2], 2-byte BE OpCode [0x0001 Handshake, 0x0002 FileHeader, 0x0003 ChunkData, 0x0004 TransferAck, 0x0005 TransferCancel], 4-byte BE Payload Length, 4-byte BE CRC-32) using JavaScript `DataView` and a precomputed 256-entry IEEE 802.3 CRC-32 lookup table matching `WireProtocolV2.hpp` exactly.
+  2. **Memory-Safe Large File Streaming**: Sender uses `File.stream()` with 64 KB / 256 KB chunks and strict backpressure flow control (`dataChannel.bufferedAmountLowThreshold = 1 MB` with `bufferedamountlow` event waiting) to safely handle files > 2GB without memory exhaustion. Receiver utilizes the File System Access API (`showSaveFilePicker()` writable stream) for direct-to-disk streaming, falling back to memory-bounded blob chunking.
+  3. **Glare-Free Signaling & Ephemeral Rooms**: Connect to Go signaling daemon at `/ws/signaling`. Room Host initiates SDP Offer; Room Joiner initiates SDP Answer. Crockford Base32 room codes (`DROP-XXXX-XXXX`) normalized with optical character disambiguation (`O`->`0`, `I`/`L`->`1`). Coturn TURN credentials fetched dynamically via `GET /api/v1/turn-config` with Bearer auth.
+  4. **Security & Zero Telemetry**: Streaming incremental SHA-256 validation, strict CSP, path traversal prevention, zero telemetry, and DTLS 1.3 encryption.
+  5. **Static Asset Integration**: Embedded via Go signaling server serving static distribution from `web/dist` at `/`.
+

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -38,7 +39,9 @@ type Config struct {
 	RateWindow  time.Duration
 	BlockTime   time.Duration
 	TrustProxy  bool
+	WebDir      string
 }
+
 
 type Server struct {
 	cfg      Config
@@ -96,7 +99,15 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/api/v1/turn-config", s.handleTurnConfig)
 	s.mux.HandleFunc("/ws/signaling", s.handleWebSocket)
+
+	if s.cfg.WebDir != "" {
+		if fi, err := os.Stat(s.cfg.WebDir); err == nil && fi.IsDir() {
+			fileServer := http.FileServer(http.Dir(s.cfg.WebDir))
+			s.mux.Handle("/", fileServer)
+		}
+	}
 }
+
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")

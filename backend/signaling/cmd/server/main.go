@@ -19,10 +19,22 @@ func main() {
 	turnSecret := flag.String("turn-secret", getEnv("TURN_SECRET", "local-test-turn-secret"), "Coturn shared secret")
 	stunRaw := flag.String("stun", getEnv("STUN_SERVERS", "stun:stun.l.google.com:19302,stun:global.stun.twilio.com:3478"), "Comma-separated STUN URLs")
 	turnRaw := flag.String("turn", getEnv("TURN_SERVERS", "turn:127.0.0.1:3478?transport=udp,turn:127.0.0.1:3478?transport=tcp"), "Comma-separated TURN URLs")
+	webDirFlag := flag.String("web-dir", getEnv("WEB_DIR", ""), "Path to static web assets")
 	flag.Parse()
 
 	stunList := splitNonEmpty(*stunRaw, ",")
 	turnList := splitNonEmpty(*turnRaw, ",")
+
+	webDir := *webDirFlag
+	if webDir == "" {
+		candidates := []string{"web/dist", "../../web/dist", "../web/dist"}
+		for _, c := range candidates {
+			if fi, err := os.Stat(c); err == nil && fi.IsDir() {
+				webDir = c
+				break
+			}
+		}
+	}
 
 	cfg := server.Config{
 		Port:        *port,
@@ -33,7 +45,9 @@ func main() {
 		MaxFailures: 5,
 		RateWindow:  10 * time.Minute,
 		BlockTime:   10 * time.Minute,
+		WebDir:      webDir,
 	}
+
 
 	srvInstance := server.NewServer(cfg)
 	defer srvInstance.Close()

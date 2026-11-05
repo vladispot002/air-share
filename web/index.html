@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LAN-Drop — Peer-to-Peer Transfer</title>
+    <style>
+      :root {
+        --bg-color: #0d1117;
+        --card-bg: #161b22;
+        --border-color: #30363d;
+        --text-primary: #f0f6fc;
+        --text-secondary: #8b949e;
+        --accent: #58a6ff;
+        --success: #3fb950;
+        --danger: #f85149;
+      }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background-color: var(--bg-color);
+        color: var(--text-primary);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 100vh;
+      }
+      .container {
+        width: 100%;
+        max-width: 480px;
+        padding: 2rem;
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+      }
+      h1 {
+        font-size: 1.5rem;
+        margin-top: 0;
+        margin-bottom: 0.5rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .badge {
+        font-size: 0.75rem;
+        background: var(--accent);
+        color: #000;
+        padding: 0.2rem 0.5rem;
+        border-radius: 999px;
+        font-weight: 600;
+      }
+      p {
+        color: var(--text-secondary);
+        font-size: 0.9rem;
+        margin-bottom: 1.5rem;
+      }
+      .dropzone {
+        border: 2px dashed var(--border-color);
+        border-radius: 8px;
+        padding: 2.5rem 1rem;
+        text-align: center;
+        cursor: pointer;
+        transition: border-color 0.2s;
+      }
+      .dropzone:hover {
+        border-color: var(--accent);
+      }
+      .room-section {
+        margin-top: 1.5rem;
+        display: flex;
+        gap: 0.5rem;
+      }
+      input[type="text"] {
+        flex: 1;
+        padding: 0.6rem 0.8rem;
+        background: #0d1117;
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        color: #fff;
+        font-family: monospace;
+        font-size: 1rem;
+        text-transform: uppercase;
+      }
+      button {
+        padding: 0.6rem 1.2rem;
+        background: var(--accent);
+        color: #000;
+        border: none;
+        border-radius: 6px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover {
+        opacity: 0.9;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>LAN-Drop <span class="badge">Web v2</span></h1>
+      <p>Secure peer-to-peer file transfer over WebRTC and Wire Protocol v2.</p>
+      <div id="dropzone" class="dropzone">
+        <span>Drag & drop files here, or click to browse</span>
+        <input type="file" id="fileInput" style="display: none;" />
+      </div>
+      <div class="room-section">
+        <input type="text" id="roomCodeInput" placeholder="DROP-XXXX-XXXX" maxlength="14" />
+        <button id="joinBtn">Join Room</button>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

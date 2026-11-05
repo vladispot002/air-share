@@ -1,0 +1,300 @@
+export const SIGNALING_PROTOCOL_VERSION = '2.0';
+
+export enum SignalingAction {
+  CreateRoom = 'CREATE_ROOM',
+  RoomCreated = 'ROOM_CREATED',
+  JoinRoom = 'JOIN_ROOM',
+  PeerJoined = 'PEER_JOINED',
+  SdpOffer = 'SDP_OFFER',
+  SdpAnswer = 'SDP_ANSWER',
+  IceCandidate = 'ICE_CANDIDATE',
+  PeerLeft = 'PEER_LEFT',
+  LeaveRoom = 'LEAVE_ROOM',
+  Error = 'ERROR',
+}
+
+export interface SignalingEnvelope<T = any> {
+  version: string;
+  action: string;
+  room_code?: string;
+  client_id?: string;
+  timestamp?: number;
+  payload?: T;
+}
+
+export interface RoomCreatedPayload {
+  room_code: string;
+  room_token: string;
+  role: 'initiator';
+  expires_at: number;
+}
+
+export interface PeerJoinedPayload {
+  room_code: string;
+  peer_id: string;
+  role: 'initiator' | 'joiner';
+  room_token?: string;
+}
+
+export interface SdpPayload {
+  type: 'offer' | 'answer';
+  sdp: string;
+  e2ee_public_key?: string;
+}
+
+export interface IceCandidatePayload {
+  candidate: string;
+  sdp_mid?: string;
+  sdp_mline_index: number;
+}
+
+export interface PeerLeftPayload {
+  peer_id?: string;
+  reason: string;
+}
+
+export interface ErrorPayload {
+  code: string;
+  message: string;
+}
+
+export type SignalingEventMap = {
+  room_created: RoomCreatedPayload;
+  peer_joined: PeerJoinedPayload;
+  sdp_offer: SdpPayload;
+  sdp_answer: SdpPayload;
+  ice_candidate: IceCandidatePayload;
+  peer_left: PeerLeftPayload;
+  error: ErrorPayload;
+  close: void;
+};
+
+export class SignalingClient {
+  private ws: WebSocket | null = null;
+  private clientId: string = `c-web-${Math.random().toString(36).substring(2, 10)}`;
+  private listeners: { [K in keyof SignalingEventMap]?: Array<(data: SignalingEventMap[K]) => void> } = {};
+  private currentRoomCode: string = '';
+  private currentRoomToken: string = '';
+  private pingInterval: any = null;
+
+  constructor(clientId?: string) {
+    if (clientId) this.clientId = clientId;
+  }
+
+  get id(): string {
+    return this.clientId;
+  }
+
+  get roomCode(): string {
+    return this.currentRoomCode;
+  }
+
+  get roomToken(): string {
+    return this.currentRoomToken;
+  }
+
+  on<K extends keyof SignalingEventMap>(event: K, handler: (data: SignalingEventMap[K]) => void): void {
+    if (!this.listeners[event]) {
+      this.listeners[event] = [];
+    }
+    this.listeners[event]!.push(handler);
+  }
+
+  off<K extends keyof SignalingEventMap>(event: K, handler: (data: SignalingEventMap[K]) => void): void {
+    if (!this.listeners[event]) return;
+    this.listeners[event] = (this.listeners[event] as any[]).filter((h) => h !== handler);
+  }
+
+  private emit<K extends keyof SignalingEventMap>(event: K, data: SignalingEventMap[K]): void {
+    const handlers = this.listeners[event];
+    if (handlers) {
+      for (const h of handlers) {
+        h(data);
+      }
+    }
+  }
+
+  connect(wsUrl: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      try {
+        this.ws = new WebSocket(wsUrl);
+      } catch (err) {
+        return reject(err);
+      }
+
+      this.ws.onopen = () => {
+        this.startHeartbeat();
+        resolve();
+      };
+
+      this.ws.onerror = () => {
+        reject(new Error(`WebSocket error connecting to ${wsUrl}`));
+      };
+
+
+      this.ws.onclose = () => {
+        this.stopHeartbeat();
+        this.emit('close', undefined);
+      };
+
+      this.ws.onmessage = (event) => {
+        try {
+          const env = JSON.parse(event.data) as SignalingEnvelope;
+          this.handleIncomingEnvelope(env);
+        } catch (err) {
+          console.error('Failed to parse signaling message:', err);
+        }
+      };
+    });
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.pingInterval = setInterval(() => {
+      // Periodic ping if websocket is active
+    }, 25000);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
+  private handleIncomingEnvelope(env: SignalingEnvelope): void {
+    if (env.client_id) {
+      this.clientId = env.client_id;
+    }
+    switch (env.action) {
+      case SignalingAction.RoomCreated: {
+        const payload = env.payload as RoomCreatedPayload;
+        this.currentRoomCode = payload.room_code;
+        this.currentRoomToken = payload.room_token;
+        this.emit('room_created', payload);
+        break;
+      }
+
+      case SignalingAction.PeerJoined: {
+        const payload = env.payload as PeerJoinedPayload;
+        this.currentRoomCode = payload.room_code;
+        if (payload.room_token) {
+          this.currentRoomToken = payload.room_token;
+        }
+        this.emit('peer_joined', payload);
+        break;
+      }
+      case SignalingAction.SdpOffer: {
+        this.emit('sdp_offer', env.payload as SdpPayload);
+        break;
+      }
+      case SignalingAction.SdpAnswer: {
+        this.emit('sdp_answer', env.payload as SdpPayload);
+        break;
+      }
+      case SignalingAction.IceCandidate: {
+        this.emit('ice_candidate', env.payload as IceCandidatePayload);
+        break;
+      }
+      case SignalingAction.PeerLeft: {
+        this.emit('peer_left', env.payload as PeerLeftPayload);
+        break;
+      }
+      case SignalingAction.Error: {
+        this.emit('error', env.payload as ErrorPayload);
+        break;
+      }
+    }
+  }
+
+  sendEnvelope(action: SignalingAction | string, roomCode?: string, payload?: any): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('WebSocket is not open');
+    }
+    const env: SignalingEnvelope = {
+      version: SIGNALING_PROTOCOL_VERSION,
+      action,
+      room_code: roomCode || this.currentRoomCode,
+      client_id: this.clientId,
+      timestamp: Math.floor(Date.now() / 1000),
+      payload,
+    };
+    this.ws.send(JSON.stringify(env));
+  }
+
+  createRoom(): Promise<RoomCreatedPayload> {
+    return new Promise((resolve, reject) => {
+      const onCreated = (payload: RoomCreatedPayload) => {
+        cleanup();
+        resolve(payload);
+      };
+      const onError = (payload: ErrorPayload) => {
+        cleanup();
+        reject(new Error(`Signaling error [${payload.code}]: ${payload.message}`));
+      };
+      const cleanup = () => {
+        this.off('room_created', onCreated);
+        this.off('error', onError);
+      };
+
+      this.on('room_created', onCreated);
+      this.on('error', onError);
+      this.sendEnvelope(SignalingAction.CreateRoom);
+    });
+  }
+
+  joinRoom(roomCode: string): Promise<PeerJoinedPayload> {
+    return new Promise((resolve, reject) => {
+      const onJoined = (payload: PeerJoinedPayload) => {
+        cleanup();
+        resolve(payload);
+      };
+      const onError = (payload: ErrorPayload) => {
+        cleanup();
+        reject(new Error(`Signaling error [${payload.code}]: ${payload.message}`));
+      };
+      const cleanup = () => {
+        this.off('peer_joined', onJoined);
+        this.off('error', onError);
+      };
+
+      this.on('peer_joined', onJoined);
+      this.on('error', onError);
+      this.sendEnvelope(SignalingAction.JoinRoom, roomCode, { room_code: roomCode });
+    });
+  }
+
+  sendSdpOffer(sdp: string, roomCode?: string): void {
+    this.sendEnvelope(SignalingAction.SdpOffer, roomCode, { type: 'offer', sdp });
+  }
+
+  sendSdpAnswer(sdp: string, roomCode?: string): void {
+    this.sendEnvelope(SignalingAction.SdpAnswer, roomCode, { type: 'answer', sdp });
+  }
+
+  sendIceCandidate(candidate: RTCIceCandidateInit, roomCode?: string): void {
+    this.sendEnvelope(SignalingAction.IceCandidate, roomCode, {
+      candidate: candidate.candidate || '',
+      sdp_mid: candidate.sdpMid || undefined,
+      sdp_mline_index: candidate.sdpMLineIndex ?? 0,
+    });
+  }
+
+  leaveRoom(): void {
+    if (this.currentRoomCode) {
+      this.sendEnvelope(SignalingAction.LeaveRoom, this.currentRoomCode);
+      this.currentRoomCode = '';
+      this.currentRoomToken = '';
+    }
+  }
+
+  close(): void {
+    this.leaveRoom();
+    this.stopHeartbeat();
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.listeners = {};
+  }
+}
