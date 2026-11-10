@@ -573,7 +573,8 @@ int landrop_mobile_start_discovery(LandropHandle handle, uint16_t port) {
 void landrop_mobile_stop_discovery(LandropHandle handle) {
     if (!handle) return;
     auto* ctx = static_cast<LandropMobileContext*>(handle);
-    std::lock_guard<std::recursive_mutex> lock(ctx->mutex);
+    // MulticastBeacon::stop internally synchronizes on m_isRunning atomic and joins listener thread.
+    // Executed outside ctx->mutex to prevent deadlocks with incoming discovery callbacks.
     ctx->beacon.stop();
 }
 

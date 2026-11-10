@@ -6,6 +6,7 @@
 #include <atomic>
 #include <functional>
 #include <thread>
+#include <mutex>
 #include "landrop/utils/Types.hpp"
 #include "landrop/utils/SocketCompat.hpp"
 
@@ -67,6 +68,7 @@ private:
 
     socket_handle_t m_listenSocketFd{INVALID_SOCKET_VALUE};
     std::thread m_listenerThread;
+    mutable std::mutex m_lifecycleMutex;
     DiscoveryCallback m_discoveryCallback;
 };
 

@@ -31,25 +31,27 @@ const (
 )
 
 type Config struct {
-	Port        string
-	TurnSecret  string
-	StunURLs    []string
-	TurnURLs    []string
-	RoomTTL     time.Duration
-	MaxFailures int
-	RateWindow  time.Duration
-	BlockTime   time.Duration
-	TrustProxy  bool
-	WebDir      string
+	Port         string
+	TurnSecret   string
+	StunURLs     []string
+	TurnURLs     []string
+	RoomTTL      time.Duration
+	MaxFailures  int
+	RateWindow   time.Duration
+	BlockTime    time.Duration
+	TrustProxy   bool
+	TrustedCIDRs []string
+	WebDir       string
 }
 
 
 type Server struct {
-	cfg      Config
-	roomMgr  *room.Manager
-	limiter  *ratelimit.Limiter
-	upgrader websocket.Upgrader
-	mux      *http.ServeMux
+	cfg         Config
+	roomMgr     *room.Manager
+	limiter     *ratelimit.Limiter
+	upgrader    websocket.Upgrader
+	mux         *http.ServeMux
+	trustedNets []*net.IPNet
 }
 
 func NewServer(cfg Config) *Server {
@@ -69,10 +71,44 @@ func NewServer(cfg Config) *Server {
 		cfg.StunURLs = []string{"stun:stun.l.google.com:19302"}
 	}
 
+	var trustedNets []*net.IPNet
+	if cfg.TrustProxy {
+		cidrs := cfg.TrustedCIDRs
+		if len(cidrs) == 0 {
+			cidrs = []string{
+				"127.0.0.0/8",
+				"::1/128",
+				"10.0.0.0/8",
+				"172.16.0.0/12",
+				"192.168.0.0/16",
+				"fc00::/7",
+				"fe80::/10",
+			}
+		}
+		for _, c := range cidrs {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			if !strings.Contains(c, "/") {
+				if strings.Contains(c, ":") {
+					c += "/128"
+				} else {
+					c += "/32"
+				}
+			}
+			_, ipNet, err := net.ParseCIDR(c)
+			if err == nil && ipNet != nil {
+				trustedNets = append(trustedNets, ipNet)
+			}
+		}
+	}
+
 	s := &Server{
-		cfg:     cfg,
-		roomMgr: room.NewManager(cfg.RoomTTL),
-		limiter: ratelimit.NewLimiter(cfg.MaxFailures, cfg.RateWindow, cfg.BlockTime),
+		cfg:         cfg,
+		roomMgr:     room.NewManager(cfg.RoomTTL),
+		limiter:     ratelimit.NewLimiter(cfg.MaxFailures, cfg.RateWindow, cfg.BlockTime),
+		trustedNets: trustedNets,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
@@ -287,7 +323,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	ip := extractClientIP(r, s.cfg.TrustProxy)
+	ip := s.extractClientIP(r)
 	clientID := "c-" + randomID()
 	sender := newWsSender(conn)
 	client := room.NewClient(clientID, ip, sender)
@@ -578,18 +614,55 @@ func (s *Server) cleanupClient(client *room.Client) {
 	}
 }
 
-func extractClientIP(r *http.Request, trustProxy bool) string {
-	if trustProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			return strings.TrimSpace(parts[0])
+func (s *Server) extractClientIP(r *http.Request) string {
+	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		remoteHost = r.RemoteAddr
+	}
+	remoteIP := net.ParseIP(remoteHost)
+
+	// If TrustProxy is disabled, always return remoteHost
+	if !s.cfg.TrustProxy || len(s.trustedNets) == 0 || remoteIP == nil {
+		return remoteHost
+	}
+
+	// Verify that the immediate remote connection is from a trusted proxy
+	isTrusted := false
+	for _, ipNet := range s.trustedNets {
+		if ipNet.Contains(remoteIP) {
+			isTrusted = true
+			break
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+	if !isTrusted {
+		// RemoteAddr is not a trusted proxy; do NOT trust X-Forwarded-For (prevents client spoofing)
+		return remoteHost
 	}
-	return host
+
+	// RemoteAddr is verified trusted proxy: evaluate X-Forwarded-For from right to left
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			cand := strings.TrimSpace(parts[i])
+			candIP := net.ParseIP(cand)
+			if candIP == nil {
+				continue
+			}
+			candTrusted := false
+			for _, ipNet := range s.trustedNets {
+				if ipNet.Contains(candIP) {
+					candTrusted = true
+					break
+				}
+			}
+			if !candTrusted {
+				return cand
+			}
+		}
+		return strings.TrimSpace(parts[0])
+	}
+
+	return remoteHost
 }
 
 func randomID() string {
@@ -597,3 +670,9 @@ func randomID() string {
 	_, _ = rand.Read(bytes)
 	return hex.EncodeToString(bytes)
 }
+
+// ExtractClientIPForTesting exports extractClientIP for test validation
+func (s *Server) ExtractClientIPForTesting(r *http.Request) string {
+	return s.extractClientIP(r)
+}
+
