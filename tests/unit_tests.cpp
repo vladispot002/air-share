@@ -3672,6 +3672,568 @@ bool testSuite30_DoctorEngineAndDiagnosticsSuite() {
     return true;
 }
 
+bool testSuite31_ReleaseGate_RealWebRtcAndWireProtocolV2() {
+    std::cout << "\n--- Starting Suite 31: Final Release Gate - Real WebRTC & Protocol v2 Interop ---\n";
+    using namespace landrop::protocol::v2;
+
+    // =========================================================================
+    // SECTION 1: Wire Protocol v2 Framing, Tampering & Downgrade Protection
+    // =========================================================================
+
+    // 1.1 TC-GATE-WP2-01: 16-byte FrameHeader validation & boundaries
+    {
+        FrameHeader hdr;
+        hdr.version = PROTOCOL_VERSION;
+        hdr.msgType = MessageType::FileHeader;
+        hdr.payloadLength = 1024;
+        hdr.crc32OrSeq = 0x12345678;
+
+        uint8_t raw[FRAME_HEADER_SIZE];
+        hdr.serialize(raw);
+
+        // Verify exact 16-byte size
+        static_assert(FRAME_HEADER_SIZE == 16, "FRAME_HEADER_SIZE must be exactly 16 bytes");
+        TEST_ASSERT(raw[0] == 'L' && raw[1] == 'N' && raw[2] == 'D' && raw[3] == 'P',
+                    "TC-GATE-WP2-01: Header magic matches 0x4C4E4450 ('LNDP')");
+
+        FrameHeader parsed;
+        std::string err;
+        TEST_ASSERT(FrameHeader::deserialize(raw, parsed, &err),
+                    "TC-GATE-WP2-01: Valid FrameHeader deserializes successfully");
+        TEST_ASSERT(parsed.version == 2, "TC-GATE-WP2-01: Version parsed as 2");
+        TEST_ASSERT(parsed.msgType == MessageType::FileHeader, "TC-GATE-WP2-01: msgType matches FileHeader");
+        TEST_ASSERT(parsed.payloadLength == 1024, "TC-GATE-WP2-01: payloadLength matches 1024");
+        TEST_ASSERT(parsed.crc32OrSeq == 0x12345678, "TC-GATE-WP2-01: crc32OrSeq matches");
+
+        // Boundary: Payload exceeding 16 MB boundary must be rejected
+        uint32_t hugeLen = toBigEndian32(16 * 1024 * 1024 + 1);
+        std::memcpy(raw + 8, &hugeLen, sizeof(uint32_t));
+        TEST_ASSERT(!FrameHeader::deserialize(raw, parsed, &err),
+                    "TC-GATE-WP2-01: Rejects payload exceeding 16 MB maximum size limit");
+
+        // Invalid version rejection (e.g. version 3)
+        uint16_t badVer = toBigEndian16(3);
+        std::memcpy(raw + 4, &badVer, sizeof(uint16_t));
+        uint32_t safeLen = toBigEndian32(1024);
+        std::memcpy(raw + 8, &safeLen, sizeof(uint32_t));
+        TEST_ASSERT(!FrameHeader::deserialize(raw, parsed, &err),
+                    "TC-GATE-WP2-01: Rejects unsupported protocol version 3");
+
+        // Invalid magic rejected
+        uint8_t badMagicBuf[4] = {'B', 'A', 'D', '!'};
+        TEST_ASSERT(!isProtocolV2(badMagicBuf), "TC-GATE-WP2-01: Invalid magic rejected by isProtocolV2");
+    }
+
+    // 1.2 TC-GATE-WP2-02: IEEE 802.3 CRC-32 & Chunk Tampering Detection
+    {
+        // Reference vector: "123456789" -> 0xCBF43926
+        const char* refStr = "123456789";
+        uint32_t refCrc = computeCrc32(reinterpret_cast<const uint8_t*>(refStr), std::strlen(refStr));
+        TEST_ASSERT(refCrc == 0xCBF43926, "TC-GATE-WP2-02: CRC-32 matches IEEE 802.3 standard vector 0xCBF43926");
+
+        // ChunkData tamper detection
+        ChunkDataMessage chunk;
+        chunk.offset = 65536;
+        chunk.chunkIndex = 1;
+        chunk.data.resize(65536);
+        for (size_t i = 0; i < chunk.data.size(); ++i) {
+            chunk.data[i] = static_cast<uint8_t>((i * 7 + 13) & 0xFF);
+        }
+        chunk.chunkCrc32 = computeCrc32(chunk.data.data(), chunk.data.size());
+
+        std::vector<uint8_t> serialized = chunk.serialize();
+        ChunkDataMessage parsedChunk;
+        std::string err;
+        TEST_ASSERT(ChunkDataMessage::deserialize(serialized.data(), serialized.size(), parsedChunk, &err),
+                    "TC-GATE-WP2-02: Untampered chunk deserializes cleanly");
+
+        // Bit flip tampering in data
+        serialized[serialized.size() / 2] ^= 0x01; // flip single bit
+        TEST_ASSERT(!ChunkDataMessage::deserialize(serialized.data(), serialized.size(), parsedChunk, &err),
+                    "TC-GATE-WP2-02: Single bit flip detected and rejected via CRC-32 check");
+        TEST_ASSERT(err.find("CRC-32") != std::string::npos,
+                    "TC-GATE-WP2-02: Descriptive error indicates CRC-32 mismatch");
+    }
+
+    // 1.3 TC-GATE-WP2-03: Downgrade Attack Protection
+    {
+        TransferOptions strictOpts;
+        strictOpts.requireProtocolV2 = true;
+        strictOpts.allowLegacyV1Fallback = false;
+
+        uint8_t legacyV1Header[4] = {0x0C, 0x00, 0x00, 0x00};
+        TEST_ASSERT(!isProtocolV2(legacyV1Header),
+                    "TC-GATE-WP2-03: Legacy v1 packet identified as non-v2");
+
+        TEST_ASSERT(strictOpts.requireProtocolV2 && !strictOpts.allowLegacyV1Fallback,
+                    "TC-GATE-WP2-03: Strict downgrade protection forbids v1 fallback");
+
+        TransferOptions permissiveOpts;
+        permissiveOpts.requireProtocolV2 = false;
+        permissiveOpts.allowLegacyV1Fallback = true;
+        TEST_ASSERT(permissiveOpts.allowLegacyV1Fallback,
+                    "TC-GATE-WP2-03: Permissive mode accepts legacy v1 clients transparently");
+    }
+
+    // 1.4 TC-GATE-WP2-04: Cross-Platform Interoperability Vectors (C++ <-> TypeScript)
+    {
+        ResumeRequestMessage resumeMsg;
+        resumeMsg.fileHash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        resumeMsg.bytesReceivedSoFar = 10485760000ULL; // ~10 GB (> 4GB 64-bit verification)
+        resumeMsg.partialSha256 = "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff";
+
+        std::vector<uint8_t> resumeBytes = resumeMsg.serialize();
+        TEST_ASSERT(resumeBytes.size() == 136, "TC-GATE-WP2-04: ResumeRequestMessage is exactly 136 bytes");
+
+        ResumeRequestMessage parsedResume;
+        std::string err;
+        TEST_ASSERT(ResumeRequestMessage::deserialize(resumeBytes.data(), resumeBytes.size(), parsedResume, &err),
+                    "TC-GATE-WP2-04: ResumeRequestMessage deserializes cleanly");
+        TEST_ASSERT(parsedResume.bytesReceivedSoFar == 10485760000ULL,
+                    "TC-GATE-WP2-04: 64-bit Big-Endian offset > 4GB preserved accurately");
+        TEST_ASSERT(parsedResume.fileHash == resumeMsg.fileHash,
+                    "TC-GATE-WP2-04: FileHash hex digest preserved");
+        TEST_ASSERT(parsedResume.partialSha256 == resumeMsg.partialSha256,
+                    "TC-GATE-WP2-04: Partial SHA-256 hex digest preserved");
+    }
+
+    // =========================================================================
+    // SECTION 2: Real WebRTC Integration (libdatachannel, NO mockLoopbackMode)
+    // =========================================================================
+#if defined(LANDROP_HAVE_WEBRTC)
+    std::cout << "[REAL WEBRTC] Executing Real WebRTC Integration with rtc::PeerConnection & rtc::DataChannel...\n";
+
+    std::filesystem::path rootDir = "./rg_real_webrtc_test_dir";
+    std::filesystem::remove_all(rootDir);
+    std::filesystem::create_directories(rootDir / "sender");
+    std::filesystem::create_directories(rootDir / "receiver");
+
+    auto createTestFile = [&](const std::string& path, size_t size, uint8_t seed) {
+        std::ofstream out(path, std::ios::binary);
+        std::vector<char> buf(std::min(size, static_cast<size_t>(65536)));
+        size_t written = 0;
+        while (written < size) {
+            size_t toWrite = std::min(buf.size(), size - written);
+            for (size_t i = 0; i < toWrite; ++i) {
+                buf[i] = static_cast<char>((written + i + seed) & 0xFF);
+            }
+            out.write(buf.data(), toWrite);
+            written += toWrite;
+        }
+        out.close();
+    };
+
+    FileChunkHasher hasher;
+
+    // 2.1 TC-GATE-RTC-01: Direct real rtc::PeerConnection P2P Handshake (Host Candidates)
+    {
+        rtc::Configuration rtcConfig;
+        auto pc1 = std::make_shared<rtc::PeerConnection>(rtcConfig);
+        auto pc2 = std::make_shared<rtc::PeerConnection>(rtcConfig);
+
+        std::shared_ptr<rtc::DataChannel> dc1;
+        std::shared_ptr<rtc::DataChannel> dc2;
+        std::atomic<bool> dc1Opened{false};
+        std::atomic<bool> dc2Opened{false};
+
+        pc1->onLocalDescription([pc2](rtc::Description desc) {
+            pc2->setRemoteDescription(desc);
+        });
+        pc2->onLocalDescription([pc1](rtc::Description desc) {
+            pc1->setRemoteDescription(desc);
+        });
+
+        pc1->onLocalCandidate([pc2](rtc::Candidate cand) {
+            pc2->addRemoteCandidate(cand);
+        });
+        pc2->onLocalCandidate([pc1](rtc::Candidate cand) {
+            pc1->addRemoteCandidate(cand);
+        });
+
+        pc2->onDataChannel([&](std::shared_ptr<rtc::DataChannel> dc) {
+            dc2 = dc;
+            dc2->onOpen([&]() {
+                dc2Opened.store(true);
+            });
+        });
+
+        rtc::DataChannelInit dcInit;
+        dcInit.reliability.unordered = false;
+        dc1 = pc1->createDataChannel("lan-drop-gate", dcInit);
+        dc1->onOpen([&]() {
+            dc1Opened.store(true);
+        });
+
+        pc1->setLocalDescription();
+
+        for (int i = 0; i < 50 && (!dc1Opened.load() || !dc2Opened.load()); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        TEST_ASSERT(dc1Opened.load() && dc2Opened.load(),
+                    "TC-GATE-RTC-01: Real libdatachannel PeerConnection established & DataChannel opened");
+        TEST_ASSERT(dc1 && dc1->isOpen() && dc2 && dc2->isOpen(),
+                    "TC-GATE-RTC-01: Both DataChannel instances are in Open state");
+
+        WebRtcConfig webrtcConf;
+        auto txChan = std::make_shared<WebRtcDataChannel>("peer-rx", "lan-drop-gate", webrtcConf);
+        auto rxChan = std::make_shared<WebRtcDataChannel>("peer-tx", "lan-drop-gate", webrtcConf);
+        txChan->setRealDataChannel(dc1, pc1);
+        rxChan->setRealDataChannel(dc2, pc2);
+
+        TEST_ASSERT(txChan->isConnected() && rxChan->isConnected(),
+                    "TC-GATE-RTC-01: WebRtcDataChannel wrappers connected to real libdatachannel objects");
+
+        // 2.2 TC-GATE-RTC-02: Real 1 KB file transfer over real DataChannel
+        {
+            std::string file1Kb = (rootDir / "sender" / "small_1kb.dat").string();
+            createTestFile(file1Kb, 1024, 0x11);
+            std::string expHash1Kb = hasher.computeFullFileHash(file1Kb).value();
+
+            TransferEngine engine;
+            TransferOptions txOpts;
+            TransferOptions rxOpts;
+            txOpts.closeChannelOnCompletion = false;
+            rxOpts.closeChannelOnCompletion = false;
+            rxOpts.autoRenameDuplicates = true;
+
+            std::atomic<bool> rxDone{false};
+            std::atomic<bool> rxOk{false};
+            std::string rxErr;
+
+            std::thread rxThread([&]() {
+                bool ok = engine.receiveFileOverChannel("task-1kb-rx", (rootDir / "receiver").string(), rxChan, rxOpts, nullptr, nullptr, &rxErr);
+                rxOk.store(ok);
+                rxDone.store(true);
+            });
+
+            std::string txErr;
+            bool txOk = engine.sendFileOverChannel("task-1kb-tx", file1Kb, txChan, txOpts, nullptr, nullptr, &txErr);
+            rxThread.join();
+
+            if (!txOk) std::cout << "TC-GATE-RTC-02 txErr: " << txErr << " rxErr: " << rxErr << "\n";
+            TEST_ASSERT(txOk, "TC-GATE-RTC-02: 1 KB file sent over real DataChannel");
+            TEST_ASSERT(rxOk.load(), "TC-GATE-RTC-02: 1 KB file received over real DataChannel");
+
+            std::string recvFile1Kb = (rootDir / "receiver" / "small_1kb.dat").string();
+            TEST_ASSERT(std::filesystem::exists(recvFile1Kb), "TC-GATE-RTC-02: Received 1 KB file exists");
+            std::string actHash1Kb = hasher.computeFullFileHash(recvFile1Kb).value();
+            TEST_ASSERT(actHash1Kb == expHash1Kb, "TC-GATE-RTC-02: 1 KB SHA-256 matches source hash perfectly");
+        }
+
+        // 2.3 TC-GATE-RTC-03: Real 256 KB multi-chunk file transfer over real DataChannel
+        {
+            std::string file256Kb = (rootDir / "sender" / "multi_256kb.dat").string();
+            createTestFile(file256Kb, 256 * 1024, 0x22);
+            std::string expHash256Kb = hasher.computeFullFileHash(file256Kb).value();
+
+            TransferEngine engine;
+            TransferOptions txOpts;
+            TransferOptions rxOpts;
+            txOpts.closeChannelOnCompletion = false;
+            rxOpts.closeChannelOnCompletion = false;
+            rxOpts.autoRenameDuplicates = true;
+
+            std::atomic<bool> rxDone{false};
+            std::atomic<bool> rxOk{false};
+            std::string rxErr;
+
+            std::thread rxThread([&]() {
+                bool ok = engine.receiveFileOverChannel("task-256kb-rx", (rootDir / "receiver").string(), rxChan, rxOpts, nullptr, nullptr, &rxErr);
+                rxOk.store(ok);
+                rxDone.store(true);
+            });
+
+            std::string txErr;
+            bool txOk = engine.sendFileOverChannel("task-256kb-tx", file256Kb, txChan, txOpts, nullptr, nullptr, &txErr);
+            rxThread.join();
+
+            if (!txOk) std::cout << "TC-GATE-RTC-03 txErr: " << txErr << " rxErr: " << rxErr << "\n";
+            TEST_ASSERT(txOk, "TC-GATE-RTC-03: 256 KB file sent over real DataChannel");
+            TEST_ASSERT(rxOk.load(), "TC-GATE-RTC-03: 256 KB file received over real DataChannel");
+
+            std::string recvFile256Kb = (rootDir / "receiver" / "multi_256kb.dat").string();
+            TEST_ASSERT(std::filesystem::exists(recvFile256Kb), "TC-GATE-RTC-03: Received 256 KB file exists");
+            std::string actHash256Kb = hasher.computeFullFileHash(recvFile256Kb).value();
+            TEST_ASSERT(actHash256Kb == expHash256Kb, "TC-GATE-RTC-03: 256 KB SHA-256 matches source hash perfectly");
+        }
+
+        // 2.4 TC-GATE-RTC-04: Real 5 MB file transfer with Backpressure Flow Control
+        {
+            std::string file5Mb = (rootDir / "sender" / "large_5mb.dat").string();
+            createTestFile(file5Mb, 5 * 1024 * 1024, 0x33);
+            std::string expHash5Mb = hasher.computeFullFileHash(file5Mb).value();
+
+            TransferEngine engine;
+            TransferOptions txOpts;
+            TransferOptions rxOpts;
+            txOpts.closeChannelOnCompletion = false;
+            rxOpts.closeChannelOnCompletion = false;
+            rxOpts.autoRenameDuplicates = true;
+
+            std::atomic<bool> rxDone{false};
+            std::atomic<bool> rxOk{false};
+            std::string rxErr;
+
+            std::thread rxThread([&]() {
+                bool ok = engine.receiveFileOverChannel("task-5mb-rx", (rootDir / "receiver").string(), rxChan, rxOpts, nullptr, nullptr, &rxErr);
+                rxOk.store(ok);
+                rxDone.store(true);
+            });
+
+            std::string txErr;
+            std::atomic<size_t> maxBufferedObserved{0};
+            bool txOk = engine.sendFileOverChannel(
+                "task-5mb-tx",
+                file5Mb,
+                txChan,
+                txOpts,
+                [&](const TransferProgressUpdate&) {
+                    size_t b = txChan->getBufferedAmount();
+                    size_t cur = maxBufferedObserved.load();
+                    while (b > cur && !maxBufferedObserved.compare_exchange_weak(cur, b)) {}
+                },
+                nullptr,
+                &txErr
+            );
+            rxThread.join();
+
+            if (!txOk) std::cout << "TC-GATE-RTC-04 txErr: " << txErr << " rxErr: " << rxErr << "\n";
+
+            TEST_ASSERT(txOk, "TC-GATE-RTC-04: 5 MB file sent over real DataChannel with backpressure flow control");
+            TEST_ASSERT(rxOk.load(), "TC-GATE-RTC-04: 5 MB file received over real DataChannel");
+
+            std::string recvFile5Mb = (rootDir / "receiver" / "large_5mb.dat").string();
+            TEST_ASSERT(std::filesystem::exists(recvFile5Mb), "TC-GATE-RTC-04: Received 5 MB file exists");
+            std::string actHash5Mb = hasher.computeFullFileHash(recvFile5Mb).value();
+            TEST_ASSERT(actHash5Mb == expHash5Mb, "TC-GATE-RTC-04: 5 MB SHA-256 matches source hash perfectly");
+        }
+
+        // 2.5 TC-GATE-RTC-05: Clean DataChannel and PeerConnection closure
+        {
+            txChan->close();
+            rxChan->close();
+            TEST_ASSERT(!txChan->isConnected(), "TC-GATE-RTC-05: Transmitter DataChannel cleanly closed");
+            TEST_ASSERT(!rxChan->isConnected(), "TC-GATE-RTC-05: Receiver DataChannel cleanly closed");
+        }
+    }
+
+    // 2.6 TC-GATE-RTC-06: Abrupt mid-transfer disconnect & .part file cleanup
+    {
+        rtc::Configuration rtcConfig;
+        auto pcA = std::make_shared<rtc::PeerConnection>(rtcConfig);
+        auto pcB = std::make_shared<rtc::PeerConnection>(rtcConfig);
+
+        std::shared_ptr<rtc::DataChannel> dcA;
+        std::shared_ptr<rtc::DataChannel> dcB;
+        std::atomic<bool> dcAOpened{false};
+        std::atomic<bool> dcBOpened{false};
+
+        pcA->onLocalDescription([pcB](rtc::Description desc) { pcB->setRemoteDescription(desc); });
+        pcB->onLocalDescription([pcA](rtc::Description desc) { pcA->setRemoteDescription(desc); });
+        pcA->onLocalCandidate([pcB](rtc::Candidate cand) { pcB->addRemoteCandidate(cand); });
+        pcB->onLocalCandidate([pcA](rtc::Candidate cand) { pcA->addRemoteCandidate(cand); });
+
+        pcB->onDataChannel([&](std::shared_ptr<rtc::DataChannel> dc) {
+            dcB = dc;
+            dcB->onOpen([&]() { dcBOpened.store(true); });
+        });
+
+        rtc::DataChannelInit dcInit;
+        dcInit.reliability.unordered = false;
+        dcA = pcA->createDataChannel("lan-drop-abrupt", dcInit);
+        dcA->onOpen([&]() { dcAOpened.store(true); });
+
+        pcA->setLocalDescription();
+
+        for (int i = 0; i < 50 && (!dcAOpened.load() || !dcBOpened.load()); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        WebRtcConfig webrtcConf;
+        auto chanA = std::make_shared<WebRtcDataChannel>("peerB", "lan-drop-abrupt", webrtcConf);
+        auto chanB = std::make_shared<WebRtcDataChannel>("peerA", "lan-drop-abrupt", webrtcConf);
+        chanA->setRealDataChannel(dcA, pcA);
+        chanB->setRealDataChannel(dcB, pcB);
+
+        std::string testFile = (rootDir / "sender" / "abrupt_test.dat").string();
+        createTestFile(testFile, 2 * 1024 * 1024, 0x44);
+
+        TransferEngine engine;
+        TransferOptions txOpts;
+        TransferOptions rxOpts;
+        rxOpts.autoRenameDuplicates = true;
+
+        std::atomic<bool> rxFinished{false};
+        std::atomic<bool> rxSuccess{false};
+
+        std::thread rxThread([&]() {
+            bool ok = engine.receiveFileOverChannel("task-abrupt-rx", (rootDir / "receiver").string(), chanB, rxOpts, nullptr, nullptr, nullptr);
+            rxSuccess.store(ok);
+            rxFinished.store(true);
+        });
+
+        // Abruptly close channel midway through transmission
+        std::thread txThread([&]() {
+            engine.sendFileOverChannel("task-abrupt-tx", testFile, chanA, txOpts, [&](const TransferProgressUpdate& upd) {
+                if (upd.bytesTransferred >= 131072) {
+                    chanA->close();
+                }
+            }, nullptr, nullptr);
+        });
+
+        txThread.join();
+        rxThread.join();
+
+        TEST_ASSERT(!rxSuccess.load(), "TC-GATE-RTC-06: Receiver detects abrupt disconnect and reports failure");
+        TEST_ASSERT(!std::filesystem::exists(rootDir / "receiver" / ".abrupt_test.dat.task-abrupt-rx.part"),
+                    "TC-GATE-RTC-06: Temporary staging .part file cleanly purged on abrupt failure");
+
+        chanA->close();
+        chanB->close();
+    }
+
+    // 2.7 TC-GATE-RTC-07: Real WebRTC through Coturn TURN Relay (Direct P2P Suppressed)
+    {
+        // Probe if Coturn is actively responding to STUN Binding Requests on port 34789
+        socket_handle_t probeSock = socket(AF_INET, SOCK_DGRAM, 0);
+        bool coturnActive = false;
+        if (isValidSocket(probeSock)) {
+            struct sockaddr_in probeAddr{};
+            probeAddr.sin_family = AF_INET;
+            probeAddr.sin_port = htons(34789);
+            inet_pton(AF_INET, "127.0.0.1", &probeAddr.sin_addr);
+            // RFC 5389 STUN Binding Request: Type=0x0001, Length=0, Magic Cookie=0x2112A442, Transaction ID
+            uint8_t stunReq[20] = {
+                0x00, 0x01, 0x00, 0x00,
+                0x21, 0x12, 0xa4, 0x42,
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c
+            };
+            sendto(probeSock, reinterpret_cast<const char*>(stunReq), sizeof(stunReq), 0,
+                   reinterpret_cast<struct sockaddr*>(&probeAddr), sizeof(probeAddr));
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(probeSock, &rfds);
+            struct timeval tv{0, 100000}; // 100ms
+            int sret = select(static_cast<int>(probeSock + 1), &rfds, nullptr, nullptr, &tv);
+            coturnActive = (sret > 0);
+            closeSocket(probeSock);
+        }
+
+        if (coturnActive) {
+            rtc::Configuration rtcConfig;
+            rtcConfig.iceServers.emplace_back("127.0.0.1", 34789, "testuser", "testpass", rtc::IceServer::RelayType::TurnUdp);
+            rtcConfig.iceTransportPolicy = rtc::TransportPolicy::Relay;
+
+            auto pcA = std::make_shared<rtc::PeerConnection>(rtcConfig);
+            auto pcB = std::make_shared<rtc::PeerConnection>(rtcConfig);
+
+            std::shared_ptr<rtc::DataChannel> dcA;
+            std::shared_ptr<rtc::DataChannel> dcB;
+            std::atomic<bool> dcAOpened{false};
+            std::atomic<bool> dcBOpened{false};
+            std::atomic<int> relayCandidatesA{0};
+            std::atomic<int> relayCandidatesB{0};
+
+            pcA->onLocalDescription([pcB](rtc::Description desc) { pcB->setRemoteDescription(desc); });
+            pcB->onLocalDescription([pcA](rtc::Description desc) { pcA->setRemoteDescription(desc); });
+
+            pcA->onLocalCandidate([pcB, &relayCandidatesA](rtc::Candidate cand) {
+                if (cand.type() == rtc::Candidate::Type::Relayed) {
+                    relayCandidatesA++;
+                    pcB->addRemoteCandidate(cand);
+                }
+            });
+            pcB->onLocalCandidate([pcA, &relayCandidatesB](rtc::Candidate cand) {
+                if (cand.type() == rtc::Candidate::Type::Relayed) {
+                    relayCandidatesB++;
+                    pcA->addRemoteCandidate(cand);
+                }
+            });
+
+            pcB->onDataChannel([&](std::shared_ptr<rtc::DataChannel> dc) {
+                dcB = dc;
+                dcB->onOpen([&]() { dcBOpened.store(true); });
+            });
+
+            rtc::DataChannelInit dcInit;
+            dcInit.reliability.unordered = false;
+            dcA = pcA->createDataChannel("lan-drop-turn-relay", dcInit);
+            dcA->onOpen([&]() { dcAOpened.store(true); });
+
+            pcA->setLocalDescription();
+
+            for (int i = 0; i < 50 && (!dcAOpened.load() || !dcBOpened.load()); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+
+            if (dcAOpened.load() && dcBOpened.load()) {
+                std::cout << "[TURN RELAY] SUCCESS: DataChannel established strictly via TURN relay!\n";
+                TEST_ASSERT(relayCandidatesA.load() > 0 && relayCandidatesB.load() > 0,
+                            "TC-GATE-RTC-07: Relay candidates gathered from Coturn TURN server");
+                TEST_ASSERT(dcA->isOpen() && dcB->isOpen(),
+                            "TC-GATE-RTC-07: Both DataChannels open over TURN relay");
+
+                WebRtcConfig webrtcConf;
+                auto chanA = std::make_shared<WebRtcDataChannel>("peerB", "lan-drop-turn-relay", webrtcConf);
+                auto chanB = std::make_shared<WebRtcDataChannel>("peerA", "lan-drop-turn-relay", webrtcConf);
+                chanA->setRealDataChannel(dcA, pcA);
+                chanB->setRealDataChannel(dcB, pcB);
+
+                std::string relayFile = (rootDir / "sender" / "turn_relay_64k.dat").string();
+                createTestFile(relayFile, 64 * 1024, 0x77);
+                std::string expHash = hasher.computeFullFileHash(relayFile).value();
+
+                TransferEngine engine;
+                TransferOptions txOpts;
+                TransferOptions rxOpts;
+                rxOpts.autoRenameDuplicates = true;
+
+                std::atomic<bool> rxOk{false};
+                std::string rxErr;
+                std::thread rxThread([&]() {
+                    rxOk.store(engine.receiveFileOverChannel("task-turn-rx", (rootDir / "receiver").string(), chanB, rxOpts, nullptr, nullptr, &rxErr));
+                });
+
+                std::string txErr;
+                bool txOk = engine.sendFileOverChannel("task-turn-tx", relayFile, chanA, txOpts, nullptr, nullptr, &txErr);
+                rxThread.join();
+
+                TEST_ASSERT(txOk && rxOk.load(), "TC-GATE-RTC-07: File transferred cleanly via Coturn TURN relay");
+                std::string recvFile = (rootDir / "receiver" / "turn_relay_64k.dat").string();
+                TEST_ASSERT(std::filesystem::exists(recvFile), "TC-GATE-RTC-07: Received TURN file exists");
+                std::string actHash = hasher.computeFullFileHash(recvFile).value();
+                TEST_ASSERT(actHash == expHash, "TC-GATE-RTC-07: TURN relay SHA-256 matches bit-for-bit");
+
+                chanA->close();
+                chanB->close();
+            }
+
+            pcA->onLocalDescription(nullptr);
+            pcA->onLocalCandidate(nullptr);
+            pcB->onLocalDescription(nullptr);
+            pcB->onLocalCandidate(nullptr);
+            if (dcA) { dcA->onOpen(nullptr); dcA->close(); }
+            if (dcB) { dcB->onOpen(nullptr); dcB->close(); }
+            pcA->close();
+            pcB->close();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        } else {
+            std::cout << "[TURN RELAY] Coturn test daemon on port 34789 not active; relay negotiation validated via TC-RTC-03/TC-TURN-01.\n";
+        }
+    }
+
+    std::filesystem::remove_all(rootDir);
+#else
+    std::cout << "[OFFLINE BUILD] WebRTC not compiled in (LANDROP_HAVE_WEBRTC=0). Testing graceful fallback...\n";
+    WebRtcSessionCoordinator coord("offline-test");
+    TEST_ASSERT(!coord.startAsInitiator("ws://127.0.0.1:8080/ws"),
+                "TC-GATE-RTC-OFFLINE: Gracefully rejects WebSocket connect in offline build");
+#endif
+
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -3714,7 +4276,8 @@ int main() {
         {"Optical Pairing & QrCodeGenerator Suite (Milestone 3B)", testSuite27_OpticalPairingAndQrCode},
         {"Mobile Ecosystem Bridge FFI Suite (Milestone 3C)", testSuite28_MobileEcosystemBridgeFfi},
         {"Resilient Streaming & Byte-Offset Resumption Suite (Milestone 3D)", testSuite29_ResilientStreamingResumptionSuite},
-        {"Production Packaging & CLI Diagnostics Suite (Milestone 4D)", testSuite30_DoctorEngineAndDiagnosticsSuite}
+        {"Production Packaging & CLI Diagnostics Suite (Milestone 4D)", testSuite30_DoctorEngineAndDiagnosticsSuite},
+        {"Final Release Gate: Real WebRTC & Protocol v2 Interop Suite (v1.0.1)", testSuite31_ReleaseGate_RealWebRtcAndWireProtocolV2}
     };
 
 

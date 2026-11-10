@@ -456,31 +456,4 @@ std::string QrCodeGenerator::toAscii(bool invert) const {
     return ss.str();
 }
 
-#if defined(LANDROP_BUILD_QT)
-QPixmap QrCodeGenerator::toQPixmap(int targetPixelSize, int border, const QColor& fg, const QColor& bg) const {
-    if (border < 4) border = 4; // ISO/IEC 18004 & ADR-015: Minimum 4-module quiet zone
-    int totalModules = m_size + 2 * border;
-    int scale = std::max(1, targetPixelSize / totalModules);
-    int finalPixelSize = totalModules * scale;
-
-    QImage img(finalPixelSize, finalPixelSize, QImage::Format_ARGB32_Premultiplied);
-    img.fill(bg);
-
-    QPainter painter(&img);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(fg);
-
-    for (int y = 0; y < m_size; y++) {
-        for (int x = 0; x < m_size; x++) {
-            if (getModule(x, y)) {
-                painter.fillRect((x + border) * scale, (y + border) * scale, scale, scale, fg);
-            }
-        }
-    }
-    painter.end();
-
-    return QPixmap::fromImage(img);
-}
-#endif
-
 } // namespace landrop::ui

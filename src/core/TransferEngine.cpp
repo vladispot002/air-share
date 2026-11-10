@@ -1,11 +1,14 @@
 #include "landrop/core/TransferEngine.hpp"
 #include "landrop/core/TlsContext.hpp"
 #include "landrop/core/TcpSocketChannel.hpp"
+#include "landrop/core/WireProtocolV2.hpp"
+#include "landrop/utils/CryptoFallback.hpp"
 #include <iostream>
 #include <fstream>
 #include <cstring>
 #include <chrono>
 #include <algorithm>
+#include <cctype>
 #include "landrop/utils/SocketCompat.hpp"
 
 namespace landrop {
@@ -188,18 +191,18 @@ bool TransferEngine::sendFileOverChannel(
         return false;
     }
 
-    // Prepare wire protocol metadata header
-    uint32_t nameLen = static_cast<uint32_t>(fileName.size());
-    std::vector<uint8_t> header(sizeof(uint32_t) + nameLen + sizeof(uint64_t) + 64);
-    uint8_t* ptr = header.data();
-    std::memcpy(ptr, &nameLen, sizeof(uint32_t)); ptr += sizeof(uint32_t);
-    std::memcpy(ptr, fileName.data(), nameLen); ptr += nameLen;
-    std::memcpy(ptr, &fileSize, sizeof(uint64_t)); ptr += sizeof(uint64_t);
-    std::string hashPadded = fileHash;
-    hashPadded.resize(64, '0');
-    std::memcpy(ptr, hashPadded.data(), 64);
+    // Prepare wire protocol metadata header (WireProtocol v2)
+    protocol::v2::FileHeaderMessage fhdr;
+    fhdr.fileSize = fileSize;
+    size_t chunkCapacity = options.chunkSize > 0 ? options.chunkSize : (64 * 1024);
+    if (chunkCapacity > 4 * 1024 * 1024) chunkCapacity = 4 * 1024 * 1024;
+    fhdr.chunkSize = static_cast<uint32_t>(chunkCapacity);
+    fhdr.flags = 0;
+    fhdr.fileName = fileName;
+    fhdr.sha256Hex = fileHash;
+    auto headerFrame = protocol::v2::buildFrame(protocol::v2::MessageType::FileHeader, fhdr.serialize());
 
-    if (!channel->sendExact(header.data(), header.size())) {
+    if (!channel->sendExact(headerFrame.data(), headerFrame.size())) {
         return reportError("Failed to send metadata header to receiver");
     }
 
@@ -208,9 +211,8 @@ bool TransferEngine::sendFileOverChannel(
         return reportError("Failed to open local file for reading: " + filePath);
     }
 
-    size_t chunkCapacity = options.chunkSize > 0 ? options.chunkSize : (64 * 1024);
-    if (chunkCapacity > 4 * 1024 * 1024) chunkCapacity = 4 * 1024 * 1024;
     std::vector<uint8_t> chunkBuf(chunkCapacity);
+    uint32_t chunkIndex = 0;
 
     uint64_t sentBytes = 0;
     auto startTime = std::chrono::steady_clock::now();
@@ -230,6 +232,11 @@ bool TransferEngine::sendFileOverChannel(
 
     while (sentBytes < fileSize && in) {
         if (isCancelled()) {
+            protocol::v2::TransferCancelMessage cmsg;
+            cmsg.errorCode = 2;
+            cmsg.reason = "Transfer cancelled by user";
+            auto cancelFrame = protocol::v2::buildFrame(protocol::v2::MessageType::TransferCancel, cmsg.serialize());
+            channel->sendExact(cancelFrame.data(), cancelFrame.size());
             channel->close();
             if (progressCb) {
                 TransferProgressUpdate upd;
@@ -246,11 +253,14 @@ bool TransferEngine::sendFileOverChannel(
         size_t count = static_cast<size_t>(in.gcount());
         if (count == 0) break;
 
-        uint32_t countU32 = static_cast<uint32_t>(count);
-        if (!channel->sendExact(reinterpret_cast<const uint8_t*>(&countU32), sizeof(uint32_t))) {
-            return reportError("Connection interrupted while sending chunk header");
-        }
-        if (!channel->sendExact(chunkBuf.data(), count)) {
+        protocol::v2::ChunkDataMessage cmsg;
+        cmsg.offset = sentBytes;
+        cmsg.chunkIndex = chunkIndex++;
+        cmsg.chunkCrc32 = protocol::v2::computeCrc32(chunkBuf.data(), count);
+        cmsg.data.assign(chunkBuf.data(), chunkBuf.data() + count);
+
+        auto chunkFrame = protocol::v2::buildFrame(protocol::v2::MessageType::ChunkData, cmsg.serialize());
+        if (!channel->sendExact(chunkFrame.data(), chunkFrame.size())) {
             return reportError("Connection interrupted while sending chunk payload");
         }
 
@@ -300,17 +310,52 @@ bool TransferEngine::sendFileOverChannel(
         upd.bytesTransferred = sentBytes;
         upd.progressPercentage = 100.0;
         upd.state = TransferState::Transferring;
-        upd.message = "Waiting for receiver SHA-256 verification ACK...";
+        upd.message = "Waiting for receiver verification ACK...";
         progressCb(upd);
     }
 
-    // Wait for receiver ACK
-    uint8_t ack = 0;
-    if (!channel->receiveExact(&ack, 1, 30000, effectiveCancel.get())) {
+    // Wait for receiver ACK (supports both WireProtocolV2 TransferAckMessage and legacy 1-byte ACK)
+    uint8_t firstByte = 0;
+    if (!channel->receiveExact(&firstByte, 1, 30000, effectiveCancel.get())) {
         return reportError("Connection dropped while waiting for receiver verification ACK");
     }
 
-    if (ack != 1) {
+    if (firstByte == 'L') {
+        uint8_t restHdr[15];
+        if (!channel->receiveExact(restHdr, 15, 10000, effectiveCancel.get())) {
+            return reportError("Truncated FrameHeader from receiver ACK");
+        }
+        uint8_t fullHdr[16];
+        fullHdr[0] = 'L';
+        std::memcpy(fullHdr + 1, restHdr, 15);
+        protocol::v2::FrameHeader ackFhdr;
+        std::string hdrErr;
+        if (!protocol::v2::FrameHeader::deserialize(fullHdr, ackFhdr, &hdrErr)) {
+            return reportError("Failed to parse ACK FrameHeader: " + hdrErr);
+        }
+        std::vector<uint8_t> payload(ackFhdr.payloadLength);
+        if (ackFhdr.payloadLength > 0) {
+            if (!channel->receiveExact(payload.data(), ackFhdr.payloadLength, 10000, effectiveCancel.get())) {
+                return reportError("Truncated ACK payload");
+            }
+        }
+        if (ackFhdr.msgType == protocol::v2::MessageType::TransferAck) {
+            protocol::v2::TransferAckMessage ackMsg;
+            std::string ackErr;
+            if (!protocol::v2::TransferAckMessage::deserialize(payload.data(), payload.size(), ackMsg, &ackErr)) {
+                return reportError("Failed to parse TransferAckMessage: " + ackErr);
+            }
+            if (ackMsg.status != protocol::v2::AckStatus::Success) {
+                return reportError("Receiver rejected transfer: status=" + std::to_string(static_cast<int>(ackMsg.status)) + " message=" + ackMsg.message);
+            }
+        } else if (ackFhdr.msgType == protocol::v2::MessageType::TransferCancel) {
+            return reportError("Receiver cancelled transfer");
+        } else {
+            return reportError("Unexpected frame type awaiting ACK: " + std::to_string(static_cast<int>(ackFhdr.msgType)));
+        }
+    } else if (firstByte == 1) {
+        // Legacy v1 positive ACK
+    } else {
         return reportError("Receiver rejected transfer: checksum mismatch or storage error");
     }
 
@@ -475,10 +520,20 @@ bool TransferEngine::receiveFileOverChannel(
         return effectiveCancel->load() || (!m_serverRunning.load() && m_serverPort > 0);
     };
 
+    bool isV2 = false;
+
     auto finishWithFailure = [&](const std::string& fileName, const std::string& err) {
         if (channel && channel->isConnected()) {
-            uint8_t nack = 0;
-            channel->sendExact(&nack, 1);
+            if (isV2) {
+                protocol::v2::TransferCancelMessage cmsg;
+                cmsg.errorCode = 1;
+                cmsg.reason = err;
+                auto cancelFrame = protocol::v2::buildFrame(protocol::v2::MessageType::TransferCancel, cmsg.serialize());
+                channel->sendExact(cancelFrame.data(), cancelFrame.size());
+            } else {
+                uint8_t nack = 0;
+                channel->sendExact(&nack, 1);
+            }
             if (options.closeChannelOnCompletion) {
                 channel->close();
             }
@@ -504,21 +559,76 @@ bool TransferEngine::receiveFileOverChannel(
 
     std::string senderAddr = channel->getRemoteAddress();
 
-    // 1. Read metadata header
-    uint32_t nameLen = 0;
+    // 1. Read metadata header prefix to determine protocol version (WireProtocol v2 vs legacy v1)
+    uint8_t first4[4];
     int headerTimeout = (options.headerTimeoutMs > 0) ? static_cast<int>(options.headerTimeoutMs) : -1;
-    if (!channel->receiveExact(reinterpret_cast<uint8_t*>(&nameLen), sizeof(uint32_t), headerTimeout, effectiveCancel.get())) {
-        return finishWithFailure("", "Failed to receive filename length");
+    if (!channel->receiveExact(first4, 4, headerTimeout, effectiveCancel.get())) {
+        return finishWithFailure("", "Failed to receive metadata header prefix");
     }
 
-    if (nameLen == 0 || nameLen > 255) {
-        return finishWithFailure("", "Invalid filename length: " + std::to_string(nameLen));
-    }
+    isV2 = protocol::v2::isProtocolV2(first4);
 
     std::string fileName;
-    fileName.resize(nameLen);
-    if (!channel->receiveExact(reinterpret_cast<uint8_t*>(fileName.data()), nameLen, 10000, effectiveCancel.get())) {
-        return finishWithFailure("", "Failed to receive filename");
+    uint64_t fileSize = 0;
+    std::string expectedHash;
+
+    if (isV2) {
+        uint8_t header16[16];
+        std::memcpy(header16, first4, 4);
+        if (!channel->receiveExact(header16 + 4, 12, 10000, effectiveCancel.get())) {
+            return finishWithFailure("", "Failed to receive WireProtocol v2 frame header");
+        }
+        protocol::v2::FrameHeader fhdr;
+        std::string hdrErr;
+        if (!protocol::v2::FrameHeader::deserialize(header16, fhdr, &hdrErr)) {
+            return finishWithFailure("", "Invalid WireProtocol v2 frame header: " + hdrErr);
+        }
+        if (fhdr.msgType != protocol::v2::MessageType::FileHeader) {
+            return finishWithFailure("", "Expected FileHeader frame, got message type: " + std::to_string(static_cast<int>(fhdr.msgType)));
+        }
+        std::vector<uint8_t> payload(fhdr.payloadLength);
+        if (fhdr.payloadLength > 0) {
+            if (!channel->receiveExact(payload.data(), fhdr.payloadLength, 10000, effectiveCancel.get())) {
+                return finishWithFailure("", "Failed to receive FileHeader payload");
+            }
+        }
+        if (fhdr.crc32OrSeq != 0) {
+            uint32_t actualCrc = protocol::v2::computeCrc32(payload.data(), payload.size());
+            if (actualCrc != fhdr.crc32OrSeq) {
+                return finishWithFailure("", "FileHeader CRC-32 checksum mismatch");
+            }
+        }
+        protocol::v2::FileHeaderMessage fileHeaderMsg;
+        std::string msgErr;
+        if (!protocol::v2::FileHeaderMessage::deserialize(payload.data(), payload.size(), fileHeaderMsg, &msgErr)) {
+            return finishWithFailure("", "Failed to parse FileHeaderMessage: " + msgErr);
+        }
+        fileName = fileHeaderMsg.fileName;
+        fileSize = fileHeaderMsg.fileSize;
+        expectedHash = fileHeaderMsg.sha256Hex;
+    } else {
+        if (options.requireProtocolV2) {
+            return finishWithFailure("", "WireProtocol v2 required but client sent legacy header");
+        }
+        if (!options.allowLegacyV1Fallback) {
+            return finishWithFailure("", "Legacy v1 fallback is disabled");
+        }
+        uint32_t nameLen = 0;
+        std::memcpy(&nameLen, first4, sizeof(uint32_t));
+        if (nameLen == 0 || nameLen > 255) {
+            return finishWithFailure("", "Invalid filename length: " + std::to_string(nameLen));
+        }
+        fileName.resize(nameLen);
+        if (!channel->receiveExact(reinterpret_cast<uint8_t*>(fileName.data()), nameLen, 10000, effectiveCancel.get())) {
+            return finishWithFailure("", "Failed to receive filename");
+        }
+        if (!channel->receiveExact(reinterpret_cast<uint8_t*>(&fileSize), sizeof(uint64_t), 10000, effectiveCancel.get())) {
+            return finishWithFailure(fileName, "Failed to receive file size");
+        }
+        expectedHash.resize(64);
+        if (!channel->receiveExact(reinterpret_cast<uint8_t*>(expectedHash.data()), 64, 10000, effectiveCancel.get())) {
+            return finishWithFailure(fileName, "Failed to receive expected SHA-256 hash");
+        }
     }
 
     if (!isSafeFileName(fileName)) {
@@ -530,19 +640,8 @@ bool TransferEngine::receiveFileOverChannel(
         return finishWithFailure(fileName, "Filename contains path components: " + fileName);
     }
 
-    uint64_t fileSize = 0;
-    if (!channel->receiveExact(reinterpret_cast<uint8_t*>(&fileSize), sizeof(uint64_t), 10000, effectiveCancel.get())) {
-        return finishWithFailure(fileName, "Failed to receive file size");
-    }
-
     if (!isValidFileSize(fileSize) || fileSize > options.maxFileSizeLimit) {
         return finishWithFailure(fileName, "Invalid or excessive file size: " + std::to_string(fileSize));
-    }
-
-    std::string expectedHash;
-    expectedHash.resize(64);
-    if (!channel->receiveExact(reinterpret_cast<uint8_t*>(expectedHash.data()), 64, 10000, effectiveCancel.get())) {
-        return finishWithFailure(fileName, "Failed to receive expected SHA-256 hash");
     }
 
     std::filesystem::path canonicalBase = std::filesystem::weakly_canonical(std::filesystem::path(saveDirectory));
@@ -594,7 +693,8 @@ bool TransferEngine::receiveFileOverChannel(
         }
     }
 
-    std::filesystem::path partPath = canonicalBase / (cleanName.string() + ".part");
+    // SEC-05: Task-unique staging part file to avoid collision
+    std::filesystem::path partPath = canonicalBase / ("." + cleanName.string() + "." + taskId + ".part");
     std::filesystem::remove(partPath, ec);
 
     std::ofstream outFile(partPath, std::ios::binary);
@@ -602,7 +702,11 @@ bool TransferEngine::receiveFileOverChannel(
         return finishWithFailure(fileName, "Failed to open temporary file: " + partPath.string());
     }
 
+    // DEBT-09: Single-pass in-flight SHA-256 calculation to avoid double disk read
+    landrop::crypto::Sha256 inFlightHasher;
     uint64_t totalReceived = 0;
+    uint32_t expectedChunkIndex = 0;
+    uint64_t expectedOffset = 0;
     auto startTime = std::chrono::steady_clock::now();
     auto lastProgressReport = startTime;
     constexpr uint32_t kMaxChunkSize = 4 * 1024 * 1024;
@@ -626,35 +730,108 @@ bool TransferEngine::receiveFileOverChannel(
             return finishWithFailure(fileName, "Transfer cancelled by receiver");
         }
 
-        uint32_t chunkSize = 0;
-        if (!channel->receiveExact(reinterpret_cast<uint8_t*>(&chunkSize), sizeof(uint32_t), 15000, effectiveCancel.get())) {
-            outFile.close();
-            std::filesystem::remove(partPath, ec);
-            return finishWithFailure(fileName, "Sender interrupted connection while reading chunk size");
-        }
+        if (isV2) {
+            uint8_t chunkHdrBytes[16];
+            if (!channel->receiveExact(chunkHdrBytes, 16, 15000, effectiveCancel.get())) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Interrupted while reading ChunkData frame header");
+            }
+            protocol::v2::FrameHeader chunkFhdr;
+            std::string chunkHdrErr;
+            if (!protocol::v2::FrameHeader::deserialize(chunkHdrBytes, chunkFhdr, &chunkHdrErr)) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Failed to deserialize ChunkData frame header: " + chunkHdrErr);
+            }
+            if (chunkFhdr.msgType == protocol::v2::MessageType::TransferCancel) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Transfer cancelled by sender");
+            }
+            if (chunkFhdr.msgType != protocol::v2::MessageType::ChunkData) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Expected ChunkData frame, got " + std::to_string(static_cast<int>(chunkFhdr.msgType)));
+            }
+            std::vector<uint8_t> chunkPayload(chunkFhdr.payloadLength);
+            if (!channel->receiveExact(chunkPayload.data(), chunkFhdr.payloadLength, 30000, effectiveCancel.get())) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Interrupted while receiving ChunkData payload");
+            }
+            if (chunkFhdr.crc32OrSeq != 0) {
+                uint32_t actualCrc = protocol::v2::computeCrc32(chunkPayload.data(), chunkPayload.size());
+                if (actualCrc != chunkFhdr.crc32OrSeq) {
+                    outFile.close();
+                    std::filesystem::remove(partPath, ec);
+                    return finishWithFailure(fileName, "Chunk frame CRC-32 checksum mismatch");
+                }
+            }
+            protocol::v2::ChunkDataMessage cmsg;
+            std::string cmsgErr;
+            if (!protocol::v2::ChunkDataMessage::deserialize(chunkPayload.data(), chunkPayload.size(), cmsg, &cmsgErr)) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Failed to parse ChunkDataMessage: " + cmsgErr);
+            }
+            if (cmsg.chunkIndex != expectedChunkIndex || cmsg.offset != expectedOffset) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Chunk sequence mismatch: expected index " + std::to_string(expectedChunkIndex) +
+                                                   " at offset " + std::to_string(expectedOffset) +
+                                                   ", got index " + std::to_string(cmsg.chunkIndex) +
+                                                   " at offset " + std::to_string(cmsg.offset));
+            }
+            // DEBT-07: Explicit write error check
+            outFile.write(reinterpret_cast<const char*>(cmsg.data.data()), static_cast<std::streamsize>(cmsg.data.size()));
+            if (!outFile.good()) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Disk write error while writing chunk to " + partPath.string());
+            }
+            inFlightHasher.update(cmsg.data.data(), cmsg.data.size());
+            totalReceived += cmsg.data.size();
+            expectedChunkIndex++;
+            expectedOffset += cmsg.data.size();
+        } else {
+            uint32_t chunkSize = 0;
+            if (!channel->receiveExact(reinterpret_cast<uint8_t*>(&chunkSize), sizeof(uint32_t), 15000, effectiveCancel.get())) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Sender interrupted connection while reading chunk size");
+            }
 
-        if (!isValidChunkSize(chunkSize, fileSize, totalReceived, kMaxChunkSize)) {
-            outFile.close();
-            std::filesystem::remove(partPath, ec);
-            return finishWithFailure(fileName, "Invalid chunk size: " + std::to_string(chunkSize));
-        }
+            if (!isValidChunkSize(chunkSize, fileSize, totalReceived, kMaxChunkSize)) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Invalid chunk size: " + std::to_string(chunkSize));
+            }
 
-        try {
-            chunkBuf.resize(chunkSize);
-        } catch (...) {
-            outFile.close();
-            std::filesystem::remove(partPath, ec);
-            return finishWithFailure(fileName, "Memory allocation failed for chunk");
-        }
+            try {
+                chunkBuf.resize(chunkSize);
+            } catch (...) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Memory allocation failed for chunk");
+            }
 
-        if (!channel->receiveExact(chunkBuf.data(), chunkSize, 30000, effectiveCancel.get())) {
-            outFile.close();
-            std::filesystem::remove(partPath, ec);
-            return finishWithFailure(fileName, "Sender disconnected abruptly while sending chunk payload");
-        }
+            if (!channel->receiveExact(chunkBuf.data(), chunkSize, 30000, effectiveCancel.get())) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Sender disconnected abruptly while sending chunk payload");
+            }
 
-        outFile.write(reinterpret_cast<const char*>(chunkBuf.data()), static_cast<std::streamsize>(chunkSize));
-        totalReceived += chunkSize;
+            // DEBT-07: Explicit write error check
+            outFile.write(reinterpret_cast<const char*>(chunkBuf.data()), static_cast<std::streamsize>(chunkSize));
+            if (!outFile.good()) {
+                outFile.close();
+                std::filesystem::remove(partPath, ec);
+                return finishWithFailure(fileName, "Disk write error while writing chunk to " + partPath.string());
+            }
+            inFlightHasher.update(chunkBuf.data(), chunkSize);
+            totalReceived += chunkSize;
+        }
 
         auto now = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration<double>(now - startTime).count();
@@ -677,12 +854,15 @@ bool TransferEngine::receiveFileOverChannel(
 
     outFile.close();
 
-    // Verify SHA-256 integrity
-    FileChunkHasher hasher;
-    auto computedHash = hasher.computeFullFileHash(partPath.string());
-    if (!computedHash.has_value() || computedHash.value() != expectedHash) {
+    // Verify SHA-256 integrity using in-flight computed hash
+    std::string computedHash = inFlightHasher.finalize();
+    bool hashMatch = (computedHash.size() == expectedHash.size()) &&
+        std::equal(computedHash.begin(), computedHash.end(), expectedHash.begin(),
+                   [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); });
+
+    if (!hashMatch) {
         std::filesystem::remove(partPath, ec);
-        return finishWithFailure(fileName, "Integrity verification failed: SHA-256 mismatch");
+        return finishWithFailure(fileName, "Integrity verification failed: SHA-256 mismatch (expected=" + expectedHash + ", actual=" + computedHash + ")");
     }
 
     // Atomic rename .part -> destPath
@@ -692,9 +872,19 @@ bool TransferEngine::receiveFileOverChannel(
         return finishWithFailure(fileName, "Failed to finalize received file: " + ec.message());
     }
 
-    // Send positive ACK
-    uint8_t ack = 1;
-    channel->sendExact(&ack, 1);
+    // Send positive ACK (WireProtocol v2 TransferAckMessage or legacy 1-byte ACK)
+    if (isV2) {
+        protocol::v2::TransferAckMessage ackMsg;
+        ackMsg.status = protocol::v2::AckStatus::Success;
+        ackMsg.receivedBytes = fileSize;
+        ackMsg.message = "File verified and saved successfully";
+        auto ackFrame = protocol::v2::buildFrame(protocol::v2::MessageType::TransferAck, ackMsg.serialize());
+        channel->sendExact(ackFrame.data(), ackFrame.size());
+    } else {
+        uint8_t ack = 1;
+        channel->sendExact(&ack, 1);
+    }
+
     if (options.closeChannelOnCompletion) {
         channel->close();
     }

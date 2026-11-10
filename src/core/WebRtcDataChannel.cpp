@@ -107,11 +107,15 @@ bool WebRtcDataChannel::sendExact(const uint8_t* data, size_t length) {
         if (!dc->isOpen()) {
             return false;
         }
-        bool ok = dc->send(reinterpret_cast<const std::byte*>(data), length);
-        if (ok) {
+        try {
+            // In libdatachannel, dc->send() returns true if sent immediately,
+            // or false if buffered into mSendQueue. In both cases data is enqueued successfully.
+            dc->send(reinterpret_cast<const std::byte*>(data), length);
             m_bytesSent += length;
+            return true;
+        } catch (...) {
+            return false;
         }
-        return ok;
     } else if (!m_simulatedMode) {
         // Prevent silent data loss if no real channel is attached in production (F-05)
         return false;

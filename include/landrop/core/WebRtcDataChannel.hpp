@@ -27,8 +27,8 @@ struct WebRtcConfig {
     std::string turnServer;
     std::string turnUsername;
     std::string turnPassword;
-    uint32_t maxBufferedAmount{16 * 1024 * 1024}; // 16 MB max send queue ceiling
-    uint32_t lowWaterMark{4 * 1024 * 1024};      // 4 MB low-water mark for resume
+    uint32_t maxBufferedAmount{512 * 1024}; // 512 KB max send queue ceiling (SCTP buffer safe)
+    uint32_t lowWaterMark{128 * 1024};     // 128 KB low-water mark for resume
     bool enableMdns{true};
 };
 

@@ -347,8 +347,32 @@ int landrop_mobile_webrtc_send_file_async(
     if (!handle) return LANDROP_ERR_INVALID_HANDLE;
     if (!file_path) return LANDROP_ERR_INVALID_ARG;
     auto* ctx = static_cast<LandropMobileContext*>(handle);
-    std::lock_guard<std::recursive_mutex> lock(ctx->mutex);
 
+    std::thread oldWorker;
+    {
+        std::lock_guard<std::recursive_mutex> lock(ctx->mutex);
+        if (!ctx->coordinator || ctx->coordinator->getState() != landrop::CoordinatorState::Connected) {
+            return LANDROP_ERR_ILLEGAL_STATE;
+        }
+        auto channel = ctx->coordinator->getChannel();
+        if (!channel || !channel->isConnected()) {
+            return LANDROP_ERR_NETWORK_DISCONNECTED;
+        }
+
+        if (ctx->snapshot.transfer_state == LANDROP_XFER_IN_PROGRESS) {
+            return LANDROP_ERR_ILLEGAL_STATE;
+        }
+
+        if (ctx->transferWorker.joinable()) {
+            oldWorker = std::move(ctx->transferWorker);
+        }
+    }
+
+    if (oldWorker.joinable()) {
+        oldWorker.join();
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(ctx->mutex);
     if (!ctx->coordinator || ctx->coordinator->getState() != landrop::CoordinatorState::Connected) {
         return LANDROP_ERR_ILLEGAL_STATE;
     }
@@ -356,13 +380,8 @@ int landrop_mobile_webrtc_send_file_async(
     if (!channel || !channel->isConnected()) {
         return LANDROP_ERR_NETWORK_DISCONNECTED;
     }
-
     if (ctx->snapshot.transfer_state == LANDROP_XFER_IN_PROGRESS) {
         return LANDROP_ERR_ILLEGAL_STATE;
-    }
-
-    if (ctx->transferWorker.joinable()) {
-        ctx->transferWorker.join();
     }
 
     ctx->transferCancelToken = std::make_shared<std::atomic<bool>>(false);
@@ -424,8 +443,32 @@ int landrop_mobile_webrtc_receive_file_async(
     if (!handle) return LANDROP_ERR_INVALID_HANDLE;
     if (!save_dir) return LANDROP_ERR_INVALID_ARG;
     auto* ctx = static_cast<LandropMobileContext*>(handle);
-    std::lock_guard<std::recursive_mutex> lock(ctx->mutex);
 
+    std::thread oldWorker;
+    {
+        std::lock_guard<std::recursive_mutex> lock(ctx->mutex);
+        if (!ctx->coordinator || ctx->coordinator->getState() != landrop::CoordinatorState::Connected) {
+            return LANDROP_ERR_ILLEGAL_STATE;
+        }
+        auto channel = ctx->coordinator->getChannel();
+        if (!channel || !channel->isConnected()) {
+            return LANDROP_ERR_NETWORK_DISCONNECTED;
+        }
+
+        if (ctx->snapshot.transfer_state == LANDROP_XFER_IN_PROGRESS) {
+            return LANDROP_ERR_ILLEGAL_STATE;
+        }
+
+        if (ctx->transferWorker.joinable()) {
+            oldWorker = std::move(ctx->transferWorker);
+        }
+    }
+
+    if (oldWorker.joinable()) {
+        oldWorker.join();
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(ctx->mutex);
     if (!ctx->coordinator || ctx->coordinator->getState() != landrop::CoordinatorState::Connected) {
         return LANDROP_ERR_ILLEGAL_STATE;
     }
@@ -433,13 +476,8 @@ int landrop_mobile_webrtc_receive_file_async(
     if (!channel || !channel->isConnected()) {
         return LANDROP_ERR_NETWORK_DISCONNECTED;
     }
-
     if (ctx->snapshot.transfer_state == LANDROP_XFER_IN_PROGRESS) {
         return LANDROP_ERR_ILLEGAL_STATE;
-    }
-
-    if (ctx->transferWorker.joinable()) {
-        ctx->transferWorker.join();
     }
 
     ctx->transferCancelToken = std::make_shared<std::atomic<bool>>(false);
@@ -535,7 +573,8 @@ int landrop_mobile_start_discovery(LandropHandle handle, uint16_t port) {
 void landrop_mobile_stop_discovery(LandropHandle handle) {
     if (!handle) return;
     auto* ctx = static_cast<LandropMobileContext*>(handle);
-    std::lock_guard<std::recursive_mutex> lock(ctx->mutex);
+    // MulticastBeacon::stop internally synchronizes on m_isRunning atomic and joins listener thread.
+    // Executed outside ctx->mutex to prevent deadlocks with incoming discovery callbacks.
     ctx->beacon.stop();
 }
 

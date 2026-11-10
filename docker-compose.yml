@@ -13,8 +13,10 @@ services:
       - ALL
     environment:
       - PORT=8080
+      - TURN_SECRET=${TURN_SECRET}
       - COTURN_STATIC_AUTH_SECRET=${TURN_SECRET}
       - COTURN_REALM=${DOMAIN_NAME}
+      - TRUST_PROXY=true
       - STUN_SERVERS=${STUN_SERVERS}
       - TURN_SERVERS=${TURN_SERVERS}
       - WEB_DIR=/app/web/dist
@@ -53,12 +55,16 @@ services:
       - --no-cli
       - --no-multicast-peers
       - --no-loopback-peers
-      # Anti-SSRF internal network isolation
+      # Anti-SSRF internal network isolation (IPv4 + IPv6)
       - --denied-peer-ip=10.0.0.0-10.255.255.255
       - --denied-peer-ip=172.16.0.0-172.31.255.255
       - --denied-peer-ip=192.168.0.0-192.168.255.255
       - --denied-peer-ip=127.0.0.0-127.255.255.255
       - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=::1
+      - --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --denied-peer-ip=::ffff:0:0-::ffff:ffff:ffff
     ports:
       - "3478:3478/tcp"
       - "3478:3478/udp"

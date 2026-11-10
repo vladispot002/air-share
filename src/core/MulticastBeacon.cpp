@@ -47,8 +47,12 @@ MulticastBeacon::~MulticastBeacon() {
 }
 
 bool MulticastBeacon::start() {
+    std::lock_guard<std::mutex> lock(m_lifecycleMutex);
     if (m_isRunning.load()) {
         return true;
+    }
+    if (m_listenerThread.joinable()) {
+        m_listenerThread.join();
     }
 
     m_listenSocketFd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -126,7 +130,15 @@ bool MulticastBeacon::start() {
 }
 
 void MulticastBeacon::stop() {
+    std::lock_guard<std::mutex> lock(m_lifecycleMutex);
     if (!m_isRunning.exchange(false)) {
+        if (m_listenerThread.joinable()) {
+            m_listenerThread.join();
+        }
+        if (isValidSocket(m_listenSocketFd)) {
+            closeSocket(m_listenSocketFd);
+            m_listenSocketFd = INVALID_SOCKET_VALUE;
+        }
         return;
     }
     if (m_listenerThread.joinable()) {
