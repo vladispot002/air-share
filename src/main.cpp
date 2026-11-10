@@ -18,6 +18,7 @@
 #include "landrop/core/MulticastBeacon.hpp"
 #include "landrop/core/TransferEngine.hpp"
 #include "landrop/core/WebRtcSessionCoordinator.hpp"
+#include "landrop/core/DoctorEngine.hpp"
 #include "landrop/peers/NetworkPeer.hpp"
 #include "landrop/peers/LocalPeer.hpp"
 #include "landrop/peers/CloudPeer.hpp"
@@ -49,6 +50,7 @@ static void printUsage(const char* progName) {
     std::cout << "  " << progName << " receive [port] [save_dir] [--tls]\n";
     std::cout << "  " << progName << " p2p-send <file_path> [--signaling <ws_url>]\n";
     std::cout << "  " << progName << " p2p-receive <room_code> [save_dir] [--signaling <ws_url>]\n";
+    std::cout << "  " << progName << " doctor [--json] [--stun <host:port>] [--signaling <http_url>]\n";
     std::cout << "  " << progName << " demo\n";
     std::cout << "  " << progName << " mobile-test\n";
 }
@@ -655,6 +657,31 @@ int main(int argc, char* argv[]) {
                 exitCode = runP2pReceiver(roomCode, saveDir, signalingWsUrl);
             }
 #endif
+        } else if (mode == "doctor") {
+            DoctorOptions opts;
+            bool jsonOutput = false;
+            for (int i = 2; i < argc; ++i) {
+                std::string arg = argv[i];
+                if (arg == "--json") {
+                    jsonOutput = true;
+                } else if (arg == "--stun" && i + 1 < argc) {
+                    opts.stunServer = argv[++i];
+                } else if (arg == "--signaling" && i + 1 < argc) {
+                    opts.signalingUrl = argv[++i];
+                } else if (arg == "--no-stun") {
+                    opts.checkStun = false;
+                } else if (arg == "--no-signaling") {
+                    opts.checkSignaling = false;
+                }
+            }
+            DoctorEngine doctor(opts);
+            auto report = doctor.runAllDiagnostics();
+            if (jsonOutput) {
+                std::cout << report.toJson() << "\n";
+            } else {
+                std::cout << report.toFormattedText(true) << "\n";
+            }
+            exitCode = (report.overallStatus == DiagnosticStatus::Fail) ? 1 : 0;
         } else {
             // Unrecognized or GUI parameters (e.g. desktop launcher %U, Qt flags -platform, -style, etc.)
             // Launch GUI application and let Qt parse framework arguments

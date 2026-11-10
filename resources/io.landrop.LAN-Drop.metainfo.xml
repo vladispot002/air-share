@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.landrop.LAN-Drop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>LAN-Drop</name>
+  <summary>Fast, secure, cross-platform local and global P2P file transfer</summary>
+  <description>
+    <p>
+      LAN-Drop is an ultra-fast, privacy-first peer-to-peer file transfer engine designed
+      for cross-platform desktop, mobile, and web environments. It features automated local
+      network discovery via UDP multicast/mDNS and seamless global transfers across disparate
+      NATs using WebRTC DataChannels and hardened Coturn relays.
+    </p>
+    <p>
+      Key capabilities:
+    </p>
+    <ul>
+      <li>Local zero-configuration device discovery with radar visualization.</li>
+      <li>Global P2P transfers using 8-character Crockford Base32 room codes.</li>
+      <li>Zero cloud storage: all data is streamed directly between peers using DTLS 1.3 encryption.</li>
+      <li>Resilient multi-gigabyte streaming with Wire Protocol v2 chunking and crash recovery.</li>
+      <li>Zero telemetry, zero analytics, and zero tracking.</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">lan-drop.desktop</launchable>
+  <provides>
+    <binary>lan_drop</binary>
+  </provides>
+  <url type="homepage">https://github.com/landrop/lan-drop</url>
+  <url type="bugtracker">https://github.com/landrop/lan-drop/issues</url>
+  <url type="donation">https://github.com/sponsors/landrop</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/landrop/lan-drop/main/resources/screenshots/radar_view.png</image>
+      <caption>Radar discovery view showing nearby peers</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/landrop/lan-drop/main/resources/screenshots/transfer_progress.png</image>
+      <caption>High-throughput P2P transfer progress and SHA-256 validation</caption>
+    </screenshot>
+  </screenshots>
+  <categories>
+    <category>Network</category>
+    <category>FileTransfer</category>
+    <category>Qt</category>
+  </categories>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="2.0.0" date="2026-11-10">
+      <description>
+        <p>Stage 4 Production Release:</p>
+        <ul>
+          <li>Integrated multi-stage containerized signaling and TURN deployment.</li>
+          <li>Full Debian (.deb) and AppImage packaging support.</li>
+          <li>Integrated lan_drop doctor diagnostic command for network health audits.</li>
+          <li>Resilient byte-offset resumption for interrupted transfers.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.0.1" date="2026-10-15">
+      <description>
+        <p>Initial stable release with Qt 6 desktop radar and local TLS transfer engine.</p>
+      </description>
+    </release>
+  </releases>
+</component>

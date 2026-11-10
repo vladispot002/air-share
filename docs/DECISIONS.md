@@ -127,3 +127,13 @@
      - Implemented identically across C++ (`TransferEngine`, `WireProtocolV2`, `FileChunkHasher`) and Web TypeScript (`FileStreamSender`, `FileStreamReceiver`, `WireProtocolV2`, `Sha256Stream`).
      - Preserves existing backpressure throttling (`bufferedAmountLowThreshold`) and atomic finalization semantics.
 
+## ADR-018: Production Packaging, Containerization, Self-Hosted Deployment & CI/CD Engine
+- **Status**: Accepted & Verified.
+- **Context**: Transitioning LAN-Drop from development builds to enterprise-grade production distribution requires minimal containerization, zero-dependency network diagnostics, standardized multi-distribution Linux packaging, automated multi-platform CI/CD, and uncompromised adherence to the Transfer-First and Zero-Telemetry principles.
+- **Decision**:
+  1. **Multi-Stage Container Architecture**: A 3-stage minimal Dockerfile (`node:22-alpine` -> `golang:1.23-alpine` -> `alpine:3.20`) packages the static Vite web SPA and Go signaling daemon into an unprivileged, non-root image (UID `10001:10001`, `< 20 MB`, `read_only: true`, `cap_drop: [ALL]`) with a native `/healthz` health probe.
+  2. **Hardened Self-Hosted Orchestration**: `docker-compose.yml` integrates the signaling container with Caddy (automated Let's Encrypt TLS, HSTS, CSP, WebSocket upgrades) and Coturn (TURN/STUN relay with anti-SSRF private IP blocking and ephemeral static secrets).
+  3. **Universal Linux Packaging & AppStream Specification**: Integrated CPack Debian packaging (`CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON`), Fedora RPM spec (`packaging/fedora/landrop.spec`), portable AppImage staging script (`scripts/build-appimage.sh`), and FreeDesktop AppStream 1.0 metadata (`resources/io.landrop.LAN-Drop.metainfo.xml`) with OARS 1.1 ratings.
+  4. **Zero-Dependency CLI Diagnostics Engine (`DoctorEngine`)**: Implemented headless C++20 network diagnostic engine (`lan_drop doctor`) providing local interface enumeration, TCP/UDP port availability checks, signaling `/healthz` probes, and zero-dependency RFC 5389 UDP STUN binding probes (20-byte requests and XOR-MAPPED-ADDRESS reflection) without external network libraries.
+  5. **Cross-Platform CI/CD Automation**: Configured GitHub Actions matrix workflows (`.github/workflows/ci.yml`) covering GCC/Clang with WebRTC ON/OFF, Go race detector, Web Vitest, container build smoke tests, and Windows MSVC; automated release publishing (`.github/workflows/release.yml`) generates signed packages accompanied by `SHA256SUMS.txt`.
+

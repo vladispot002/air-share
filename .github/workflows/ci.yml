@@ -11,8 +11,13 @@ permissions:
 
 jobs:
   test-linux:
-    name: Build & Test (Linux Ubuntu/Qt6)
+    name: Linux Matrix (${{ matrix.compiler }} / WebRTC ${{ matrix.webrtc }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        webrtc: [ON, OFF]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -20,13 +25,17 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build qt6-base-dev qt6-qpa-plugins libssl-dev libxkbcommon-dev libgl1-mesa-dev
+          sudo apt-get install -y cmake ninja-build qt6-base-dev qt6-qpa-plugins libssl-dev libxkbcommon-dev libgl1-mesa-dev clang
 
       - name: Configure CMake
+        env:
+          CC: ${{ matrix.compiler == 'clang' && 'clang' || 'gcc' }}
+          CXX: ${{ matrix.compiler == 'clang' && 'clang++' || 'g++' }}
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTING=ON
+            -DBUILD_TESTING=ON \
+            -DLANDROP_ENABLE_WEBRTC=${{ matrix.webrtc }}
 
       - name: Build targets
         run: |
@@ -36,6 +45,91 @@ jobs:
         run: |
           export QT_QPA_PLATFORM=offscreen
           ctest --test-dir build --output-on-failure --verbose || (echo "=== LastTest.log ===" && cat build/Testing/Temporary/LastTest.log && exit 1)
+
+      - name: Verify CPack Debian Package Generation
+        if: matrix.compiler == 'gcc' && matrix.webrtc == 'ON'
+        run: |
+          cd build
+          cpack -G DEB
+          ls -lh *.deb
+
+  test-backend-signaling:
+    name: Backend Signaling Service (Go 1.23 + Race)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: backend/signaling/go.sum
+
+      - name: Run Go Vet & Verification
+        run: |
+          cd backend/signaling
+          go vet ./...
+
+      - name: Run Go Tests with Race Detector
+        run: |
+          cd backend/signaling
+          go test -v -count=1 -race ./...
+
+  test-web-client:
+    name: Web SPA Client (Node.js 22 + Vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd web
+          npm ci
+
+      - name: Build Web Client
+        run: |
+          cd web
+          npm run build
+
+      - name: Run Web Vitest Test Suite
+        run: |
+          cd web
+          npm test
+
+  test-docker-container:
+    name: Multi-stage Docker Container Build & Health Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Production Image
+        run: |
+          docker build -t landrop-signaling:test .
+
+      - name: Verify Container Image Metadata
+        run: |
+          docker images landrop-signaling:test
+
+      - name: Run Container & Test /healthz Probe
+        run: |
+          docker run -d --name landrop-instance -p 8080:8080 -e PORT=8080 landrop-signaling:test
+          sleep 4
+          curl --fail --retry 3 --retry-delay 1 http://localhost:8080/healthz
+          docker stop landrop-instance
+          docker rm landrop-instance
 
   test-windows:
     name: Build & Test (Windows 10/11 x64)

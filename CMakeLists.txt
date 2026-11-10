@@ -27,6 +27,7 @@ set(LANDROP_CORE_SOURCES
     src/core/SignalingClient.cpp
     src/core/TurnConfigClient.cpp
     src/core/WebRtcSessionCoordinator.cpp
+    src/core/DoctorEngine.cpp
     src/peers/NetworkPeer.cpp
     src/peers/LocalPeer.cpp
     src/peers/CloudPeer.cpp
@@ -232,6 +233,10 @@ install(FILES resources/styles.qss resources/lan-drop.svg
     DESTINATION ${CMAKE_INSTALL_DATADIR}/landrop
 )
 
+install(FILES resources/io.landrop.LAN-Drop.metainfo.xml
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo
+)
+
 if (TARGET lan_drop_gtk)
     install(TARGETS lan_drop_gtk RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} OPTIONAL)
 endif()
@@ -244,7 +249,8 @@ set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
-set(CPACK_PACKAGE_CONTACT "vladis@localhost")
+set(CPACK_PACKAGE_CONTACT "support@landrop.io")
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/landrop/lan-drop")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
 
 set(CPACK_RPM_PACKAGE_LICENSE "MIT")
@@ -253,7 +259,16 @@ set(CPACK_RPM_PACKAGE_URL "https://github.com/landrop/lan-drop")
 set(CPACK_RPM_PACKAGE_REQUIRES "qt6-qtbase-gui, qt6-qtbase, openssl-libs")
 set(CPACK_RPM_PACKAGE_AUTOREQPROV ON)
 
-set(CPACK_GENERATOR "TGZ;RPM")
+# Debian / Ubuntu DEB Properties
+set(CPACK_DEBIAN_PACKAGE_NAME "landrop")
+set(CPACK_DEBIAN_PACKAGE_SECTION "net")
+set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/landrop/lan-drop")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6 (>= 2.34), libstdc++6 (>= 11), libssl3 (>= 3.0.0)")
+set(CPACK_DEBIAN_PACKAGE_SUGGESTS "coturn")
+
+set(CPACK_GENERATOR "TGZ;RPM;DEB")
 set(CPACK_SOURCE_GENERATOR "TGZ")
 set(CPACK_SOURCE_IGNORE_FILES
     "/.git/"
