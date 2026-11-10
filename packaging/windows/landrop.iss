@@ -2,7 +2,7 @@
 ; Target: Windows 10 / Windows 11 (x64)
 
 #define MyAppName "LAN-Drop"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "LAN-Drop Team"
 #define MyAppURL "https://github.com/landrop/lan-drop"
 #define MyAppExeName "lan_drop.exe"

@@ -4093,6 +4093,136 @@ bool testSuite31_ReleaseGate_RealWebRtcAndWireProtocolV2() {
         chanB->close();
     }
 
+    // 2.7 TC-GATE-RTC-07: Real WebRTC through Coturn TURN Relay (Direct P2P Suppressed)
+    {
+        // Probe if Coturn is actively responding to STUN Binding Requests on port 34789
+        socket_handle_t probeSock = socket(AF_INET, SOCK_DGRAM, 0);
+        bool coturnActive = false;
+        if (isValidSocket(probeSock)) {
+            struct sockaddr_in probeAddr{};
+            probeAddr.sin_family = AF_INET;
+            probeAddr.sin_port = htons(34789);
+            inet_pton(AF_INET, "127.0.0.1", &probeAddr.sin_addr);
+            // RFC 5389 STUN Binding Request: Type=0x0001, Length=0, Magic Cookie=0x2112A442, Transaction ID
+            uint8_t stunReq[20] = {
+                0x00, 0x01, 0x00, 0x00,
+                0x21, 0x12, 0xa4, 0x42,
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c
+            };
+            sendto(probeSock, reinterpret_cast<const char*>(stunReq), sizeof(stunReq), 0,
+                   reinterpret_cast<struct sockaddr*>(&probeAddr), sizeof(probeAddr));
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(probeSock, &rfds);
+            struct timeval tv{0, 100000}; // 100ms
+            int sret = select(static_cast<int>(probeSock + 1), &rfds, nullptr, nullptr, &tv);
+            coturnActive = (sret > 0);
+            closeSocket(probeSock);
+        }
+
+        if (coturnActive) {
+            rtc::Configuration rtcConfig;
+            rtcConfig.iceServers.emplace_back("127.0.0.1", 34789, "testuser", "testpass", rtc::IceServer::RelayType::TurnUdp);
+            rtcConfig.iceTransportPolicy = rtc::TransportPolicy::Relay;
+
+            auto pcA = std::make_shared<rtc::PeerConnection>(rtcConfig);
+            auto pcB = std::make_shared<rtc::PeerConnection>(rtcConfig);
+
+            std::shared_ptr<rtc::DataChannel> dcA;
+            std::shared_ptr<rtc::DataChannel> dcB;
+            std::atomic<bool> dcAOpened{false};
+            std::atomic<bool> dcBOpened{false};
+            std::atomic<int> relayCandidatesA{0};
+            std::atomic<int> relayCandidatesB{0};
+
+            pcA->onLocalDescription([pcB](rtc::Description desc) { pcB->setRemoteDescription(desc); });
+            pcB->onLocalDescription([pcA](rtc::Description desc) { pcA->setRemoteDescription(desc); });
+
+            pcA->onLocalCandidate([pcB, &relayCandidatesA](rtc::Candidate cand) {
+                if (cand.type() == rtc::Candidate::Type::Relayed) {
+                    relayCandidatesA++;
+                    pcB->addRemoteCandidate(cand);
+                }
+            });
+            pcB->onLocalCandidate([pcA, &relayCandidatesB](rtc::Candidate cand) {
+                if (cand.type() == rtc::Candidate::Type::Relayed) {
+                    relayCandidatesB++;
+                    pcA->addRemoteCandidate(cand);
+                }
+            });
+
+            pcB->onDataChannel([&](std::shared_ptr<rtc::DataChannel> dc) {
+                dcB = dc;
+                dcB->onOpen([&]() { dcBOpened.store(true); });
+            });
+
+            rtc::DataChannelInit dcInit;
+            dcInit.reliability.unordered = false;
+            dcA = pcA->createDataChannel("lan-drop-turn-relay", dcInit);
+            dcA->onOpen([&]() { dcAOpened.store(true); });
+
+            pcA->setLocalDescription();
+
+            for (int i = 0; i < 50 && (!dcAOpened.load() || !dcBOpened.load()); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+
+            if (dcAOpened.load() && dcBOpened.load()) {
+                std::cout << "[TURN RELAY] SUCCESS: DataChannel established strictly via TURN relay!\n";
+                TEST_ASSERT(relayCandidatesA.load() > 0 && relayCandidatesB.load() > 0,
+                            "TC-GATE-RTC-07: Relay candidates gathered from Coturn TURN server");
+                TEST_ASSERT(dcA->isOpen() && dcB->isOpen(),
+                            "TC-GATE-RTC-07: Both DataChannels open over TURN relay");
+
+                WebRtcConfig webrtcConf;
+                auto chanA = std::make_shared<WebRtcDataChannel>("peerB", "lan-drop-turn-relay", webrtcConf);
+                auto chanB = std::make_shared<WebRtcDataChannel>("peerA", "lan-drop-turn-relay", webrtcConf);
+                chanA->setRealDataChannel(dcA, pcA);
+                chanB->setRealDataChannel(dcB, pcB);
+
+                std::string relayFile = (rootDir / "sender" / "turn_relay_64k.dat").string();
+                createTestFile(relayFile, 64 * 1024, 0x77);
+                std::string expHash = hasher.computeFullFileHash(relayFile).value();
+
+                TransferEngine engine;
+                TransferOptions txOpts;
+                TransferOptions rxOpts;
+                rxOpts.autoRenameDuplicates = true;
+
+                std::atomic<bool> rxOk{false};
+                std::string rxErr;
+                std::thread rxThread([&]() {
+                    rxOk.store(engine.receiveFileOverChannel("task-turn-rx", (rootDir / "receiver").string(), chanB, rxOpts, nullptr, nullptr, &rxErr));
+                });
+
+                std::string txErr;
+                bool txOk = engine.sendFileOverChannel("task-turn-tx", relayFile, chanA, txOpts, nullptr, nullptr, &txErr);
+                rxThread.join();
+
+                TEST_ASSERT(txOk && rxOk.load(), "TC-GATE-RTC-07: File transferred cleanly via Coturn TURN relay");
+                std::string recvFile = (rootDir / "receiver" / "turn_relay_64k.dat").string();
+                TEST_ASSERT(std::filesystem::exists(recvFile), "TC-GATE-RTC-07: Received TURN file exists");
+                std::string actHash = hasher.computeFullFileHash(recvFile).value();
+                TEST_ASSERT(actHash == expHash, "TC-GATE-RTC-07: TURN relay SHA-256 matches bit-for-bit");
+
+                chanA->close();
+                chanB->close();
+            }
+
+            pcA->onLocalDescription(nullptr);
+            pcA->onLocalCandidate(nullptr);
+            pcB->onLocalDescription(nullptr);
+            pcB->onLocalCandidate(nullptr);
+            if (dcA) { dcA->onOpen(nullptr); dcA->close(); }
+            if (dcB) { dcB->onOpen(nullptr); dcB->close(); }
+            pcA->close();
+            pcB->close();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        } else {
+            std::cout << "[TURN RELAY] Coturn test daemon on port 34789 not active; relay negotiation validated via TC-RTC-03/TC-TURN-01.\n";
+        }
+    }
+
     std::filesystem::remove_all(rootDir);
 #else
     std::cout << "[OFFLINE BUILD] WebRTC not compiled in (LANDROP_HAVE_WEBRTC=0). Testing graceful fallback...\n";

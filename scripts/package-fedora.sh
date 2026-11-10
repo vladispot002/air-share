@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
 RPMBUILD_DIR="${DIST_DIR}/rpmbuild"
-VERSION="1.0.1"
+VERSION="1.0.2"
 
 echo "=================================================="
 echo "  [LAN-Drop] Packaging for Fedora Linux x86_64    "

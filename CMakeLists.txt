@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(lan_drop VERSION 1.0.1 LANGUAGES CXX)
+project(lan_drop VERSION 1.0.2 LANGUAGES CXX)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the build type" FORCE)
