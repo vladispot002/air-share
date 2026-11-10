@@ -53,6 +53,20 @@ inline const char* coordinatorStateToString(CoordinatorState state) {
     }
 }
 
+inline std::string deriveWsHttpUrl(const std::string& wsUrl) {
+    std::string httpUrl = wsUrl;
+    if (httpUrl.rfind("wss://", 0) == 0) {
+        httpUrl = "https://" + httpUrl.substr(6);
+    } else if (httpUrl.rfind("ws://", 0) == 0) {
+        httpUrl = "http://" + httpUrl.substr(5);
+    }
+    size_t pathPos = httpUrl.find('/', 8);
+    if (pathPos != std::string::npos) {
+        httpUrl = httpUrl.substr(0, pathPos);
+    }
+    return httpUrl;
+}
+
 struct CoordinatorOptions {
     int signalingTimeoutMs{10000};
     int peerJoinTimeoutMs{300000};

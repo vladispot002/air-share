@@ -3,6 +3,7 @@
 #include "landrop/ui/qt/QtTransferWidget.hpp"
 #include "landrop/ui/qt/QtStorageWidget.hpp"
 #include "landrop/ui/qt/QtSettingsWidget.hpp"
+#include "landrop/ui/QrCodeGenerator.hpp"
 #include "landrop/tasks/P2PTransferTask.hpp"
 
 #include <QHBoxLayout>
@@ -562,39 +563,77 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
 
     auto coordinator = std::make_shared<WebRtcSessionCoordinator>("gui-host", WebRtcConfig{}, opts);
 
-    coordinator->onRoomReady = [this, coordinator, filePath](const std::string& code) {
-        QMetaObject::invokeMethod(this, [this, coordinator, code, filePath]() {
+    coordinator->onRoomReady = [this, coordinator, filePath, signalingWsUrl](const std::string& code) {
+        QMetaObject::invokeMethod(this, [this, coordinator, code, filePath, signalingWsUrl]() {
             auto* dlg = new QDialog(this);
-            dlg->setWindowTitle("Global P2P Room Created");
+            dlg->setWindowTitle("Optical Pairing — Global P2P Room");
+            dlg->setMinimumWidth(320);
             auto* l = new QVBoxLayout(dlg);
-            auto* info = new QLabel("<b>Room Code Created:</b>", dlg);
+            l->setSpacing(10);
+            l->setContentsMargins(16, 16, 16, 16);
+
+            auto* title = new QLabel("<b>Scan QR with LAN-Drop Mobile or Web</b>", dlg);
+            title->setAlignment(Qt::AlignCenter);
+
+            // Construct Universal Pairing URL
+            std::string httpBase = deriveWsHttpUrl(signalingWsUrl);
+            if (httpBase.empty()) {
+                httpBase = "https://drop.local";
+            }
+            std::string pairingUrl = httpBase + "/#" + code;
+
+            // Generate crisp high-DPI QR Code (with 4-module quiet zone per ADR-015)
+            auto qr = QrCodeGenerator::encodeText(pairingUrl);
+            QPixmap qrPix = qr.toQPixmap(220, 4, Qt::black, Qt::white);
+
+            auto* qrFrame = new QFrame(dlg);
+            qrFrame->setStyleSheet("background: #ffffff; padding: 12px; border-radius: 10px; border: 1px solid #d2d2d7;");
+            auto* qrFrameLayout = new QVBoxLayout(qrFrame);
+            qrFrameLayout->setContentsMargins(0, 0, 0, 0);
+
+            auto* qrLabel = new QLabel(qrFrame);
+            qrLabel->setPixmap(qrPix);
+            qrLabel->setAlignment(Qt::AlignCenter);
+            qrFrameLayout->addWidget(qrLabel);
+
             auto* codeLbl = new QLabel(QString::fromStdString(code), dlg);
             QFont f = codeLbl->font();
-            f.setPointSize(20);
+            f.setPointSize(18);
             f.setBold(true);
             codeLbl->setFont(f);
             codeLbl->setAlignment(Qt::AlignCenter);
-            codeLbl->setStyleSheet("color: #007aff; padding: 12px; background: #e5f1ff; border-radius: 8px;");
+            codeLbl->setStyleSheet("color: #007aff; padding: 8px; background: #e5f1ff; border-radius: 8px;");
 
             QString promptText = filePath.isEmpty()
-                ? "Waiting for peer to connect..."
+                ? "Waiting for peer to scan or connect..."
                 : QString("Ready to send: %1\nWaiting for receiver to join...").arg(QFileInfo(filePath).fileName());
             auto* status = new QLabel(promptText, dlg);
             status->setAlignment(Qt::AlignCenter);
+            status->setStyleSheet("color: #8e8e93; font-size: 12px;");
 
-            auto* copyBtn = new QPushButton("Copy Room Code", dlg);
-            connect(copyBtn, &QPushButton::clicked, [code, status]() {
+            auto* btnLayout = new QHBoxLayout();
+            auto* copyCodeBtn = new QPushButton("Copy Code", dlg);
+            connect(copyCodeBtn, &QPushButton::clicked, [code, status]() {
                 QApplication::clipboard()->setText(QString::fromStdString(code));
                 status->setText("✓ Room code copied to clipboard!");
             });
 
+            auto* copyLinkBtn = new QPushButton("Copy Pairing Link", dlg);
+            connect(copyLinkBtn, &QPushButton::clicked, [pairingUrl, status]() {
+                QApplication::clipboard()->setText(QString::fromStdString(pairingUrl));
+                status->setText("✓ Pairing link copied to clipboard!");
+            });
+            btnLayout->addWidget(copyCodeBtn);
+            btnLayout->addWidget(copyLinkBtn);
+
             auto* closeBtn = new QPushButton("Close", dlg);
             connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
 
-            l->addWidget(info);
+            l->addWidget(title);
+            l->addWidget(qrFrame, 0, Qt::AlignCenter);
             l->addWidget(codeLbl);
             l->addWidget(status);
-            l->addWidget(copyBtn);
+            l->addLayout(btnLayout);
             l->addWidget(closeBtn);
             dlg->setAttribute(Qt::WA_DeleteOnClose);
             dlg->show();
@@ -651,6 +690,46 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
                         statusBar()->showMessage(QString("✗ WebRTC send error: %1").arg(QString::fromStdString(err)), 6000);
                     }
                 }, Qt::QueuedConnection);
+            });
+        } else {
+            // Hosting in Receive / Standby mode: listen for incoming files continuously
+            launchWorker([this, coordinator, channel]() {
+                while (coordinator->getState() == CoordinatorState::Connected && channel && channel->isConnected()) {
+                    TransferOptions rxOpts;
+                    rxOpts.autoRenameDuplicates = true;
+                    rxOpts.closeChannelOnCompletion = false;
+                    rxOpts.headerTimeoutMs = 0; // Wait indefinitely for incoming file transfer
+                    std::string rxErr;
+                    std::string taskId = "rtc-rx-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+                    std::string destDir = getDownloadsDirectory();
+                    bool ok = m_transferEngine->receiveFileOverChannel(
+                        taskId,
+                        destDir,
+                        channel,
+                        rxOpts,
+                        [this](const TransferProgressUpdate& upd) {
+                            QMetaObject::invokeMethod(this, [this, upd]() {
+                                if (m_transferPresenter) {
+                                    m_transferPresenter->updateTaskProgress(upd.taskId, upd.bytesTransferred, upd.speedBytesPerSec, upd.state, upd.message);
+                                }
+                            }, Qt::QueuedConnection);
+                        },
+                        nullptr, // cancelFlag
+                        &rxErr,  // outError
+                        nullptr, // onIncoming
+                        [this](const std::string&, const std::string& fileName, bool success, const std::string& savedPath, const std::string& err) {
+                            (void)savedPath;
+                            QMetaObject::invokeMethod(this, [this, fileName, success, err]() {
+                                if (success) {
+                                    statusBar()->showMessage(QString("✓ Received file: %1").arg(QString::fromStdString(fileName)), 5000);
+                                } else if (!err.empty()) {
+                                    statusBar()->showMessage(QString("✗ Receive error: %1").arg(QString::fromStdString(err)), 6000);
+                                }
+                            }, Qt::QueuedConnection);
+                        }
+                    );
+                    if (!ok) break;
+                }
             });
         }
     };

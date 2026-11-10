@@ -46,6 +46,7 @@
 #include "landrop/ui/TransferPresenter.hpp"
 #include "landrop/ui/StoragePresenter.hpp"
 #include "landrop/ui/SettingsPresenter.hpp"
+#include "landrop/ui/QrCodeGenerator.hpp"
 
 using namespace landrop;
 
@@ -3129,6 +3130,344 @@ bool testMilestone2D_EndToEndWebRtcTransfer() {
     return true;
 }
 
+static bool testSuite27_OpticalPairingAndQrCode() {
+    // 1. TC-QR-01: Generates QR matrix for room code
+    auto qr = landrop::ui::QrCodeGenerator::encodeText("DROP-7K9M-X2PQ");
+    TEST_ASSERT(qr.getVersion() >= 1, "TC-QR-01: Valid QR version generated for room code");
+    TEST_ASSERT(qr.getSize() == qr.getVersion() * 4 + 17, "TC-QR-01: Size matches dimension formula 4*V + 17");
+    TEST_ASSERT(qr.getModule(0, 0), "TC-QR-01: Top-left finder corner is dark");
+
+    // 2. TC-QR-02: Finder patterns and Dark Module checks (ISO/IEC 18004:2015 Sections 6.3.3 & 6.3.6)
+    TEST_ASSERT(qr.getModule(3, 3), "TC-QR-02: Finder top-left center (3, 3) is dark");
+    TEST_ASSERT(qr.getModule(qr.getSize() - 4, 3), "TC-QR-02: Finder top-right center is dark");
+    TEST_ASSERT(qr.getModule(3, qr.getSize() - 4), "TC-QR-02: Finder bottom-left center is dark");
+
+    // Finder border modules must NEVER be overwritten by timing patterns
+    TEST_ASSERT(qr.getModule(1, 6), "TC-QR-02: Top-left finder border (1, 6) is dark");
+    TEST_ASSERT(qr.getModule(3, 6), "TC-QR-02: Top-left finder border (3, 6) is dark");
+    TEST_ASSERT(qr.getModule(5, 6), "TC-QR-02: Top-left finder border (5, 6) is dark");
+    TEST_ASSERT(qr.getModule(6, 1), "TC-QR-02: Top-left finder border (6, 1) is dark");
+    TEST_ASSERT(qr.getModule(6, 3), "TC-QR-02: Top-left finder border (6, 3) is dark");
+    TEST_ASSERT(qr.getModule(6, 5), "TC-QR-02: Top-left finder border (6, 5) is dark");
+
+    // Dark Module at (8, 4*version + 9) == (8, size - 8) is ALWAYS dark
+    TEST_ASSERT(qr.getModule(8, qr.getSize() - 8), "TC-QR-02: Dark module (8, size - 8) is dark");
+
+    TEST_ASSERT(!qr.getModule(7, 0), "TC-QR-02: Finder separator (7, 0) is white/light");
+    TEST_ASSERT(!qr.getModule(7, 6), "TC-QR-02: Finder separator (7, 6) is white/light");
+
+    // 3. TC-QR-03: Timing patterns check (strictly between 8 and size - 9)
+    for (int x = 8; x <= qr.getSize() - 9; ++x) {
+        TEST_ASSERT(qr.getModule(x, 6) == (x % 2 == 0), "TC-QR-03: Horizontal timing pattern alternates");
+    }
+    for (int y = 8; y <= qr.getSize() - 9; ++y) {
+        TEST_ASSERT(qr.getModule(6, y) == (y % 2 == 0), "TC-QR-03: Vertical timing pattern alternates");
+    }
+
+    // 4. TC-QR-04: Version 7-10 Version Information Blocks (ISO/IEC 18004:2015 Section 6.5.2)
+    std::string textV7(110, 'A'); // 110 bytes exceeds V6 (max 106 bytes) -> triggers Version 7
+    auto qrV7 = landrop::ui::QrCodeGenerator::encodeText(textV7);
+    TEST_ASSERT(qrV7.getVersion() == 7, "TC-QR-04: 110-byte payload selects Version 7 matrix");
+    TEST_ASSERT(qrV7.getSize() == 45, "TC-QR-04: Version 7 size is 45x45");
+    uint32_t v7Expected = 0x07C94;
+    for (int k = 0; k < 18; ++k) {
+        bool expectedBit = ((v7Expected >> k) & 1) != 0;
+        TEST_ASSERT(qrV7.getModule(k / 3, 45 - 11 + (k % 3)) == expectedBit, "TC-QR-04: V7 Bottom-left version info bit matches");
+        TEST_ASSERT(qrV7.getModule(45 - 11 + (k % 3), k / 3) == expectedBit, "TC-QR-04: V7 Top-right version info bit matches");
+    }
+
+    // 5. TC-QR-05: Capacity overflow throws std::length_error
+    bool threwOverflow = false;
+    try {
+        std::vector<uint8_t> hugeData(250, 0x42); // Exceeds Version 10 Medium capacity (213 bytes)
+        landrop::ui::QrCodeGenerator::encodeBinary(hugeData);
+    } catch (const std::length_error&) {
+        threwOverflow = true;
+    }
+    TEST_ASSERT(threwOverflow, "TC-QR-05: Exceeding Version 10 capacity throws std::length_error");
+
+    // 6. TC-QR-06: SVG export
+    std::string svg = qr.toSvg(4, "#000000", "#ffffff");
+    TEST_ASSERT(svg.find("<svg") != std::string::npos, "TC-QR-06: SVG contains <svg tag");
+    TEST_ASSERT(svg.find("viewBox=\"0 0 ") != std::string::npos, "TC-QR-06: SVG contains viewBox");
+    TEST_ASSERT(svg.find("<path fill=\"#000000\"") != std::string::npos, "TC-QR-06: SVG contains path element");
+    TEST_ASSERT(svg.find("</svg>") != std::string::npos, "TC-QR-06: SVG contains closing tag");
+
+    // 7. TC-QR-07: ASCII export
+    std::string ascii = qr.toAscii(false);
+    TEST_ASSERT(!ascii.empty(), "TC-QR-07: ASCII output is non-empty");
+    TEST_ASSERT(ascii.find("\n") != std::string::npos, "TC-QR-07: ASCII output is multi-line");
+
+    // 8. TC-QR-08: Optical pairing URL encoding
+    std::string pairingUrl = "https://drop.local/#DROP-7K9M-X2PQ";
+    auto qrUrl = landrop::ui::QrCodeGenerator::encodeText(pairingUrl);
+    TEST_ASSERT(qrUrl.getSize() >= 25, "TC-QR-08: Pairing URL fits in Version 2 or higher matrix");
+    TEST_ASSERT(qrUrl.getModule(3, 3), "TC-QR-08: Pairing URL QR code has valid finder patterns");
+    TEST_ASSERT(qrUrl.getModule(8, qrUrl.getSize() - 8), "TC-QR-08: Pairing URL QR code has dark module intact");
+
+    return true;
+}
+
+static bool testSuite28_MobileEcosystemBridgeFfi() {
+    // 1. TC-FFI-CTX-01: Lifecycle & Context Management, Fallbacks & Null-Safety
+    {
+        LandropHandle defHandle = landrop_mobile_create(nullptr, nullptr);
+        TEST_ASSERT(defHandle != nullptr, "TC-FFI-CTX-01: landrop_mobile_create(nullptr, nullptr) creates valid handle with defaults");
+        landrop_mobile_destroy(defHandle);
+
+        landrop_mobile_destroy(nullptr); // Safe no-op
+
+        // Verify invalid handle rejection across API
+        LandropTransferSnapshot dummySnap;
+        char dummyBuf[32];
+        TEST_ASSERT(landrop_mobile_webrtc_get_state(nullptr) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: get_state(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_webrtc_initiate_room(nullptr, nullptr, nullptr) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: initiate_room(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_webrtc_join_room(nullptr, nullptr, nullptr, "DROP-K8M4-09X2") == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: join_room(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_webrtc_get_room_code(nullptr, dummyBuf, sizeof(dummyBuf)) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: get_room_code(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_webrtc_get_peer_id(nullptr, dummyBuf, sizeof(dummyBuf)) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: get_peer_id(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_webrtc_send_file_async(nullptr, "test.txt", 0) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: send_file_async(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_webrtc_receive_file_async(nullptr, "/tmp") == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: receive_file_async(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_webrtc_get_transfer_snapshot(nullptr, &dummySnap) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: get_transfer_snapshot(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_webrtc_cancel_transfer(nullptr) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: cancel_transfer(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_start_discovery(nullptr, 8848) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: start_discovery(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_get_peer_count(nullptr) == 0, "TC-FFI-CTX-01: get_peer_count(null) returns 0");
+        TEST_ASSERT(landrop_mobile_get_peer_info(nullptr, 0, dummyBuf, sizeof(dummyBuf), dummyBuf, sizeof(dummyBuf), nullptr) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: get_peer_info(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_send_file(nullptr, "test.txt", "127.0.0.1", 8848) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: send_file(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_nfc_generate_payload(nullptr, "127.0.0.1", 8848, dummyBuf, sizeof(dummyBuf)) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: nfc_generate_payload(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_nfc_process_payload(nullptr, "raw", dummyBuf, sizeof(dummyBuf)) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: nfc_process_payload(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_airdrop_enable(nullptr, 1) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: airdrop_enable(null) returns LANDROP_ERR_INVALID_HANDLE");
+        TEST_ASSERT(landrop_mobile_airdrop_get_state(nullptr) == LANDROP_ERR_INVALID_HANDLE, "TC-FFI-CTX-01: airdrop_get_state(null) returns LANDROP_ERR_INVALID_HANDLE");
+    }
+
+    // 2. TC-FFI-BUF-01: Caller buffer capacity exhaustion
+    char smallBuf[10];
+    int reqLen = 0;
+    int rc = landrop_mobile_qr_generate_svg("DROP-7K9M-X2PQ", LANDROP_QR_ECC_MEDIUM, 4, "#000000", "#ffffff", smallBuf, sizeof(smallBuf), &reqLen);
+    TEST_ASSERT(rc == LANDROP_ERR_BUFFER_TOO_SMALL, "TC-FFI-BUF-01: Undersized buffer returns LANDROP_ERR_BUFFER_TOO_SMALL (-2)");
+    TEST_ASSERT(smallBuf[0] == '\0', "TC-FFI-BUF-01: Undersized buffer is guaranteed null-terminated empty string");
+    TEST_ASSERT(reqLen > 100, "TC-FFI-BUF-01: Required length is reported to caller");
+
+    std::vector<char> fullBuf(static_cast<size_t>(reqLen));
+    rc = landrop_mobile_qr_generate_svg("DROP-7K9M-X2PQ", LANDROP_QR_ECC_MEDIUM, 4, "#000000", "#ffffff", fullBuf.data(), static_cast<int>(fullBuf.size()), &reqLen);
+    TEST_ASSERT(rc == LANDROP_OK, "TC-FFI-BUF-01: Correctly sized buffer returns LANDROP_OK");
+    std::string svgStr(fullBuf.data());
+    TEST_ASSERT(svgStr.find("<svg") != std::string::npos, "TC-FFI-BUF-01: Output contains valid SVG XML");
+
+    // 3. TC-FFI-QR-01: Bit matrix generation via FFI
+    uint8_t matrix[64 * 64];
+    int size = 0;
+    rc = landrop_mobile_qr_generate_matrix("DROP-7K9M-X2PQ", LANDROP_QR_ECC_MEDIUM, matrix, sizeof(matrix), &size);
+    TEST_ASSERT(rc == LANDROP_OK, "TC-FFI-QR-01: Bit matrix generation returns LANDROP_OK");
+    TEST_ASSERT(size >= 21, "TC-QR-01: Matrix size >= 21");
+    TEST_ASSERT(matrix[0] == 1, "TC-FFI-QR-01: Top-left finder corner (0,0) is dark");
+    TEST_ASSERT(matrix[3 * size + 3] == 1, "TC-FFI-QR-01: Finder center (3,3) is dark");
+    TEST_ASSERT(matrix[7 * size + 0] == 0, "TC-FFI-QR-01: Separator (7,0) is light");
+    TEST_ASSERT(matrix[(size - 8) * size + 8] == 1, "TC-FFI-QR-01: Dark Module (8, size - 8) is dark");
+
+    // 4. TC-FFI-NORM-01: Crockford Base32 normalization
+    char normBuf[64];
+    char errBuf[128];
+    rc = landrop_mobile_normalize_room_code("k8m4-o9x2", normBuf, sizeof(normBuf), errBuf, sizeof(errBuf));
+    TEST_ASSERT(rc == LANDROP_OK, "TC-FFI-NORM-01: Normalization of lowercase and 'O' returns LANDROP_OK");
+    TEST_ASSERT(std::string(normBuf) == "DROP-K8M4-09X2", "TC-FFI-NORM-01: Canonical code matches DROP-K8M4-09X2");
+
+    rc = landrop_mobile_normalize_room_code("k8m4-u9x2", normBuf, sizeof(normBuf), errBuf, sizeof(errBuf));
+    TEST_ASSERT(rc == LANDROP_ERR_INVALID_ROOM_CODE, "TC-FFI-NORM-01: Invalid char 'U' returns LANDROP_ERR_INVALID_ROOM_CODE");
+    TEST_ASSERT(std::string(errBuf).find("Invalid character") != std::string::npos, "TC-FFI-NORM-01: Error explanation populated");
+
+    // 5. TC-FFI-PAIR-01: Pairing URI formatting
+    char uriBuf[128];
+    rc = landrop_mobile_qr_generate_pairing_uri("DROP-K8M4-09X2", "drop.local", uriBuf, sizeof(uriBuf));
+    TEST_ASSERT(rc == LANDROP_OK, "TC-FFI-PAIR-01: Pairing URI generation returns LANDROP_OK");
+    TEST_ASSERT(std::string(uriBuf) == "https://drop.local/#DROP-K8M4-09X2", "TC-FFI-PAIR-01: Pairing URI contains client-side hash fragment");
+
+    // 6. TC-FFI-TH-01: Multi-threaded thread-safety on single handle
+    LandropHandle handle = landrop_mobile_create("ThreadSafeDevice", "mob-uuid-ts-001");
+    TEST_ASSERT(handle != nullptr, "TC-FFI-TH-01: Handle created successfully");
+
+    std::vector<std::thread> workers;
+    std::atomic<int> completedTasks{0};
+    for (int t = 0; t < 4; ++t) {
+        workers.emplace_back([handle, &completedTasks]() {
+            for (int i = 0; i < 50; ++i) {
+                landrop_mobile_start_discovery(handle, 8848);
+                int count = landrop_mobile_get_peer_count(handle);
+                (void)count;
+                char pName[64];
+                char pIp[64];
+                uint16_t pPort = 0;
+                landrop_mobile_get_peer_info(handle, 0, pName, sizeof(pName), pIp, sizeof(pIp), &pPort);
+                int st = landrop_mobile_webrtc_get_state(handle);
+                (void)st;
+                landrop_mobile_stop_discovery(handle);
+            }
+            completedTasks++;
+        });
+    }
+    for (auto& w : workers) {
+        if (w.joinable()) w.join();
+    }
+    TEST_ASSERT(completedTasks.load() == 4, "TC-FFI-TH-01: All 4 concurrent threads completed safely without data races");
+
+    // 7. TC-FFI-RTC-01: WebRTC ephemeral session lifecycle
+    int initState = landrop_mobile_webrtc_get_state(handle);
+    TEST_ASSERT(initState == LANDROP_SESSION_IDLE, "TC-FFI-RTC-01: Initial WebRTC state is IDLE");
+
+    char codeBuf[64];
+    rc = landrop_mobile_webrtc_get_room_code(handle, codeBuf, sizeof(codeBuf));
+    TEST_ASSERT(rc == LANDROP_ERR_ILLEGAL_STATE, "TC-FFI-RTC-01: get_room_code before initiation returns LANDROP_ERR_ILLEGAL_STATE");
+
+    rc = landrop_mobile_webrtc_initiate_room(handle, "ws://127.0.0.1:58080/ws/signaling", "http://127.0.0.1:58080");
+    TEST_ASSERT(rc == LANDROP_OK, "TC-FFI-RTC-01: initiate_room returns LANDROP_OK non-blocking");
+
+    // Close room cleanly without deadlocks
+    landrop_mobile_webrtc_close(handle);
+    TEST_ASSERT(landrop_mobile_webrtc_get_state(handle) == LANDROP_SESSION_IDLE, "TC-FFI-RTC-01: State returns to IDLE after close");
+
+    // 8. TC-FFI-XFER-01: Non-blocking transfer pipeline & snapshot monitoring
+    LandropTransferSnapshot snap;
+    rc = landrop_mobile_webrtc_get_transfer_snapshot(handle, &snap);
+    TEST_ASSERT(rc == LANDROP_OK, "TC-FFI-XFER-01: Transfer snapshot queried successfully");
+    TEST_ASSERT(snap.transfer_state == LANDROP_XFER_IDLE, "TC-FFI-XFER-01: Initial snapshot state is IDLE");
+
+    rc = landrop_mobile_webrtc_send_file_async(handle, "/path/to/test.txt", 0);
+    TEST_ASSERT(rc == LANDROP_ERR_ILLEGAL_STATE, "TC-FFI-XFER-01: send_file_async when not connected returns LANDROP_ERR_ILLEGAL_STATE");
+
+    rc = landrop_mobile_webrtc_receive_file_async(handle, "/tmp");
+    TEST_ASSERT(rc == LANDROP_ERR_ILLEGAL_STATE, "TC-FFI-XFER-01: receive_file_async when not connected returns LANDROP_ERR_ILLEGAL_STATE");
+
+    rc = landrop_mobile_webrtc_cancel_transfer(handle);
+    TEST_ASSERT(rc == LANDROP_OK, "TC-FFI-XFER-01: cancel_transfer succeeds");
+
+    // 9. TC-FFI-STR-01: String buffer boundaries and null-safety
+    char nfcShort[5];
+    rc = landrop_mobile_nfc_generate_payload(handle, "192.168.1.50", 8848, nfcShort, sizeof(nfcShort));
+    TEST_ASSERT(rc == LANDROP_ERR_BUFFER_TOO_SMALL, "TC-FFI-STR-01: Undersized NFC buffer returns LANDROP_ERR_BUFFER_TOO_SMALL");
+    TEST_ASSERT(nfcShort[0] == '\0', "TC-FFI-STR-01: Undersized NFC buffer is null-terminated");
+
+    rc = landrop_mobile_webrtc_get_room_code(handle, nullptr, 10);
+    TEST_ASSERT(rc == LANDROP_ERR_INVALID_ARG, "TC-FFI-STR-01: null buffer to get_room_code returns LANDROP_ERR_INVALID_ARG");
+
+    char dummyBuf2[32];
+    rc = landrop_mobile_webrtc_get_peer_id(handle, dummyBuf2, 0);
+    TEST_ASSERT(rc == LANDROP_ERR_INVALID_ARG, "TC-FFI-STR-01: 0-capacity buffer to get_peer_id returns LANDROP_ERR_INVALID_ARG");
+
+    landrop_mobile_destroy(handle);
+
+    return true;
+}
+
+static bool testSuite29_ResilientStreamingResumptionSuite() {
+    using namespace landrop::protocol::v2;
+
+    // 1. TC-3D-PROT-01: C++ ResumeRequestMessage serialization & deserialization (136 bytes)
+    {
+        ResumeRequestMessage req;
+        req.fileHash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        req.bytesReceivedSoFar = 1048576ULL;
+        req.partialSha256 = "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff";
+
+        std::vector<uint8_t> raw = req.serialize();
+        TEST_ASSERT(raw.size() == 136, "TC-3D-PROT-01: Serialized ResumeRequestMessage is strictly 136 bytes");
+
+        ResumeRequestMessage parsed;
+        std::string err;
+        bool ok = ResumeRequestMessage::deserialize(raw.data(), raw.size(), parsed, &err);
+        TEST_ASSERT(ok, "TC-3D-PROT-01: Deserialization of valid ResumeRequestMessage succeeds");
+        TEST_ASSERT(parsed.fileHash == req.fileHash, "TC-3D-PROT-01: fileHash matches");
+        TEST_ASSERT(parsed.bytesReceivedSoFar == 1048576ULL, "TC-3D-PROT-01: bytesReceivedSoFar matches");
+        TEST_ASSERT(parsed.partialSha256 == req.partialSha256, "TC-3D-PROT-01: partialSha256 matches");
+
+        // Padding check: when hashes are < 64 chars, they are zero-padded to 64 chars
+        ResumeRequestMessage shortReq;
+        shortReq.fileHash = "abc";
+        shortReq.bytesReceivedSoFar = 42;
+        shortReq.partialSha256 = "def";
+        std::vector<uint8_t> shortRaw = shortReq.serialize();
+        TEST_ASSERT(shortRaw.size() == 136, "TC-3D-PROT-01: Short hashes are zero-padded to 136 bytes");
+
+        ResumeRequestMessage parsedShort;
+        TEST_ASSERT(ResumeRequestMessage::deserialize(shortRaw.data(), shortRaw.size(), parsedShort), "TC-3D-PROT-01: Deserializes padded message");
+        TEST_ASSERT(parsedShort.fileHash.rfind("abc", 0) == 0, "TC-3D-PROT-01: Padded fileHash starts with abc");
+        TEST_ASSERT(parsedShort.bytesReceivedSoFar == 42, "TC-3D-PROT-01: Padded bytesReceivedSoFar is 42");
+
+        // Upper 32 bits offset check (> 4GB)
+        ResumeRequestMessage largeReq;
+        largeReq.fileHash = std::string(64, 'a');
+        largeReq.bytesReceivedSoFar = 10ULL * 1024 * 1024 * 1024; // 10 GB
+        largeReq.partialSha256 = std::string(64, 'b');
+        std::vector<uint8_t> largeRaw = largeReq.serialize();
+        TEST_ASSERT(largeRaw.size() == 136, "TC-3D-PROT-01: 10GB offset serializes to 136 bytes");
+
+        ResumeRequestMessage parsedLarge;
+        TEST_ASSERT(ResumeRequestMessage::deserialize(largeRaw.data(), largeRaw.size(), parsedLarge), "TC-3D-PROT-01: Deserializes 10GB offset message");
+        TEST_ASSERT(parsedLarge.bytesReceivedSoFar == 10ULL * 1024 * 1024 * 1024, "TC-3D-PROT-01: 10GB offset preserves upper 32 bits");
+    }
+
+    // 2. TC-3D-PROT-02: Buffer underflow returns false and populates outError
+    {
+        ResumeRequestMessage parsed;
+        std::string err;
+        std::vector<uint8_t> undersized(135, 0);
+        bool ok = ResumeRequestMessage::deserialize(undersized.data(), undersized.size(), parsed, &err);
+        TEST_ASSERT(!ok, "TC-3D-PROT-02: 135 bytes returns false");
+        TEST_ASSERT(!err.empty(), "TC-3D-PROT-02: Error message populated for 135 bytes");
+
+        ok = ResumeRequestMessage::deserialize(nullptr, 136, parsed, &err);
+        TEST_ASSERT(!ok, "TC-3D-PROT-02: nullptr data returns false");
+
+        ok = ResumeRequestMessage::deserialize(undersized.data(), 0, parsed, &err);
+        TEST_ASSERT(!ok, "TC-3D-PROT-02: 0 bytes returns false");
+    }
+
+    // 3. TC-3D-HASH-01: computePartialFileHash verification
+    {
+        FileChunkHasher hasher;
+
+        // A. 0-byte slice returns empty string SHA-256
+        auto zeroHash = hasher.computePartialFileHash("nonexistent_file_path.bin", 0);
+        TEST_ASSERT(zeroHash.has_value(), "TC-3D-HASH-01: 0-byte slice has value without file open");
+        TEST_ASSERT(*zeroHash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "TC-3D-HASH-01: 0-byte slice equals sha256 of empty string");
+
+        // B. Nonexistent file with maxBytes > 0 returns nullopt
+        auto nonExistent = hasher.computePartialFileHash("this_file_definitely_does_not_exist_xyz.bin", 100);
+        TEST_ASSERT(!nonExistent.has_value(), "TC-3D-HASH-01: Nonexistent file returns std::nullopt");
+
+        // C. Create a temporary file with known content
+        std::filesystem::path tempDir = "./unit_test_resumption_tmp";
+        std::filesystem::remove_all(tempDir);
+        std::filesystem::create_directories(tempDir);
+        std::filesystem::path testFile = tempDir / "test_partial.bin";
+
+        std::string testData = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!@#$%^&*()";
+        {
+            std::ofstream out(testFile, std::ios::binary);
+            out.write(testData.data(), testData.size());
+        }
+
+        // Partial slice: first 32 bytes
+        auto partialHash = hasher.computePartialFileHash(testFile.string(), 32);
+        TEST_ASSERT(partialHash.has_value(), "TC-3D-HASH-01: Partial hash of 32 bytes computed");
+
+        std::string expectedPartial = hasher.computeStringHash(testData.substr(0, 32));
+        TEST_ASSERT(*partialHash == expectedPartial, "TC-3D-HASH-01: Partial hash matches computeStringHash for leading 32 bytes");
+
+        // Full file slice: exact size
+        auto fullSliceHash = hasher.computePartialFileHash(testFile.string(), testData.size());
+        TEST_ASSERT(fullSliceHash.has_value(), "TC-3D-HASH-01: Exact size partial hash computed");
+        auto fullHash = hasher.computeFullFileHash(testFile.string());
+        TEST_ASSERT(fullSliceHash == fullHash, "TC-3D-HASH-01: Full slice hash matches computeFullFileHash");
+
+        // Oversized slice (maxBytes > fileSize): returns nullopt
+        auto overHash = hasher.computePartialFileHash(testFile.string(), testData.size() + 100);
+        TEST_ASSERT(!overHash.has_value(), "TC-3D-HASH-01: maxBytes > fileSize returns std::nullopt");
+
+        std::filesystem::remove_all(tempDir);
+    }
+
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -3167,7 +3506,10 @@ int main() {
         {"WebRTC Flow Control & Candidate Queueing (TC-RTC-01, TC-RTC-02)", testCandidateQueueAndBackpressure},
         {"SignalingClient Protocol & Glare Resolution (TC-RTC-03)", testSignalingClientAndGlareResolution},
         {"Global WebRTC Transfer Pipeline & Coturn Config (Milestone 2C)", testMilestone2C_GlobalWebRtcTransferPipeline},
-        {"End-to-End File Transfer & Live Signaling Verification (Milestone 2D)", testMilestone2D_EndToEndWebRtcTransfer}
+        {"End-to-End File Transfer & Live Signaling Verification (Milestone 2D)", testMilestone2D_EndToEndWebRtcTransfer},
+        {"Optical Pairing & QrCodeGenerator Suite (Milestone 3B)", testSuite27_OpticalPairingAndQrCode},
+        {"Mobile Ecosystem Bridge FFI Suite (Milestone 3C)", testSuite28_MobileEcosystemBridgeFfi},
+        {"Resilient Streaming & Byte-Offset Resumption Suite (Milestone 3D)", testSuite29_ResilientStreamingResumptionSuite}
     };
 
 

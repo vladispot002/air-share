@@ -22,17 +22,25 @@ enum class MessageType : uint16_t {
     TransferAck    = 0x0004,
     TransferCancel = 0x0005,
     Ping           = 0x0006,
-    Pong           = 0x0007
+    Pong           = 0x0007,
+    ResumeRequest  = 0x0008
 };
 
 enum class AckStatus : uint8_t {
-    Success      = 0x00,
-    HashMismatch = 0x01,
-    DiskFull     = 0x02,
-    Rejected     = 0x03,
-    PathUnsafe   = 0x04,
-    GenericError = 0x05
+    Success        = 0x00,
+    HashMismatch   = 0x01,
+    DiskFull       = 0x02,
+    Rejected       = 0x03,
+    PathUnsafe     = 0x04,
+    GenericError   = 0x05,
+    ResumeAccepted = 0x06,
+    ResumeRejected = 0x07
 };
+
+namespace FileHeaderFlags {
+    constexpr uint16_t NONE             = 0x0000;
+    constexpr uint16_t RESUME_SUPPORTED = 0x0001;
+}
 
 // Endian conversion utilities
 inline uint16_t toBigEndian16(uint16_t val) {
@@ -138,6 +146,16 @@ struct TransferCancelMessage {
 
     std::vector<uint8_t> serialize() const;
     static bool deserialize(const uint8_t* data, size_t size, TransferCancelMessage& outMsg, std::string* outError = nullptr);
+};
+
+// Resume Request payload (0x0008, fixed 136 bytes)
+struct ResumeRequestMessage {
+    std::string fileHash;           // 64-char SHA-256 hex digest
+    uint64_t bytesReceivedSoFar{0}; // Verified byte offset
+    std::string partialSha256;      // SHA-256 hex digest of [0 .. bytesReceivedSoFar)
+
+    std::vector<uint8_t> serialize() const;
+    static bool deserialize(const uint8_t* data, size_t size, ResumeRequestMessage& outMsg, std::string* outError = nullptr);
 };
 
 // Helper to construct a complete wire frame (header + payload)

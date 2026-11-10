@@ -2,8 +2,10 @@ package tests
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"landrop/signaling/internal/protocol"
 	"landrop/signaling/internal/server"
 )
+
 
 func setupTestServer() (*server.Server, *httptest.Server) {
 	cfg := server.Config{
@@ -324,3 +327,43 @@ func TestOversizedPayloadRejection(t *testing.T) {
 		t.Fatalf("expected connection to fail on oversized frame")
 	}
 }
+
+// TestStaticWebAssetServing verifies static web assets are served from WebDir
+func TestStaticWebAssetServing(t *testing.T) {
+	tempDir := t.TempDir()
+	indexContent := "<html><body><h1>LAN-Drop Web Test</h1></body></html>"
+	if err := os.WriteFile(tempDir+"/index.html", []byte(indexContent), 0644); err != nil {
+		t.Fatalf("failed to write test index.html: %v", err)
+	}
+
+	cfg := server.Config{
+		TurnSecret: "test-secret",
+		StunURLs:   []string{"stun:127.0.0.1:19302"},
+		WebDir:     tempDir,
+	}
+
+	srv := server.NewServer(cfg)
+	defer srv.Close()
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("failed to GET /: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+
+	if !strings.Contains(string(body), "LAN-Drop Web Test") {
+		t.Fatalf("expected index.html content, got: %s", string(body))
+	}
+}
+

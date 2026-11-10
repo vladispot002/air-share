@@ -357,9 +357,9 @@ void QtDiscoveryWidget::onGlobalP2pClicked() {
     msgBox.setText("<b>Global P2P File Transfer (Zero-Config)</b><br><br>"
                    "Transfer files across NATs and firewalls anywhere in the world without registration.<br>"
                    "Choose an action:");
-    auto* sendBtn = msgBox.addButton("Send File (Host Room)", QMessageBox::ActionRole);
-    auto* receiveBtn = msgBox.addButton("Receive File (Enter Code)", QMessageBox::ActionRole);
-    auto* pairBtn = msgBox.addButton("Pair Devices (Host Room)", QMessageBox::ActionRole);
+    auto* sendBtn = msgBox.addButton("📷 Host Room (Show QR)", QMessageBox::ActionRole);
+    auto* receiveBtn = msgBox.addButton("⌨️ Join Room (Enter Code)", QMessageBox::ActionRole);
+    auto* pairBtn = msgBox.addButton("🔗 Pair Devices", QMessageBox::ActionRole);
     msgBox.addButton(QMessageBox::Cancel);
 
     msgBox.exec();

@@ -356,6 +356,49 @@ bool TransferCancelMessage::deserialize(const uint8_t* data, size_t size, Transf
     return true;
 }
 
+// ResumeRequestMessage (0x0008, 136 bytes)
+std::vector<uint8_t> ResumeRequestMessage::serialize() const {
+    std::vector<uint8_t> buf(136, 0);
+    uint8_t* ptr = buf.data();
+
+    // 1. fileHash (padded or sliced to 64 chars)
+    std::string h = fileHash;
+    if (h.size() < 64) h.append(64 - h.size(), '0');
+    std::memcpy(ptr, h.data(), 64);
+    ptr += 64;
+
+    // 2. bytesReceivedSoFar (8 bytes, big-endian)
+    uint64_t beBytes = toBigEndian64(bytesReceivedSoFar);
+    std::memcpy(ptr, &beBytes, sizeof(uint64_t));
+    ptr += sizeof(uint64_t);
+
+    // 3. partialSha256 (padded or sliced to 64 chars)
+    std::string ph = partialSha256;
+    if (ph.size() < 64) ph.append(64 - ph.size(), '0');
+    std::memcpy(ptr, ph.data(), 64);
+
+    return buf;
+}
+
+bool ResumeRequestMessage::deserialize(const uint8_t* data, size_t size, ResumeRequestMessage& outMsg, std::string* outError) {
+    if (!data || size < 136) {
+        if (outError) *outError = "Buffer underflow parsing ResumeRequestMessage: expected 136 bytes, got " + std::to_string(data ? size : 0);
+        return false;
+    }
+    const uint8_t* ptr = data;
+
+    outMsg.fileHash.assign(reinterpret_cast<const char*>(ptr), 64);
+    ptr += 64;
+
+    uint64_t beBytes = 0;
+    std::memcpy(&beBytes, ptr, sizeof(uint64_t));
+    ptr += sizeof(uint64_t);
+    outMsg.bytesReceivedSoFar = fromBigEndian64(beBytes);
+
+    outMsg.partialSha256.assign(reinterpret_cast<const char*>(ptr), 64);
+    return true;
+}
+
 std::vector<uint8_t> buildFrame(MessageType type, const std::vector<uint8_t>& payload, uint32_t crcOrSeq) {
     FrameHeader hdr;
     hdr.version = PROTOCOL_VERSION;
