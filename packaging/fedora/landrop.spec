@@ -44,9 +44,21 @@ export QT_QPA_PLATFORM=offscreen
 %{_bindir}/lan_drop
 %{_datadir}/applications/lan-drop.desktop
 %{_datadir}/icons/hicolor/scalable/apps/lan-drop.svg
+%{_datadir}/metainfo/io.landrop.LAN-Drop.metainfo.xml
 %dir %{_datadir}/landrop
 %{_datadir}/landrop/styles.qss
 %{_datadir}/landrop/lan-drop.svg
+
+%post
+/bin/touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
+update-desktop-database &> /dev/null || :
+
+%postun
+update-desktop-database &> /dev/null || :
+if [ $1 -eq 0 ] ; then
+    /bin/touch --no-create %{_datadir}/icons/hicolor &>/dev/null
+    gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
+fi
 
 %changelog
 * Fri Oct 23 2026 LAN-Drop Team <vladis@localhost> - 1.0.1-1

@@ -86,6 +86,12 @@ func (l *Limiter) RecordFailure(ip string) {
 		// Enforce capacity bound to prevent OOM
 		if len(l.records) >= l.maxCapacity {
 			l.pruneOldestLocked(now)
+			if len(l.records) >= l.maxCapacity {
+				for evictIP := range l.records {
+					delete(l.records, evictIP)
+					break
+				}
+			}
 		}
 		rec = &ipRecord{}
 		l.records[ip] = rec

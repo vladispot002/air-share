@@ -83,16 +83,14 @@ chmod 600 .env
 ```
 Edit `.env` with your domain, secrets, and admin email:
 ```ini
-DOMAIN=drop.example.com
-LETSENCRYPT_EMAIL=admin@example.com
-
+DOMAIN_NAME=drop.example.com
+EXTERNAL_IP=203.0.113.10
 TURN_SECRET=your_generated_32_byte_turn_secret_here
-TURN_REALM=drop.example.com
-TURN_EXTERNAL_IP=203.0.113.10
-
-SIGNALING_AUTH_TOKEN=your_generated_16_byte_auth_token_here
-TURN_TTL_SECONDS=86400
-LOG_LEVEL=info
+STUN_SERVERS=stun:stun.l.google.com:19302,stun:drop.example.com:3478
+TURN_SERVERS=turn:drop.example.com:3478?transport=udp,turn:drop.example.com:3478?transport=tcp
+PORT=8080
+TURN_MIN_PORT=49160
+TURN_MAX_PORT=49200
 ```
 
 ### Step 4: Launch Container Stack

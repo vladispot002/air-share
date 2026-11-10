@@ -16,10 +16,15 @@ import (
 
 func main() {
 	port := flag.String("port", getEnv("PORT", "8080"), "Signaling server port")
-	turnSecret := flag.String("turn-secret", getEnv("TURN_SECRET", "local-test-turn-secret"), "Coturn shared secret")
+	defaultSecret := getEnv("TURN_SECRET", "")
+	if defaultSecret == "" {
+		defaultSecret = getEnv("COTURN_STATIC_AUTH_SECRET", "local-test-turn-secret")
+	}
+	turnSecret := flag.String("turn-secret", defaultSecret, "Coturn shared secret")
 	stunRaw := flag.String("stun", getEnv("STUN_SERVERS", "stun:stun.l.google.com:19302,stun:global.stun.twilio.com:3478"), "Comma-separated STUN URLs")
 	turnRaw := flag.String("turn", getEnv("TURN_SERVERS", "turn:127.0.0.1:3478?transport=udp,turn:127.0.0.1:3478?transport=tcp"), "Comma-separated TURN URLs")
 	webDirFlag := flag.String("web-dir", getEnv("WEB_DIR", ""), "Path to static web assets")
+	trustProxyFlag := flag.Bool("trust-proxy", getEnv("TRUST_PROXY", "false") == "true", "Trust upstream reverse proxy headers (X-Forwarded-For)")
 	flag.Parse()
 
 	stunList := splitNonEmpty(*stunRaw, ",")
@@ -46,6 +51,7 @@ func main() {
 		RateWindow:  10 * time.Minute,
 		BlockTime:   10 * time.Minute,
 		WebDir:      webDir,
+		TrustProxy:  *trustProxyFlag,
 	}
 
 
