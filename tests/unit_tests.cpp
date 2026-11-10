@@ -30,6 +30,7 @@
 #include "landrop/core/SignalingClient.hpp"
 #include "landrop/core/TurnConfigClient.hpp"
 #include "landrop/core/WebRtcSessionCoordinator.hpp"
+#include "landrop/core/DoctorEngine.hpp"
 
 
 #include "landrop/peers/NetworkPeer.hpp"
@@ -3468,6 +3469,209 @@ static bool testSuite29_ResilientStreamingResumptionSuite() {
     return true;
 }
 
+bool testSuite30_DoctorEngineAndDiagnosticsSuite() {
+    std::cout << "\n--- Starting Suite 30: Production Packaging & CLI Diagnostics (DoctorEngine) ---\n";
+
+    // TC-DOC-STUN-01: STUN Binding Request Encoding (RFC 5389)
+    {
+        std::array<uint8_t, 12> txId = {10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120};
+        auto req = DoctorEngine::buildStunBindingRequest(txId);
+        TEST_ASSERT(req.size() == 20, "TC-DOC-STUN-01: STUN Binding Request exactly 20 bytes");
+
+        uint16_t msgType = (static_cast<uint16_t>(req[0]) << 8) | req[1];
+        TEST_ASSERT(msgType == DoctorEngine::STUN_BINDING_REQUEST, "TC-DOC-STUN-01: Message type is 0x0001 (Binding Request)");
+
+        uint16_t msgLen = (static_cast<uint16_t>(req[2]) << 8) | req[3];
+        TEST_ASSERT(msgLen == 0, "TC-DOC-STUN-01: Attribute length is 0 for initial Binding Request");
+
+        uint32_t cookie = (static_cast<uint32_t>(req[4]) << 24) |
+                          (static_cast<uint32_t>(req[5]) << 16) |
+                          (static_cast<uint32_t>(req[6]) << 8)  |
+                          static_cast<uint32_t>(req[7]);
+        TEST_ASSERT(cookie == DoctorEngine::STUN_MAGIC_COOKIE, "TC-DOC-STUN-01: Magic cookie matches 0x2112A442");
+
+        TEST_ASSERT(std::memcmp(req.data() + 8, txId.data(), 12) == 0, "TC-DOC-STUN-01: Transaction ID correctly embedded in 12-byte header");
+    }
+
+    // TC-DOC-STUN-02: STUN Binding Response Decoding (XOR-MAPPED-ADDRESS)
+    {
+        std::array<uint8_t, 12> txId = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+        std::vector<uint8_t> resp(32, 0);
+
+        // Header: 0x0101 (Binding Response), length = 12 (attribute 8 bytes + 4 bytes header)
+        resp[0] = 0x01; resp[1] = 0x01;
+        resp[2] = 0x00; resp[3] = 0x0C; // length = 12 bytes of attributes
+        resp[4] = 0x21; resp[5] = 0x12; resp[6] = 0xA4; resp[7] = 0x42; // Magic cookie
+        std::memcpy(resp.data() + 8, txId.data(), 12);
+
+        // Attribute: 0x0020 (XOR-MAPPED-ADDRESS), length = 8
+        resp[20] = 0x00; resp[21] = 0x20;
+        resp[22] = 0x00; resp[23] = 0x08;
+
+        // Value:
+        // Reserved (0x00), Family (0x01 = IPv4)
+        resp[24] = 0x00;
+        resp[25] = 0x01;
+
+        // X-Port: target port 12345 (0x3039) ^ 0x2112 = 0x112B
+        resp[26] = 0x11;
+        resp[27] = 0x2B;
+
+        // X-Address: target IP 203.0.113.195 (0xCB0071C3) ^ 0x2112A442 = 0xEA12D581
+        resp[28] = 0xEA;
+        resp[29] = 0x12;
+        resp[30] = 0xD5;
+        resp[31] = 0x81;
+
+        std::string outIp;
+        uint16_t outPort = 0;
+        std::string outErr;
+        bool ok = DoctorEngine::parseStunBindingResponse(resp.data(), resp.size(), txId, outIp, outPort, &outErr);
+
+        TEST_ASSERT(ok, "TC-DOC-STUN-02: Successfully parsed valid STUN XOR-MAPPED-ADDRESS response");
+        TEST_ASSERT(outIp == "203.0.113.195", "TC-DOC-STUN-02: Decoded reflexive IP matches 203.0.113.195");
+        TEST_ASSERT(outPort == 12345, "TC-DOC-STUN-02: Decoded reflexive port matches 12345");
+    }
+
+    // TC-DOC-STUN-02B: STUN Legacy MAPPED-ADDRESS Fallback (RFC 3489 attribute 0x0001)
+    {
+        std::array<uint8_t, 12> txId = {2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24};
+        std::vector<uint8_t> resp(32, 0);
+
+        // Header: 0x0101 (Binding Response), length = 12 bytes
+        resp[0] = 0x01; resp[1] = 0x01;
+        resp[2] = 0x00; resp[3] = 0x0C;
+        resp[4] = 0x21; resp[5] = 0x12; resp[6] = 0xA4; resp[7] = 0x42; // Magic cookie
+        std::memcpy(resp.data() + 8, txId.data(), 12);
+
+        // Attribute: 0x0001 (MAPPED-ADDRESS), length = 8
+        resp[20] = 0x00; resp[21] = 0x01;
+        resp[22] = 0x00; resp[23] = 0x08;
+
+        // Value:
+        // Reserved (0x00), Family (0x01 = IPv4)
+        resp[24] = 0x00;
+        resp[25] = 0x01;
+
+        // Port: 8080 (0x1F90) in network byte order
+        resp[26] = 0x1F;
+        resp[27] = 0x90;
+
+        // IPv4 Address: 198.51.100.42
+        resp[28] = 198;
+        resp[29] = 51;
+        resp[30] = 100;
+        resp[31] = 42;
+
+        std::string outIp;
+        uint16_t outPort = 0;
+        std::string outErr;
+        bool ok = DoctorEngine::parseStunBindingResponse(resp.data(), resp.size(), txId, outIp, outPort, &outErr);
+
+        TEST_ASSERT(ok, "TC-DOC-STUN-02B: Successfully parsed valid legacy STUN MAPPED-ADDRESS response");
+        TEST_ASSERT(outIp == "198.51.100.42", "TC-DOC-STUN-02B: Decoded reflexive IP matches 198.51.100.42");
+        TEST_ASSERT(outPort == 8080, "TC-DOC-STUN-02B: Decoded reflexive port matches 8080");
+    }
+
+    // TC-DOC-STUN-03: STUN Error Handling & Malformed Detection
+    {
+        std::array<uint8_t, 12> txId = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+        std::string outIp;
+        uint16_t outPort = 0;
+        std::string outErr;
+
+        // Too short (< 20 bytes)
+        std::vector<uint8_t> shortResp(19, 0);
+        bool okShort = DoctorEngine::parseStunBindingResponse(shortResp.data(), shortResp.size(), txId, outIp, outPort, &outErr);
+        TEST_ASSERT(!okShort, "TC-DOC-STUN-03: Packets shorter than 20 bytes rejected");
+
+        // Wrong magic cookie
+        std::vector<uint8_t> badCookie(20, 0);
+        badCookie[0] = 0x01; badCookie[1] = 0x01;
+        badCookie[4] = 0xFF; badCookie[5] = 0xFF; // bad cookie
+        std::memcpy(badCookie.data() + 8, txId.data(), 12);
+        bool okCookie = DoctorEngine::parseStunBindingResponse(badCookie.data(), badCookie.size(), txId, outIp, outPort, &outErr);
+        TEST_ASSERT(!okCookie, "TC-DOC-STUN-03: Invalid magic cookie rejected");
+
+        // Mismatched transaction ID
+        std::vector<uint8_t> badTx(20, 0);
+        badTx[0] = 0x01; badTx[1] = 0x01;
+        badTx[4] = 0x21; badTx[5] = 0x12; badTx[6] = 0xA4; badTx[7] = 0x42;
+        bool okTx = DoctorEngine::parseStunBindingResponse(badTx.data(), badTx.size(), txId, outIp, outPort, &outErr);
+        TEST_ASSERT(!okTx, "TC-DOC-STUN-03: Mismatched transaction ID rejected");
+    }
+
+    // TC-DOC-PORT-01: Port & Interface Inspection
+    {
+        DoctorEngine doctor;
+        auto ifaces = doctor.inspectInterfaces();
+        TEST_ASSERT(!ifaces.empty(), "TC-DOC-PORT-01: Interface inspection returns at least one interface (e.g. loopback)");
+
+        bool hasLoop = false;
+        for (const auto& iface : ifaces) {
+            if (iface.isLoopback || iface.ipAddress == "127.0.0.1") {
+                hasLoop = true;
+                break;
+            }
+        }
+        TEST_ASSERT(hasLoop, "TC-DOC-PORT-01: Loopback interface detected in interface list");
+
+        // Ephemeral port check
+        auto pStatus = doctor.checkPort(59123, "TCP");
+        TEST_ASSERT(pStatus.port == 59123, "TC-DOC-PORT-01: PortStatus reports requested port");
+        TEST_ASSERT(pStatus.protocol == "TCP", "TC-DOC-PORT-01: PortStatus reports TCP protocol");
+        TEST_ASSERT(!pStatus.details.empty(), "TC-DOC-PORT-01: PortStatus details non-empty");
+    }
+
+    // TC-DOC-REPORT-01: Report Formatting & JSON Output
+    {
+        DoctorReport report;
+        report.overallStatus = DiagnosticStatus::Pass;
+
+        NetworkInterfaceInfo iface;
+        iface.name = "eth0";
+        iface.ipAddress = "192.168.1.50";
+        iface.isLoopback = false;
+        iface.isMulticastCapable = true;
+        iface.isUp = true;
+        report.interfaces.push_back(iface);
+
+        PortStatus p1;
+        p1.port = 8848;
+        p1.protocol = "TCP";
+        p1.available = true;
+        p1.details = "Available for binding";
+        report.ports.push_back(p1);
+
+        report.signaling.url = "http://localhost:8080/healthz";
+        report.signaling.reachable = true;
+        report.signaling.statusCode = 200;
+        report.signaling.latencyMs = 12;
+        report.signaling.details = "Operational (HTTP 200)";
+
+        report.stun.stunServer = "stun.example.com:3478";
+        report.stun.reachable = true;
+        report.stun.reflectedIp = "203.0.113.10";
+        report.stun.reflectedPort = 45678;
+        report.stun.latencyMs = 25;
+        report.stun.details = "Public reflexive endpoint: 203.0.113.10:45678";
+
+        std::string txt = report.toFormattedText(false);
+        TEST_ASSERT(txt.find("[1] Network Interfaces:") != std::string::npos, "TC-DOC-REPORT-01: Formatted text contains Interfaces section");
+        TEST_ASSERT(txt.find("[2] Transport & Discovery Ports:") != std::string::npos, "TC-DOC-REPORT-01: Formatted text contains Ports section");
+        TEST_ASSERT(txt.find("[3] Signaling Server Reachability:") != std::string::npos, "TC-DOC-REPORT-01: Formatted text contains Signaling section");
+        TEST_ASSERT(txt.find("[4] NAT Reflexive Probe") != std::string::npos, "TC-DOC-REPORT-01: Formatted text contains STUN section");
+        TEST_ASSERT(txt.find("HEALTHY - ALL SYSTEMS GO") != std::string::npos, "TC-DOC-REPORT-01: Healthy status correctly rendered");
+
+        std::string json = report.toJson();
+        TEST_ASSERT(json.find("\"overall_status\": \"PASS\"") != std::string::npos, "TC-DOC-REPORT-01: JSON contains overall_status PASS");
+        TEST_ASSERT(json.find("\"interfaces\": [") != std::string::npos, "TC-DOC-REPORT-01: JSON contains interfaces array");
+        TEST_ASSERT(json.find("\"reflected_ip\": \"203.0.113.10\"") != std::string::npos, "TC-DOC-REPORT-01: JSON contains reflected_ip");
+    }
+
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -3509,7 +3713,8 @@ int main() {
         {"End-to-End File Transfer & Live Signaling Verification (Milestone 2D)", testMilestone2D_EndToEndWebRtcTransfer},
         {"Optical Pairing & QrCodeGenerator Suite (Milestone 3B)", testSuite27_OpticalPairingAndQrCode},
         {"Mobile Ecosystem Bridge FFI Suite (Milestone 3C)", testSuite28_MobileEcosystemBridgeFfi},
-        {"Resilient Streaming & Byte-Offset Resumption Suite (Milestone 3D)", testSuite29_ResilientStreamingResumptionSuite}
+        {"Resilient Streaming & Byte-Offset Resumption Suite (Milestone 3D)", testSuite29_ResilientStreamingResumptionSuite},
+        {"Production Packaging & CLI Diagnostics Suite (Milestone 4D)", testSuite30_DoctorEngineAndDiagnosticsSuite}
     };
 
 

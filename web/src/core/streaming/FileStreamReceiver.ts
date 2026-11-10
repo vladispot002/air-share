@@ -116,7 +116,6 @@ export class FileStreamReceiver {
       const chunks: Uint8Array[] = [];
 
       let settled = false;
-      let isWaitingForConfirmation = false;
       const pendingChunkFrames: ReassembledFrame[] = [];
 
       enum ReceiverPhase {
