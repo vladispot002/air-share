@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,7 +16,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	_ "github.com/lib/pq"
 
+	"landrop/signaling/internal/identity"
 	"landrop/signaling/internal/protocol"
 	"landrop/signaling/internal/ratelimit"
 	"landrop/signaling/internal/room"
@@ -42,6 +45,7 @@ type Config struct {
 	TrustProxy   bool
 	TrustedCIDRs []string
 	WebDir       string
+	DatabaseURL  string
 }
 
 
@@ -52,6 +56,16 @@ type Server struct {
 	upgrader    websocket.Upgrader
 	mux         *http.ServeMux
 	trustedNets []*net.IPNet
+
+	identityStore identity.Store
+	identitySvc   *identity.Service
+	identityCoord *identity.Coordinator
+
+	hubMu        sync.RWMutex
+	userConns    map[string]map[string]*room.Client // userID -> map[deviceID]*Client
+	deviceConns  map[string]*room.Client            // deviceID -> *Client
+	clientToUser map[string]string                  // clientID -> userID
+	clientToDev  map[string]string                  // clientID -> deviceID
 }
 
 func NewServer(cfg Config) *Server {
@@ -104,11 +118,41 @@ func NewServer(cfg Config) *Server {
 		}
 	}
 
+	var identStore identity.Store
+	if cfg.DatabaseURL != "" {
+		db, err := sql.Open("postgres", cfg.DatabaseURL)
+		if err != nil {
+			log.Printf("WARNING: Failed to open PostgreSQL connection: %v. Falling back to MemoryStore.", err)
+			identStore = identity.NewMemoryStore()
+		} else if err := db.Ping(); err != nil {
+			log.Printf("WARNING: PostgreSQL ping failed: %v. Falling back to MemoryStore.", err)
+			_ = db.Close()
+			identStore = identity.NewMemoryStore()
+		} else {
+			pgStore := identity.NewPostgresStore(db)
+			if err := pgStore.AutoMigrate(""); err != nil {
+				log.Printf("WARNING: PostgreSQL AutoMigrate failed: %v", err)
+			} else {
+				log.Println("PostgreSQL identity store initialized and schema migrated successfully.")
+			}
+			identStore = pgStore
+		}
+	} else {
+		identStore = identity.NewMemoryStore()
+	}
+	identSvc := identity.NewService(identStore)
+
 	s := &Server{
-		cfg:         cfg,
-		roomMgr:     room.NewManager(cfg.RoomTTL),
-		limiter:     ratelimit.NewLimiter(cfg.MaxFailures, cfg.RateWindow, cfg.BlockTime),
-		trustedNets: trustedNets,
+		cfg:           cfg,
+		roomMgr:       room.NewManager(cfg.RoomTTL),
+		limiter:       ratelimit.NewLimiter(cfg.MaxFailures, cfg.RateWindow, cfg.BlockTime),
+		trustedNets:   trustedNets,
+		identityStore: identStore,
+		identitySvc:   identSvc,
+		userConns:     make(map[string]map[string]*room.Client),
+		deviceConns:   make(map[string]*room.Client),
+		clientToUser:  make(map[string]string),
+		clientToDev:   make(map[string]string),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
@@ -119,6 +163,7 @@ func NewServer(cfg Config) *Server {
 		mux: http.NewServeMux(),
 	}
 
+	s.identityCoord = identity.NewCoordinator(identSvc, s)
 	s.setupRoutes()
 	return s
 }
@@ -126,6 +171,9 @@ func NewServer(cfg Config) *Server {
 func (s *Server) Close() {
 	s.roomMgr.Close()
 	s.limiter.Close()
+	if pgStore, ok := s.identityStore.(*identity.PostgresStore); ok && pgStore != nil {
+		_ = pgStore.DB().Close()
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -136,6 +184,9 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/api/v1/turn-config", s.handleTurnConfig)
 	s.mux.HandleFunc("/ws/signaling", s.handleWebSocket)
+
+	identityHandlers := identity.NewHandlers(s.identitySvc, s.identityCoord)
+	identityHandlers.RegisterRoutes(s.mux)
 
 	if s.cfg.WebDir != "" {
 		if fi, err := os.Stat(s.cfg.WebDir); err == nil && fi.IsDir() {
@@ -176,9 +227,27 @@ func (nfs neuteredFileSystem) Open(path string) (http.File, error) {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+
+	dbStatus := "memory"
+	if pgStore, ok := s.identityStore.(*identity.PostgresStore); ok && pgStore != nil {
+		if err := pgStore.Ping(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":       "degraded",
+				"database":     "unhealthy",
+				"error":        err.Error(),
+				"version":      protocol.CurrentVersion,
+				"active_rooms": s.roomMgr.ActiveCount(),
+			})
+			return
+		}
+		dbStatus = "healthy"
+	}
+
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":       "ok",
+		"database":     dbStatus,
 		"version":      protocol.CurrentVersion,
 		"active_rooms": s.roomMgr.ActiveCount(),
 	})
@@ -370,6 +439,9 @@ func (s *Server) processMessage(client *room.Client, env *protocol.Envelope) {
 
 	case protocol.ActionLeaveRoom:
 		s.handleLeaveRoom(client)
+
+	case protocol.ActionBindClient:
+		s.handleBindClient(client, env)
 
 	default:
 		_ = client.Send(protocol.NewErrorEnvelope(
@@ -597,6 +669,8 @@ func (s *Server) handleLeaveRoom(client *room.Client) {
 }
 
 func (s *Server) cleanupClient(client *room.Client) {
+	s.unbindClientFromIdentity(client)
+
 	if client.RoomCode == "" {
 		return
 	}
@@ -612,6 +686,142 @@ func (s *Server) cleanupClient(client *room.Client) {
 		}
 		s.roomMgr.RemoveRoom(r.Code)
 	}
+}
+
+// BroadcastToUser implements identity.EventBroadcaster.
+func (s *Server) BroadcastToUser(userID string, event *identity.EventMessage) {
+	s.hubMu.RLock()
+	defer s.hubMu.RUnlock()
+
+	devMap, ok := s.userConns[userID]
+	if !ok {
+		return
+	}
+	for _, client := range devMap {
+		env, err := protocol.NewEnvelope(string(event.Type), "", client.ID, event.Payload)
+		if err == nil {
+			_ = client.Send(env)
+		}
+	}
+}
+
+// BroadcastToDevice implements identity.EventBroadcaster.
+func (s *Server) BroadcastToDevice(deviceID string, event *identity.EventMessage) {
+	s.hubMu.RLock()
+	defer s.hubMu.RUnlock()
+
+	client, ok := s.deviceConns[deviceID]
+	if !ok {
+		return
+	}
+	env, err := protocol.NewEnvelope(string(event.Type), "", client.ID, event.Payload)
+	if err == nil {
+		_ = client.Send(env)
+	}
+}
+
+func (s *Server) bindClientToIdentity(client *room.Client, userID, deviceID string) {
+	s.hubMu.Lock()
+	defer s.hubMu.Unlock()
+
+	if s.userConns[userID] == nil {
+		s.userConns[userID] = make(map[string]*room.Client)
+	}
+	s.userConns[userID][client.ID] = client
+	s.clientToUser[client.ID] = userID
+
+	if deviceID != "" {
+		s.deviceConns[deviceID] = client
+		s.clientToDev[client.ID] = deviceID
+		_ = s.identitySvc.UpdateDevicePresence(deviceID, identity.PresenceOnline)
+	}
+}
+
+func (s *Server) unbindClientFromIdentity(client *room.Client) {
+	s.hubMu.Lock()
+	defer s.hubMu.Unlock()
+
+	userID, hasUser := s.clientToUser[client.ID]
+	if hasUser {
+		if devMap, ok := s.userConns[userID]; ok {
+			delete(devMap, client.ID)
+			if len(devMap) == 0 {
+				delete(s.userConns, userID)
+			}
+		}
+		delete(s.clientToUser, client.ID)
+	}
+
+	deviceID, hasDev := s.clientToDev[client.ID]
+	if hasDev {
+		delete(s.deviceConns, deviceID)
+		delete(s.clientToDev, client.ID)
+		_ = s.identitySvc.UpdateDevicePresence(deviceID, identity.PresenceOffline)
+	}
+}
+
+// DisconnectDevice disconnects the active WebSocket connection of a revoked device.
+func (s *Server) DisconnectDevice(deviceID string) {
+	s.hubMu.Lock()
+	client, exists := s.deviceConns[deviceID]
+	s.hubMu.Unlock()
+
+	if exists && client != nil {
+		_ = client.Send(protocol.NewErrorEnvelope(
+			protocol.ErrCodeUnauthorized,
+			"device has been revoked",
+			"",
+			client.ID,
+		))
+		_ = client.Close()
+		s.unbindClientFromIdentity(client)
+	}
+}
+
+func (s *Server) handleBindClient(client *room.Client, env *protocol.Envelope) {
+	var payload struct {
+		Token    string `json:"token"`
+		UserID   string `json:"user_id"`
+		DeviceID string `json:"device_id"`
+	}
+	if len(env.Payload) > 0 {
+		_ = json.Unmarshal(env.Payload, &payload)
+	}
+
+	if payload.Token == "" {
+		_ = client.Send(protocol.NewErrorEnvelope(
+			protocol.ErrCodeUnauthorized,
+			"session token is required to bind client to identity",
+			"",
+			client.ID,
+		))
+		return
+	}
+
+	sess, err := s.identitySvc.ValidateSession(payload.Token)
+	if err != nil {
+		_ = client.Send(protocol.NewErrorEnvelope(
+			protocol.ErrCodeUnauthorized,
+			"invalid session token: "+err.Error(),
+			"",
+			client.ID,
+		))
+		return
+	}
+
+	userID := sess.UserID
+	deviceID := sess.DeviceID
+	if deviceID == "" {
+		deviceID = payload.DeviceID
+	}
+
+	s.bindClientToIdentity(client, userID, deviceID)
+	resp, _ := protocol.NewEnvelope(protocol.ActionClientBound, "", client.ID, map[string]interface{}{
+		"user_id":   userID,
+		"device_id": deviceID,
+		"bound":     true,
+	})
+	_ = client.Send(resp)
 }
 
 func (s *Server) extractClientIP(r *http.Request) string {

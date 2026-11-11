@@ -26,6 +26,7 @@ func main() {
 	webDirFlag := flag.String("web-dir", getEnv("WEB_DIR", ""), "Path to static web assets")
 	trustProxyFlag := flag.Bool("trust-proxy", getEnv("TRUST_PROXY", "false") == "true", "Trust upstream reverse proxy headers (X-Forwarded-For)")
 	trustedProxiesRaw := flag.String("trusted-proxies", getEnv("TRUSTED_PROXIES", ""), "Comma-separated list of trusted proxy CIDRs (e.g. 127.0.0.1/8,172.16.0.0/12)")
+	dbURLFlag := flag.String("db-url", getEnv("DATABASE_URL", ""), "PostgreSQL connection URL (e.g. postgres://user:pass@localhost:5432/landrop?sslmode=disable)")
 	flag.Parse()
 
 	envMode := strings.ToLower(getEnv("ENV", getEnv("ENVIRONMENT", "development")))
@@ -66,6 +67,7 @@ func main() {
 		WebDir:       webDir,
 		TrustProxy:   *trustProxyFlag,
 		TrustedCIDRs: trustedProxiesList,
+		DatabaseURL:  *dbURLFlag,
 	}
 
 	srvInstance := server.NewServer(cfg)
