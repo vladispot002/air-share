@@ -2,7 +2,7 @@
 
 **Date**: 2026-11-11  
 **Lead Coordinator**: Chief Release Engineer  
-**Source Branch**: `feature/release-packaging-fixes` (`31ad7656c3ae3b4de029f2d44dc4144caa242bd2`)  
+**Source Branch**: `feature/release-packaging-fixes`  
 **Target Branch**: `main` (`f666fed76022f52517feb3165adb7d0c6f21d5d5`)  
 **Status**: **`READY FOR OWNER AUTHORIZATION`** (No Execution Performed)
 
@@ -20,7 +20,7 @@ $ git branch --show-current
 feature/release-packaging-fixes
 
 $ git rev-parse HEAD
-31ad7656c3ae3b4de029f2d44dc4144caa242bd2
+# (HEAD of feature/release-packaging-fixes)
 
 $ git rev-parse main
 f666fed76022f52517feb3165adb7d0c6f21d5d5
@@ -128,14 +128,14 @@ test "$(git rev-parse HEAD)" = "f666fed76022f52517feb3165adb7d0c6f21d5d5"
 # Step 3: Execute fast-forward merge
 git merge --ff-only feature/release-packaging-fixes
 
-# Step 4: Verify resulting HEAD commit
-test "$(git rev-parse HEAD)" = "31ad7656c3ae3b4de029f2d44dc4144caa242bd2"
+# Step 4: Verify resulting HEAD commit matches feature branch
+test "$(git rev-parse HEAD)" = "$(git rev-parse feature/release-packaging-fixes)"
 
 # Step 5: (If Alternative B approved) Retarget local annotated tag v1.0.2
 git tag -a -f v1.0.2 -m "LAN-Drop v1.0.2: Production Hardened and Packaging Remediation Release"
 
 # Step 6: Verify tag points to final commit
-test "$(git rev-parse v1.0.2^{commit})" = "31ad7656c3ae3b4de029f2d44dc4144caa242bd2"
+test "$(git rev-parse v1.0.2^{commit})" = "$(git rev-parse HEAD)"
 ```
 
 ---
