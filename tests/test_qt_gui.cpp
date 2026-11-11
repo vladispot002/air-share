@@ -14,6 +14,7 @@
 #include "landrop/ui/qt/QtTransferWidget.hpp"
 #include "landrop/ui/qt/QtStorageWidget.hpp"
 #include "landrop/ui/qt/QtSettingsWidget.hpp"
+#include "landrop/ui/qt/QtAccountWidget.hpp"
 #include "landrop/utils/SocketCompat.hpp"
 
 using namespace landrop;
@@ -24,6 +25,7 @@ class TestQtGui : public QObject {
 private slots:
     void testAppInitialization();
     void testNavigationBetweenSections();
+    void testAccountWidgetState();
     void testDirectConnectInputValidation();
     void testButtonsAndDeviceDiscovery();
     void testThemeSwitching();
@@ -44,20 +46,22 @@ void TestQtGui::testAppInitialization() {
     app.initialize();
 
     QVERIFY(app.getSidebar() != nullptr);
-    QCOMPARE(app.getSidebar()->count(), 4);
+    QCOMPARE(app.getSidebar()->count(), 5);
     QCOMPARE(app.getSidebar()->item(0)->text(), "📡  Radar");
     QCOMPARE(app.getSidebar()->item(1)->text(), "⇄  Transfers");
     QCOMPARE(app.getSidebar()->item(2)->text(), "📁  Storage");
     QCOMPARE(app.getSidebar()->item(3)->text(), "⚙️  Settings");
+    QCOMPARE(app.getSidebar()->item(4)->text(), "👤  Account");
 
     QVERIFY(app.getStackedWidget() != nullptr);
-    QCOMPARE(app.getStackedWidget()->count(), 4);
+    QCOMPARE(app.getStackedWidget()->count(), 5);
     QCOMPARE(app.getStackedWidget()->currentIndex(), 0);
 
     QVERIFY(app.getDiscoveryWidget() != nullptr);
     QVERIFY(app.getTransferWidget() != nullptr);
     QVERIFY(app.getStorageWidget() != nullptr);
     QVERIFY(app.getSettingsWidget() != nullptr);
+    QVERIFY(app.getAccountWidget() != nullptr);
 }
 
 void TestQtGui::testNavigationBetweenSections() {
@@ -79,9 +83,67 @@ void TestQtGui::testNavigationBetweenSections() {
     sidebar->setCurrentRow(3);
     QCOMPARE(stacked->currentIndex(), 3);
 
+    // Navigate to Account (index 4)
+    sidebar->setCurrentRow(4);
+    QCOMPARE(stacked->currentIndex(), 4);
+
     // Navigate back to Radar (index 0)
     sidebar->setCurrentRow(0);
     QCOMPARE(stacked->currentIndex(), 0);
+}
+
+void TestQtGui::testAccountWidgetState() {
+    QtDesktopApp app;
+    app.initialize();
+
+    auto* accountWidget = app.getAccountWidget();
+    QVERIFY(accountWidget != nullptr);
+
+    auto* presenter = app.getAccountPresenter();
+    QVERIFY(presenter != nullptr);
+
+    // Initial state: Guest mode
+    QVERIFY(presenter->isGuest());
+    QVERIFY(accountWidget->getStatusLabel()->text().contains("Guest"));
+    QCOMPARE(accountWidget->getAuthActionBtn()->text(), QString("Sign In / Register"));
+
+    // Simulate authenticated state
+    landrop::UserProfile profile;
+    profile.userId = "user-test-123";
+    profile.landropId = "alice_test";
+    profile.displayName = "Alice Wonder";
+    profile.email = "alice@example.com";
+    profile.status = "active";
+    presenter->getClient()->setCurrentUser(profile);
+    presenter->getClient()->setAuthToken("tok-xyz");
+    accountWidget->updateView();
+
+    QVERIFY(!presenter->isGuest());
+    QVERIFY(accountWidget->getStatusLabel()->text().contains("alice_test"));
+    QCOMPARE(accountWidget->getAuthActionBtn()->text(), QString("Sign Out"));
+
+    // Add contacts and check display
+    std::vector<landrop::ContactInfo> contacts;
+    landrop::ContactInfo c1;
+    c1.userId = "user-bob";
+    c1.landropId = "bob_builder";
+    c1.displayName = "Bob Builder";
+    c1.state = "ACCEPTED";
+    contacts.push_back(c1);
+
+    presenter->setContacts(contacts);
+    accountWidget->updateView();
+
+    QCOMPARE(accountWidget->getContactsList()->count(), 1);
+    QVERIFY(accountWidget->getContactsList()->item(0)->text().contains("Bob Builder"));
+    QVERIFY(accountWidget->getContactsList()->item(0)->text().contains("bob_builder"));
+
+    // Reset to guest
+    presenter->logout();
+    accountWidget->updateView();
+    QVERIFY(presenter->isGuest());
+    QVERIFY(accountWidget->getStatusLabel()->text().contains("Guest"));
+    QCOMPARE(accountWidget->getAuthActionBtn()->text(), QString("Sign In / Register"));
 }
 
 void TestQtGui::testDirectConnectInputValidation() {
@@ -226,9 +288,8 @@ void TestQtGui::testTransferButtonStatesAndActiveCount() {
     emit table->cellClicked(0, 0);
     QCoreApplication::processEvents();
 
-    // Direct TCP streaming does not fake pause/resume; buttons remain disabled with explanatory tooltips
-    QVERIFY(!pauseBtn->isEnabled());
-    QVERIFY(pauseBtn->toolTip().contains("does not support pause"));
+    // Active transfer: pause and cancel are enabled, resume is disabled until paused
+    QVERIFY(pauseBtn->isEnabled());
     QVERIFY(!resumeBtn->isEnabled());
     QVERIFY(cancelBtn->isEnabled());
 

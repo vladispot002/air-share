@@ -16,12 +16,14 @@ set(CMAKE_AUTOUIC ON)
 set(LANDROP_CORE_SOURCES
     src/core/FileChunkHasher.cpp
     src/core/TransferEngine.cpp
+    src/core/TransferStateStore.cpp
     src/core/MulticastBeacon.cpp
     src/core/NetworkSession.cpp
     src/core/SharedFolderManager.cpp
     src/core/TlsContext.cpp
     src/core/HttpClient.cpp
     src/core/WireProtocolV2.cpp
+    src/core/LocalWebBridge.cpp
     src/core/TcpSocketChannel.cpp
     src/core/WebRtcDataChannel.cpp
     src/core/SignalingClient.cpp
@@ -41,7 +43,9 @@ set(LANDROP_CORE_SOURCES
     src/ui/TransferPresenter.cpp
     src/ui/StoragePresenter.cpp
     src/ui/SettingsPresenter.cpp
+    src/ui/AccountPresenter.cpp
     src/ui/QrCodeGenerator.cpp
+    src/identity/IdentityClient.cpp
 )
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent Test)
@@ -87,6 +91,7 @@ set(LANDROP_QT_HEADERS
     include/landrop/ui/qt/QtTransferWidget.hpp
     include/landrop/ui/qt/QtStorageWidget.hpp
     include/landrop/ui/qt/QtSettingsWidget.hpp
+    include/landrop/ui/qt/QtAccountWidget.hpp
 )
 
 set(LANDROP_QT_SOURCES
@@ -95,6 +100,7 @@ set(LANDROP_QT_SOURCES
     src/ui/qt/QtTransferWidget.cpp
     src/ui/qt/QtStorageWidget.cpp
     src/ui/qt/QtSettingsWidget.cpp
+    src/ui/qt/QtAccountWidget.cpp
 )
 
 set(LANDROP_RESOURCES

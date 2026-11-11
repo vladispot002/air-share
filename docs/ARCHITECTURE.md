@@ -139,3 +139,12 @@ For complete end-to-end testing of LAN-Drop across physical devices:
 2. **IGMP / Multicast**: Network switches/routers must forward UDP multicast packets on port 8848 (`239.255.88.48`). Wireless isolation must be disabled.
 3. **Firewall Rules**: Open inbound TCP port 8848 (and UDP 8848) on both test machines.
 4. **Certificates**: Custom CA root certificates installed in system trust store for TLS validation, or use fingerprint pinning.
+
+## 8. AI-Assisted Engineering & Development Methodology
+
+The system architecture outlined above is strictly deterministic and contains **zero runtime artificial intelligence models, neural runtimes, or external AI API dependencies**. All runtime data transfers, protocol framing, cryptographic guarantees, and network routing are handled natively by C++20, Qt 6, GTK3, OpenSSL 3, libdatachannel, and Go.
+
+During the software development lifecycle, auxiliary Artificial Intelligence tools (Google Antigravity, LLM-based agents, and the multi-agent framework described in `.agents/`) were utilized for architectural decomposition, code generation, refactoring, comprehensive test synthesis (31 test suites), and CI/CD triage under strict human oversight and automated compiler/test verification gates.
+
+For the complete technical disclosure on the AI toolchain, agent roles, governance principles, and verifiable evidence, refer to:
+📄 **[Disclosure: Artificial Intelligence in the Software Development Process](AI_DEVELOPMENT_DISCLOSURE.md)**
