@@ -4078,7 +4078,7 @@ bool testSuite31_ReleaseGate_RealWebRtcAndWireProtocolV2() {
         // Abruptly close channel midway through transmission
         std::thread txThread([&]() {
             engine.sendFileOverChannel("task-abrupt-tx", testFile, chanA, txOpts, [&](const TransferProgressUpdate& upd) {
-                if (upd.bytesTransferred >= 131072) {
+                if (upd.bytesTransferred > 0 && upd.bytesTransferred < 4 * 1024 * 1024) {
                     chanA->close();
                     if (pcA) pcA->close();
                     if (pcB) pcB->close();
