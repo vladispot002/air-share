@@ -4059,7 +4059,7 @@ bool testSuite31_ReleaseGate_RealWebRtcAndWireProtocolV2() {
         chanB->setRealDataChannel(dcB, pcB);
 
         std::string testFile = (rootDir / "sender" / "abrupt_test.dat").string();
-        createTestFile(testFile, 2 * 1024 * 1024, 0x44);
+        createTestFile(testFile, 4 * 1024 * 1024, 0x44);
 
         TransferEngine engine;
         TransferOptions txOpts;
@@ -4080,6 +4080,8 @@ bool testSuite31_ReleaseGate_RealWebRtcAndWireProtocolV2() {
             engine.sendFileOverChannel("task-abrupt-tx", testFile, chanA, txOpts, [&](const TransferProgressUpdate& upd) {
                 if (upd.bytesTransferred >= 131072) {
                     chanA->close();
+                    if (pcA) pcA->close();
+                    if (pcB) pcB->close();
                 }
             }, nullptr, nullptr);
         });
