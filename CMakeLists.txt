@@ -264,7 +264,7 @@ set(CPACK_DEBIAN_PACKAGE_NAME "landrop")
 set(CPACK_DEBIAN_PACKAGE_SECTION "net")
 set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
 set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/landrop/lan-drop")
-set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6 (>= 2.34), libstdc++6 (>= 11), libssl3 (>= 3.0.0), libqt6widgets6, hicolor-icon-theme")
 set(CPACK_DEBIAN_PACKAGE_SUGGESTS "coturn")
 

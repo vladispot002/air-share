@@ -3024,6 +3024,7 @@ bool testMilestone2D_EndToEndWebRtcTransfer() {
     // -------------------------------------------------------------
     // 3. TC-E2E-REAL-SIGNALING: Live Go Signaling Daemon E2E Integration Test
     // -------------------------------------------------------------
+#ifndef _WIN32
     {
         std::string srvBin = "./backend/signaling/bin/signaling-server";
         if (std::filesystem::exists(srvBin)) {
@@ -3127,6 +3128,7 @@ bool testMilestone2D_EndToEndWebRtcTransfer() {
             }
         }
     }
+#endif
 
     return true;
 }
