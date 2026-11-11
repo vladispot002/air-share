@@ -352,6 +352,63 @@
       .modal-btn-row button {
         flex: 1;
       }
+      .identity-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: var(--code-bg);
+        border: 1px solid var(--card-border);
+        border-radius: 10px;
+        padding: 0.5rem 0.8rem;
+        font-size: 0.85rem;
+      }
+      .identity-left {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .identity-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+      }
+      .identity-btn {
+        padding: 0.35rem 0.65rem;
+        font-size: 0.8rem;
+        border-radius: 6px;
+      }
+      .contact-list, .device-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        width: 100%;
+        max-height: 240px;
+        overflow-y: auto;
+      }
+      .item-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: var(--code-bg);
+        border: 1px solid var(--card-border);
+        padding: 0.5rem 0.75rem;
+        border-radius: 8px;
+        font-size: 0.85rem;
+      }
+      .item-info {
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+        text-align: left;
+      }
+      .item-name {
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+      .item-sub {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+      }
     </style>
   </head>
   <body>
@@ -361,6 +418,21 @@
         <div class="status-pill">
           <span id="statusDot" class="status-dot"></span>
           <span id="statusText">Ready</span>
+        </div>
+      </div>
+
+      <!-- Identity Bar: Guest-First Zero Friction & Optional Account Actions -->
+      <div id="identityBar" class="identity-bar">
+        <div class="identity-left">
+          <span id="identityIcon">👤</span>
+          <span id="identityName" style="font-weight: 600;">Guest Mode</span>
+          <span id="guestBadge" class="badge" style="background: #238636; color: #fff;">Instant Entry</span>
+        </div>
+        <div class="identity-actions">
+          <button id="openAuthBtn" class="btn-secondary identity-btn">Sign In / Register</button>
+          <button id="openContactsBtn" class="btn-secondary identity-btn" style="display: none;">👥 Contacts</button>
+          <button id="openDevicesBtn" class="btn-secondary identity-btn" style="display: none;">💻 Devices</button>
+          <button id="signOutBtn" class="btn-secondary identity-btn" style="display: none;">Sign Out</button>
         </div>
       </div>
 
@@ -426,6 +498,77 @@
           <button id="copyLinkBtn" class="btn-secondary">🔗 Copy Pairing Link</button>
         </div>
         <button id="closeModalBtn" class="btn-secondary" style="width: 100%;">Close</button>
+      </div>
+    </div>
+
+    <!-- Auth Modal -->
+    <div id="authModal" class="modal-backdrop">
+      <div class="modal">
+        <h3 class="modal-title">Sign In or Create Account</h3>
+        <p class="modal-desc">
+          Accounts are 100% optional. Signing in unlocks persistent identity, cross-device contacts, and multi-device transfer routing.
+        </p>
+
+        <div style="display: flex; flex-direction: column; gap: 0.75rem; width: 100%;">
+          <div style="display: flex; gap: 0.5rem;">
+            <button id="oauthGoogleBtn" class="btn-secondary" style="flex: 1;">Google</button>
+            <button id="oauthGithubBtn" class="btn-secondary" style="flex: 1;">GitHub</button>
+          </div>
+          <div style="display: flex; gap: 0.5rem;">
+            <button id="oauthAppleBtn" class="btn-secondary" style="flex: 1;">Apple</button>
+            <button id="oauthMicrosoftBtn" class="btn-secondary" style="flex: 1;">Microsoft</button>
+          </div>
+          <div style="border-top: 1px solid var(--card-border); margin: 0.5rem 0;"></div>
+          <input type="text" id="authEmailInput" placeholder="Email or @landrop_id" style="width: 100%; text-transform: none;" />
+          <input type="text" id="authNameInput" placeholder="Display Name (optional)" style="width: 100%; text-transform: none;" />
+          <button id="authSubmitBtn" class="btn-primary" style="width: 100%;">Continue</button>
+        </div>
+
+        <button id="closeAuthModalBtn" class="btn-secondary" style="width: 100%;">Continue as Guest</button>
+      </div>
+    </div>
+
+    <!-- Contacts Modal -->
+    <div id="contactsModal" class="modal-backdrop">
+      <div class="modal">
+        <h3 class="modal-title">👥 Contacts & Recent Users</h3>
+        <div style="display: flex; gap: 0.5rem; width: 100%;">
+          <input type="text" id="contactSearchInput" placeholder="@username" style="flex: 1; text-transform: lowercase;" />
+          <button id="addContactBtn" class="btn-primary">Add Contact</button>
+        </div>
+        <div id="contactsList" class="contact-list">
+          <div class="desc" style="text-align: center; padding: 1rem;">No contacts yet. Add someone by their @landrop_id!</div>
+        </div>
+        <button id="closeContactsModalBtn" class="btn-secondary" style="width: 100%;">Close</button>
+      </div>
+    </div>
+
+    <!-- Devices Modal -->
+    <div id="devicesModal" class="modal-backdrop">
+      <div class="modal">
+        <h3 class="modal-title">💻 My Devices & Pairing</h3>
+        <p class="modal-desc">Manage devices associated with your account and pair new devices via QR code.</p>
+        <div id="devicesList" class="device-list">
+          <div class="desc" style="text-align: center; padding: 1rem;">Loading devices...</div>
+        </div>
+        <button id="pairNewDeviceBtn" class="btn-primary" style="width: 100%;">📷 Pair New Device (Show QR)</button>
+        <button id="closeDevicesModalBtn" class="btn-secondary" style="width: 100%;">Close</button>
+      </div>
+    </div>
+
+    <!-- Incoming Transfer Approval Modal -->
+    <div id="incomingTransferModal" class="modal-backdrop">
+      <div class="modal">
+        <h3 class="modal-title">📥 Incoming Transfer Request</h3>
+        <p id="incomingTransferSender" class="modal-desc">User wants to send files to this device.</p>
+        <div id="incomingTransferDetails" style="background: var(--code-bg); border: 1px solid var(--card-border); border-radius: 8px; padding: 0.75rem; width: 100%; text-align: left; font-size: 0.85rem;">
+          <div id="incomingTransferFiles" style="font-weight: 600;">Files: ...</div>
+          <div id="incomingTransferSize" style="color: var(--text-secondary); margin-top: 0.25rem;">Size: ...</div>
+        </div>
+        <div class="modal-btn-row">
+          <button id="acceptTransferBtn" class="btn-primary">Accept Transfer</button>
+          <button id="declineTransferBtn" class="btn-secondary">Decline</button>
+        </div>
       </div>
     </div>
 

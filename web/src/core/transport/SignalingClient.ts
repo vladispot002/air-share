@@ -73,6 +73,7 @@ export class SignalingClient {
   private ws: WebSocket | null = null;
   private clientId: string = `c-web-${Math.random().toString(36).substring(2, 10)}`;
   private listeners: { [K in keyof SignalingEventMap]?: Array<(data: SignalingEventMap[K]) => void> } = {};
+  private rawListeners: Array<(env: SignalingEnvelope) => void> = [];
   private currentRoomCode: string = '';
   private currentRoomToken: string = '';
   private pingInterval: any = null;
@@ -169,6 +170,13 @@ export class SignalingClient {
   private handleIncomingEnvelope(env: SignalingEnvelope): void {
     if (env.client_id) {
       this.clientId = env.client_id;
+    }
+    for (const listener of this.rawListeners) {
+      try {
+        listener(env);
+      } catch (e) {
+        console.error('Error in raw envelope listener:', e);
+      }
     }
     switch (env.action) {
       case SignalingAction.RoomCreated: {
@@ -290,6 +298,17 @@ export class SignalingClient {
       this.currentRoomCode = '';
       this.currentRoomToken = '';
     }
+  }
+
+  getWebSocket(): WebSocket | null {
+    return this.ws;
+  }
+
+  onRawEnvelope(listener: (env: SignalingEnvelope) => void): () => void {
+    this.rawListeners.push(listener);
+    return () => {
+      this.rawListeners = this.rawListeners.filter((l) => l !== listener);
+    };
   }
 
   close(): void {

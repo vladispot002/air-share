@@ -11,9 +11,11 @@
 #include <QUrl>
 #include <QMetaObject>
 #include <QDir>
+#include <QFileInfo>
 #include <QStandardPaths>
 #include <QFrame>
 #include <algorithm>
+#include "landrop/core/TransferEngine.hpp"
 #include "landrop/ui/qt/QtSettingsWidget.hpp"
 
 namespace landrop::ui {
@@ -95,6 +97,10 @@ void QtTransferWidget::setupUi() {
     m_sendFileBtn->setObjectName("primaryBtn");
     connect(m_sendFileBtn, &QPushButton::clicked, this, &QtTransferWidget::onSendFileClicked);
 
+    m_sendFolderBtn = new QPushButton("📁 Send Folder...", this);
+    m_sendFolderBtn->setObjectName("secondaryBtn");
+    connect(m_sendFolderBtn, &QPushButton::clicked, this, &QtTransferWidget::onSendFolderClicked);
+
     m_pauseBtn = new QPushButton("⏸ Pause", this);
     m_pauseBtn->setEnabled(false);
     m_pauseBtn->setToolTip("Direct TCP streaming does not support pause. Use Cancel instead.");
@@ -114,6 +120,7 @@ void QtTransferWidget::setupUi() {
     connect(m_clearBtn, &QPushButton::clicked, this, &QtTransferWidget::onClearClicked);
 
     actionsLayout->addWidget(m_sendFileBtn);
+    actionsLayout->addWidget(m_sendFolderBtn);
     actionsLayout->addWidget(m_pauseBtn);
     actionsLayout->addWidget(m_resumeBtn);
     actionsLayout->addWidget(m_cancelBtn);
@@ -165,14 +172,15 @@ void QtTransferWidget::updateActionButtons() {
 
     const std::string& st = it->stateStr;
     bool isActive = (st == "Transferring" || st == "Connecting" || st == "Running" || st == "Active");
+    bool isPaused = (st == "Paused");
 
-    // Direct TCP streaming lacks byte-offset resume support; keep pause/resume disabled
-    m_pauseBtn->setEnabled(false);
-    m_pauseBtn->setToolTip("Direct TCP streaming does not support pause. Use Cancel instead.");
-    m_resumeBtn->setEnabled(false);
-    m_resumeBtn->setToolTip("Direct TCP streaming does not support resume. Restart the transfer instead.");
+    m_pauseBtn->setEnabled(isActive);
+    m_pauseBtn->setToolTip(isActive ? "Pause active file transfer" : "Pause is available during active transfer");
 
-    m_cancelBtn->setEnabled(isActive);
+    m_resumeBtn->setEnabled(isPaused);
+    m_resumeBtn->setToolTip(isPaused ? "Resume transfer from last verified byte offset" : "Resume is available for paused transfers");
+
+    m_cancelBtn->setEnabled(isActive || isPaused);
 }
 
 void QtTransferWidget::updateTransferTable(const std::vector<TransferViewModel>& transfers) {
@@ -283,10 +291,7 @@ void QtTransferWidget::onClearClicked() {
     }
 }
 
-void QtTransferWidget::onSendFileClicked() {
-    QString filePath = QFileDialog::getOpenFileName(this, "Select File to Send via LAN-Drop");
-    if (filePath.isEmpty()) return;
-
+std::string QtTransferWidget::promptTargetPeer() {
     std::string targetPeer = "local-loopback";
     std::vector<std::pair<std::string, std::string>> peers;
     if (m_peerProvider) {
@@ -301,14 +306,14 @@ void QtTransferWidget::onSendFileClicked() {
     items << "🌐 Enter Custom IP / Port...";
 
     bool ok = false;
-    QString chosen = QInputDialog::getItem(this, "Select Target Peer", "Choose device to send file to:", items, 0, false, &ok);
-    if (!ok) return;
+    QString chosen = QInputDialog::getItem(this, "Select Target Peer", "Choose device to send to:", items, 0, false, &ok);
+    if (!ok) return "";
 
     if (chosen == "🌐 Enter Custom IP / Port...") {
         QString ip = QInputDialog::getText(this, "Target Device IP", "Enter destination IP address:", QLineEdit::Normal, "192.168.1.100", &ok);
-        if (!ok || ip.trimmed().isEmpty()) return;
+        if (!ok || ip.trimmed().isEmpty()) return "";
         int port = QInputDialog::getInt(this, "Target Device Port", "Enter destination port:", 8848, 1024, 65535, 1, &ok);
-        if (!ok) return;
+        if (!ok) return "";
         targetPeer = "direct:" + ip.trimmed().toStdString() + ":" + std::to_string(port);
     } else if (chosen == "💻 Local Loopback (127.0.0.1:8848)") {
         targetPeer = "local-loopback";
@@ -320,9 +325,62 @@ void QtTransferWidget::onSendFileClicked() {
             }
         }
     }
+    return targetPeer;
+}
+
+void QtTransferWidget::onSendFileClicked() {
+    QStringList files = QFileDialog::getOpenFileNames(this, "Select File(s) to Send via LAN-Drop");
+    if (files.isEmpty()) return;
+
+    std::string targetPeer = promptTargetPeer();
+    if (targetPeer.empty()) return;
+
+    if (!m_presenter) return;
+
+    if (files.size() == 1) {
+        m_presenter->onSendFileClicked(targetPeer, files.first().toStdString());
+    } else {
+        std::vector<BatchFileItem> items;
+        items.reserve(files.size());
+        for (const auto& f : files) {
+            BatchFileItem item;
+            item.localFilePath = f.toStdString();
+            item.relativePath = QFileInfo(f).fileName().toStdString();
+            item.fileSize = static_cast<uint64_t>(QFileInfo(f).size());
+            items.push_back(item);
+        }
+        std::string batchName = "Batch (" + std::to_string(files.size()) + " files)";
+        m_presenter->onSendBatchClicked(targetPeer, items, batchName);
+    }
+}
+
+void QtTransferWidget::onSendFolderClicked() {
+    QString folderPath = QFileDialog::getExistingDirectory(
+        this,
+        "Select Folder to Send via LAN-Drop",
+        QString(),
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks
+    );
+    if (folderPath.isEmpty()) return;
+
+    std::string scanErr;
+    auto items = TransferEngine::scanDirectory(folderPath.toStdString(), &scanErr);
+    if (items.empty()) {
+        QMessageBox::warning(
+            this,
+            "Send Folder",
+            QString::fromStdString(scanErr.empty() ? "The selected folder is empty or contains no readable files." : scanErr)
+        );
+        return;
+    }
+
+    std::string targetPeer = promptTargetPeer();
+    if (targetPeer.empty()) return;
 
     if (m_presenter) {
-        m_presenter->onSendFileClicked(targetPeer, filePath.toStdString());
+        QString folderName = QDir(folderPath).dirName();
+        if (folderName.isEmpty()) folderName = "Folder";
+        m_presenter->onSendBatchClicked(targetPeer, items, folderName.toStdString());
     }
 }
 

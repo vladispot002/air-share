@@ -3,6 +3,7 @@
 #include "landrop/ui/qt/QtTransferWidget.hpp"
 #include "landrop/ui/qt/QtStorageWidget.hpp"
 #include "landrop/ui/qt/QtSettingsWidget.hpp"
+#include "landrop/ui/qt/QtAccountWidget.hpp"
 #include "landrop/ui/QrCodeGenerator.hpp"
 #include "landrop/tasks/P2PTransferTask.hpp"
 
@@ -32,6 +33,9 @@ QtDesktopApp::QtDesktopApp(QWidget* parent)
 
 QtDesktopApp::~QtDesktopApp() {
     *m_aliveToken = false;
+    if (m_localWebBridge) {
+        m_localWebBridge->stop();
+    }
     if (m_transferEngine) {
         m_transferEngine->stopServer();
     }
@@ -93,6 +97,7 @@ void QtDesktopApp::setupUi() {
     auto* itemTransfers = new QListWidgetItem("⇄  Transfers", m_sidebar);
     auto* itemStorage = new QListWidgetItem("📁  Storage", m_sidebar);
     auto* itemSettings = new QListWidgetItem("⚙️  Settings", m_sidebar);
+    auto* itemAccount = new QListWidgetItem("👤  Account", m_sidebar);
 
     QFont font = m_sidebar->font();
     font.setPointSize(13);
@@ -102,22 +107,25 @@ void QtDesktopApp::setupUi() {
     m_sidebar->addItem(itemTransfers);
     m_sidebar->addItem(itemStorage);
     m_sidebar->addItem(itemSettings);
+    m_sidebar->addItem(itemAccount);
 
     connect(m_sidebar, &QListWidget::currentRowChanged, this, &QtDesktopApp::onNavigationItemChanged);
     mainLayout->addWidget(m_sidebar);
 
-    // Stacked widget for the 4 sections
+    // Stacked widget for the 5 sections
     m_stackedWidget = new QStackedWidget(central);
 
     m_discoveryWidget = new QtDiscoveryWidget(m_stackedWidget);
     m_transferWidget = new QtTransferWidget(m_stackedWidget);
     m_storageWidget = new QtStorageWidget(m_stackedWidget);
     m_settingsWidget = new QtSettingsWidget(m_stackedWidget);
+    m_accountWidget = new QtAccountWidget(m_stackedWidget);
 
     m_stackedWidget->addWidget(m_discoveryWidget);
     m_stackedWidget->addWidget(m_transferWidget);
     m_stackedWidget->addWidget(m_storageWidget);
     m_stackedWidget->addWidget(m_settingsWidget);
+    m_stackedWidget->addWidget(m_accountWidget);
 
     mainLayout->addWidget(m_stackedWidget, 1);
     setCentralWidget(central);
@@ -135,12 +143,25 @@ void QtDesktopApp::setupUi() {
 
     connect(m_settingsWidget, &QtSettingsWidget::themeChanged, this, &QtDesktopApp::applyTheme);
 
+    connect(m_accountWidget, &QtAccountWidget::sendFileToContact, this, [this](const QString& /*targetUserId*/, const QString& landropId) {
+        m_sidebar->setCurrentRow(1); // Switch to Transfers
+        if (m_transferPresenter) {
+            m_transferPresenter->onSendFileClicked(landropId.toStdString(), "");
+        }
+    });
+
     // Status bar
     statusBar()->showMessage("LAN-Drop Qt 6 Engine Ready • Beacon Active");
     m_sidebar->setCurrentRow(0);
 }
 
 void QtDesktopApp::setupPresenters() {
+    m_identityClient = std::make_shared<IdentityClient>();
+    m_accountPresenter = std::make_unique<AccountPresenter>(m_identityClient);
+    if (m_accountWidget) {
+        m_accountWidget->setPresenter(m_accountPresenter.get());
+    }
+
     m_discoveryPresenter = std::make_unique<DiscoveryPresenter>(m_discoveryWidget);
     m_discoveryWidget->setPresenter(m_discoveryPresenter.get());
 
@@ -166,6 +187,8 @@ void QtDesktopApp::setupPresenters() {
     QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
     QDir().mkpath(configDir);
     m_settingsPresenter->setConfigPath((configDir + "/settings.json").toStdString());
+
+    m_transferPresenter->setStateStore(std::make_shared<TransferStateStore>((configDir + "/transfer_journal.json").toStdString()));
 
     m_discoveryPresenter->initialize();
     m_transferPresenter->initialize(false);
@@ -206,6 +229,10 @@ void QtDesktopApp::setupPresenters() {
     // Connect transfer presenter to real TransferEngine
     m_transferPresenter->setSendFileCallback([this](const std::string& taskId, const std::string& targetPeerId, const std::string& filePath) {
         handleSendFile(taskId, targetPeerId, filePath);
+    });
+
+    m_transferPresenter->setSendBatchCallback([this](const std::string& taskId, const std::string& targetPeerId, const std::vector<BatchFileItem>& items, const std::string& batchName) {
+        handleSendBatch(taskId, targetPeerId, items, batchName);
     });
 
     m_transferPresenter->setCancelCallback([this](const std::string& taskId) {
@@ -280,9 +307,21 @@ void QtDesktopApp::setupPresenters() {
     });
     m_transferTickTimer->start(300);
 
+    // Start Local Web Bridge for browser-desktop interop (Workstream E2)
+    m_localWebBridge = std::make_unique<LocalWebBridge>(8849);
+    m_localWebBridge->start([this]() {
+        std::vector<BridgePeerInfo> list;
+        if (m_discoveryPresenter) {
+            for (const auto& p : m_discoveryPresenter->getPeers()) {
+                list.push_back({p->getId(), p->getDisplayName(), p->getIpAddress(), p->getPort(), p->getPeerType()});
+            }
+        }
+        return list;
+    });
+
     std::string ip = m_discoveryPresenter->getLocalDeviceIp();
     uint16_t port = m_discoveryPresenter->getLocalDevicePort();
-    statusBar()->showMessage(QString("My Device: %1:%2 • Discoverable on Local Network").arg(QString::fromStdString(ip)).arg(port));
+    statusBar()->showMessage(QString("My Device: %1:%2 • Discoverable on Local Network • Bridge Active").arg(QString::fromStdString(ip)).arg(port));
 }
 
 void QtDesktopApp::onNavigationItemChanged(int row) {
@@ -525,6 +564,138 @@ void QtDesktopApp::handleSendFile(const std::string& taskId, const std::string& 
                 statusBar()->showMessage(QString("✓ File successfully sent to %1:%2").arg(QString::fromStdString(remoteIp)).arg(remotePort));
             } else {
                 statusBar()->showMessage(QString("✗ Send error: %1").arg(QString::fromStdString(err)));
+                if (m_transferWidget) {
+                    m_transferWidget->showTransferError(taskId, err);
+                }
+            }
+        }, Qt::QueuedConnection);
+    });
+}
+
+void QtDesktopApp::handleSendBatch(
+    const std::string& taskId,
+    const std::string& targetPeerId,
+    const std::vector<BatchFileItem>& items,
+    const std::string& batchName
+) {
+    std::string remoteIp = "127.0.0.1";
+    uint16_t remotePort = 8848;
+
+    if (targetPeerId.rfind("webrtc:", 0) == 0) {
+        std::shared_ptr<WebRtcSessionCoordinator> coordinator;
+        {
+            std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+            auto it = m_globalCoordinators.find(targetPeerId);
+            if (it != m_globalCoordinators.end()) {
+                coordinator = it->second;
+            }
+        }
+        if (coordinator) {
+            auto channel = coordinator->getChannel();
+            if (channel && channel->isConnected()) {
+                statusBar()->showMessage(QString("Streaming batch over WebRTC to %1...").arg(QString::fromStdString(targetPeerId)));
+                launchWorker([this, taskId, items, batchName, targetPeerId, channel]() {
+                    TransferOptions opts;
+                    opts.closeChannelOnCompletion = false;
+                    if (m_settingsPresenter) {
+                        opts.speedLimitKbps = m_settingsPresenter->getSpeedLimitKbps();
+                    }
+
+                    std::string err;
+                    bool ok = m_transferEngine->sendBatchOverChannel(
+                        taskId,
+                        items,
+                        batchName,
+                        channel,
+                        opts,
+                        [this](const TransferProgressUpdate& upd) {
+                            QMetaObject::invokeMethod(this, [this, upd]() {
+                                if (m_transferPresenter) {
+                                    m_transferPresenter->updateTaskProgress(upd.taskId, upd.bytesTransferred, upd.speedBytesPerSec, upd.state, upd.message);
+                                }
+                            }, Qt::QueuedConnection);
+                        },
+                        nullptr,
+                        &err
+                    );
+
+                    QMetaObject::invokeMethod(this, [this, taskId, ok, err, targetPeerId, batchName]() {
+                        if (ok) {
+                            statusBar()->showMessage(QString("✓ Batch '%1' successfully sent over WebRTC to %2").arg(QString::fromStdString(batchName)).arg(QString::fromStdString(targetPeerId)));
+                        } else {
+                            statusBar()->showMessage(QString("✗ WebRTC batch send error: %1").arg(QString::fromStdString(err)));
+                            if (m_transferWidget) {
+                                m_transferWidget->showTransferError(taskId, err);
+                            }
+                        }
+                    }, Qt::QueuedConnection);
+                });
+                return;
+            }
+        }
+    }
+
+    if (targetPeerId.rfind("direct:", 0) == 0) {
+        size_t colon = targetPeerId.rfind(':');
+        if (colon != std::string::npos && colon > 7) {
+            remoteIp = targetPeerId.substr(7, colon - 7);
+            try {
+                remotePort = static_cast<uint16_t>(std::stoi(targetPeerId.substr(colon + 1)));
+            } catch (...) {
+                remotePort = 8848;
+            }
+        }
+    } else if (targetPeerId != "local-loopback") {
+        if (m_discoveryPresenter) {
+            for (const auto& p : m_discoveryPresenter->getPeers()) {
+                if (p->getId() == targetPeerId) {
+                    remoteIp = p->getIpAddress();
+                    remotePort = p->getPort();
+                    break;
+                }
+            }
+        }
+    }
+
+    statusBar()->showMessage(QString("Connecting to %1:%2 to send batch '%3' (%4 files)...")
+        .arg(QString::fromStdString(remoteIp))
+        .arg(remotePort)
+        .arg(QString::fromStdString(batchName))
+        .arg(items.size()));
+
+    launchWorker([this, taskId, items, batchName, remoteIp, remotePort]() {
+        TransferOptions opts;
+        if (m_settingsPresenter) {
+            opts.speedLimitKbps = m_settingsPresenter->getSpeedLimitKbps();
+        }
+
+        std::string err;
+        bool ok = m_transferEngine->sendBatch(
+            taskId,
+            items,
+            batchName,
+            remoteIp,
+            remotePort,
+            opts,
+            [this](const TransferProgressUpdate& upd) {
+                QMetaObject::invokeMethod(this, [this, upd]() {
+                    if (m_transferPresenter) {
+                        m_transferPresenter->updateTaskProgress(upd.taskId, upd.bytesTransferred, upd.speedBytesPerSec, upd.state, upd.message);
+                    }
+                }, Qt::QueuedConnection);
+            },
+            nullptr,
+            &err
+        );
+
+        QMetaObject::invokeMethod(this, [this, taskId, ok, err, remoteIp, remotePort, batchName]() {
+            if (ok) {
+                statusBar()->showMessage(QString("✓ Batch '%1' successfully sent to %2:%3")
+                    .arg(QString::fromStdString(batchName))
+                    .arg(QString::fromStdString(remoteIp))
+                    .arg(remotePort));
+            } else {
+                statusBar()->showMessage(QString("✗ Batch send error: %1").arg(QString::fromStdString(err)));
                 if (m_transferWidget) {
                     m_transferWidget->showTransferError(taskId, err);
                 }

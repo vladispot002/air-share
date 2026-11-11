@@ -18,6 +18,30 @@ void TransferPresenter::initialize(bool populateSampleData) {
     m_selectedIndex = 0;
     if (populateSampleData) {
         loadSampleData();
+    } else if (m_stateStore) {
+        auto saved = m_stateStore->loadAllRecords();
+        for (const auto& r : saved) {
+            if (r.taskId.empty()) continue;
+            auto existing = findTask(r.taskId);
+            if (!existing) {
+                auto task = std::make_shared<P2PTransferTask>(
+                    r.taskId,
+                    r.fileName,
+                    r.fileSize,
+                    r.direction,
+                    r.targetPeerId
+                );
+                task->initialize();
+                task->setBytesTransferred(r.bytesTransferred);
+                if (r.state == TransferState::Transferring || r.state == TransferState::Connecting || r.state == TransferState::Idle) {
+                    task->pause();
+                } else {
+                    task->setState(r.state);
+                }
+                m_realTaskIds.insert(r.taskId);
+                m_tasks.push_back(task);
+            }
+        }
     }
     refreshView();
 }
@@ -85,6 +109,20 @@ void TransferPresenter::onSendFileClicked(const std::string& targetPeerId, const
     m_realTaskIds.insert(taskId);
     m_tasks.push_back(task);
     m_selectedIndex = m_tasks.size() - 1;
+
+    if (m_stateStore) {
+        PersistedTransferRecord rec;
+        rec.taskId = taskId;
+        rec.fileName = p.filename().string();
+        rec.localFilePath = filePath;
+        rec.fileSize = size;
+        rec.bytesTransferred = 0;
+        rec.direction = TransferDirection::Upload;
+        rec.targetPeerId = targetPeerId;
+        rec.state = TransferState::Transferring;
+        m_stateStore->saveRecord(rec);
+    }
+
     refreshView();
 
     if (m_sendFileCallback) {
@@ -92,10 +130,60 @@ void TransferPresenter::onSendFileClicked(const std::string& targetPeerId, const
     }
 }
 
+void TransferPresenter::onSendBatchClicked(const std::string& targetPeerId, const std::vector<BatchFileItem>& items, const std::string& batchName) {
+    if (items.empty()) {
+        if (m_view) {
+            m_view->showTransferError("-", "Batch item list is empty");
+        }
+        return;
+    }
+
+    uint64_t totalSize = 0;
+    for (const auto& item : items) {
+        totalSize += item.fileSize;
+    }
+
+    std::string taskId = "T-" + std::to_string(m_nextTaskNumber++);
+    std::string displayName = batchName.empty() ? ("Batch (" + std::to_string(items.size()) + " files)") : batchName;
+
+    auto task = std::make_shared<P2PTransferTask>(taskId, displayName, totalSize, TransferDirection::Upload, targetPeerId);
+    task->initialize();
+    m_realTaskIds.insert(taskId);
+    m_tasks.push_back(task);
+    m_selectedIndex = m_tasks.size() - 1;
+
+    if (m_stateStore) {
+        PersistedTransferRecord rec;
+        rec.taskId = taskId;
+        rec.fileName = displayName;
+        rec.fileSize = totalSize;
+        rec.bytesTransferred = 0;
+        rec.direction = TransferDirection::Upload;
+        rec.targetPeerId = targetPeerId;
+        rec.state = TransferState::Transferring;
+        rec.isBatch = true;
+        rec.batchId = displayName;
+        rec.totalFiles = static_cast<uint32_t>(items.size());
+        m_stateStore->saveRecord(rec);
+    }
+
+    refreshView();
+
+    if (m_sendBatchCallback) {
+        m_sendBatchCallback(taskId, targetPeerId, items, displayName);
+    }
+}
+
 void TransferPresenter::onPauseTransferClicked(const std::string& taskId) {
     auto task = findTask(taskId);
     if (task) {
         task->pause();
+        if (m_cancelCallback) {
+            m_cancelCallback(taskId);
+        }
+        if (m_stateStore) {
+            m_stateStore->updateProgress(taskId, task->getBytesTransferred(), TransferState::Paused);
+        }
         refreshView();
     }
 }
@@ -104,6 +192,15 @@ void TransferPresenter::onResumeTransferClicked(const std::string& taskId) {
     auto task = findTask(taskId);
     if (task) {
         task->resume();
+        if (m_stateStore) {
+            m_stateStore->updateProgress(taskId, task->getBytesTransferred(), TransferState::Transferring);
+            auto optRec = m_stateStore->getRecord(taskId);
+            if (optRec.has_value() && optRec->direction == TransferDirection::Upload && !optRec->localFilePath.empty()) {
+                if (m_sendFileCallback) {
+                    m_sendFileCallback(taskId, optRec->targetPeerId, optRec->localFilePath);
+                }
+            }
+        }
         refreshView();
     }
 }
@@ -115,6 +212,9 @@ void TransferPresenter::onCancelTransferClicked(const std::string& taskId) {
         if (m_cancelCallback) {
             m_cancelCallback(taskId);
         }
+        if (m_stateStore) {
+            m_stateStore->updateProgress(taskId, task->getBytesTransferred(), TransferState::Cancelled);
+        }
         refreshView();
     }
 }
@@ -125,6 +225,9 @@ void TransferPresenter::onClearHistoryClicked() {
     });
     m_tasks.erase(it, m_tasks.end());
     m_selectedIndex = 0;
+    if (m_stateStore) {
+        m_stateStore->clearFinishedRecords();
+    }
     refreshView();
 }
 
@@ -154,9 +257,32 @@ void TransferPresenter::addTask(const std::shared_ptr<TransferTask>& task) {
 
 void TransferPresenter::addRealTask(const std::shared_ptr<TransferTask>& task) {
     if (!task) return;
-    m_realTaskIds.insert(task->getTaskId());
-    m_tasks.push_back(task);
-    m_selectedIndex = m_tasks.size() - 1;
+    std::string taskId = task->getTaskId();
+    m_realTaskIds.insert(taskId);
+
+    auto existing = findTask(taskId);
+    if (!existing) {
+        m_tasks.push_back(task);
+        m_selectedIndex = m_tasks.size() - 1;
+    } else {
+        existing->setState(task->getState());
+        existing->setBytesTransferred(task->getBytesTransferred());
+    }
+
+    if (m_stateStore) {
+        PersistedTransferRecord rec;
+        rec.taskId = task->getTaskId();
+        rec.fileName = task->getFileName();
+        rec.fileSize = task->getFileSize();
+        rec.bytesTransferred = task->getBytesTransferred();
+        rec.direction = task->getDirection();
+        if (auto p2p = std::dynamic_pointer_cast<landrop::P2PTransferTask>(task)) {
+            rec.targetPeerId = p2p->getTargetPeerId();
+        }
+        rec.state = task->getState();
+        m_stateStore->saveRecord(rec);
+    }
+
     refreshView();
 }
 
@@ -172,6 +298,11 @@ void TransferPresenter::updateTaskProgress(
     task->setBytesTransferred(bytesTransferred);
     task->setState(state);
     task->updateSpeed(static_cast<uint64_t>(speedBytesPerSec), 1.0);
+
+    if (m_stateStore) {
+        m_stateStore->updateProgress(taskId, bytesTransferred, state);
+    }
+
     refreshView();
 }
 
