@@ -54,12 +54,14 @@ void QtAccountWidget::setupUi() {
     m_nameInput = new QLineEdit(m_loginBox);
     m_nameInput->setPlaceholderText("Display Name (optional)");
     auto* submitLoginBtn = new QPushButton("Continue", m_loginBox);
+    auto* magicBtn = new QPushButton("✉️ Magic Link", m_loginBox);
 
     loginLayout->addWidget(new QLabel("Email / ID:", m_loginBox));
     loginLayout->addWidget(m_emailInput, 1);
     loginLayout->addWidget(new QLabel("Name:", m_loginBox));
     loginLayout->addWidget(m_nameInput, 1);
     loginLayout->addWidget(submitLoginBtn);
+    loginLayout->addWidget(magicBtn);
     m_loginBox->setVisible(false);
 
     connect(submitLoginBtn, &QPushButton::clicked, this, [this]() {
@@ -77,6 +79,36 @@ void QtAccountWidget::setupUi() {
                 m_loginBox->setVisible(false);
                 m_emailInput->clear();
                 m_nameInput->clear();
+            }
+        }
+    });
+
+    connect(magicBtn, &QPushButton::clicked, this, [this]() {
+        QString email = m_emailInput->text().trimmed();
+        if (email.isEmpty()) {
+            QMessageBox::warning(this, "Input Required", "Please enter your email to receive a magic link.");
+            return;
+        }
+        if (m_presenter) {
+            std::string token, err;
+            if (m_presenter->requestMagicLink(email.toStdString(), &token, &err)) {
+                bool ok = false;
+                QString enteredToken = QInputDialog::getText(this, "Magic Link Verification",
+                    "A verification link has been sent.\nEnter token or confirm below:",
+                    QLineEdit::Normal, QString::fromStdString(token), &ok);
+                if (ok && !enteredToken.trimmed().isEmpty()) {
+                    std::string verifyErr;
+                    if (m_presenter->verifyMagicLink(enteredToken.trimmed().toStdString(), &verifyErr)) {
+                        m_loginBox->setVisible(false);
+                        m_emailInput->clear();
+                        m_nameInput->clear();
+                        QMessageBox::information(this, "Success", "Authenticated via Magic Link!");
+                    } else {
+                        QMessageBox::warning(this, "Verification Failed", QString::fromStdString(verifyErr));
+                    }
+                }
+            } else {
+                QMessageBox::warning(this, "Magic Link Error", QString::fromStdString(err));
             }
         }
     });

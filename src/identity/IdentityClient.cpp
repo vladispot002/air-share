@@ -3,6 +3,8 @@
 #include <random>
 #include <sstream>
 #include <iomanip>
+#include <fstream>
+#include <filesystem>
 
 using json = nlohmann::json;
 
@@ -75,6 +77,138 @@ void IdentityClient::setCurrentUser(const UserProfile& user) {
     m_isGuest = user.userId.empty();
 }
 
+void IdentityClient::setSessionStorePath(const std::string& path) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_sessionStorePath = path;
+}
+
+std::string IdentityClient::getSessionStorePath() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_sessionStorePath;
+}
+
+bool IdentityClient::saveSession(std::string* outError) {
+    std::string path;
+    json j;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        path = m_sessionStorePath;
+        if (path.empty() || m_isGuest || m_token.empty()) {
+            return false;
+        }
+        j["token"] = m_token;
+        j["user"] = {
+            {"user_id", m_user.userId},
+            {"landrop_id", m_user.landropId},
+            {"display_name", m_user.displayName},
+            {"email", m_user.email},
+            {"avatar_url", m_user.avatarUrl},
+            {"status", m_user.status}
+        };
+        j["device"] = {
+            {"device_id", m_device.deviceId},
+            {"user_id", m_device.userId},
+            {"device_name", m_device.deviceName},
+            {"device_type", m_device.deviceType},
+            {"platform", m_device.platform},
+            {"status", m_device.status},
+            {"presence", m_device.presence}
+        };
+    }
+
+    try {
+        std::error_code ec;
+        auto parentDir = std::filesystem::path(path).parent_path();
+        if (!parentDir.empty()) {
+            std::filesystem::create_directories(parentDir, ec);
+        }
+        std::ofstream f(path, std::ios::trunc);
+        if (!f.is_open()) {
+            if (outError) *outError = "Failed to open session file for writing";
+            return false;
+        }
+        f << j.dump(2);
+        return true;
+    } catch (const std::exception& e) {
+        if (outError) *outError = e.what();
+        return false;
+    }
+}
+
+bool IdentityClient::loadSession(std::string* outError) {
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        path = m_sessionStorePath;
+    }
+    if (path.empty()) return false;
+
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return false;
+
+    try {
+        std::ifstream f(path);
+        if (!f.is_open()) return false;
+        json j = json::parse(f);
+        std::string token = j.value("token", "");
+        if (token.empty()) return false;
+
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_token = token;
+            m_isGuest = false;
+
+            if (j.contains("user") && j["user"].is_object()) {
+                auto ju = j["user"];
+                m_user.userId = ju.value("user_id", "");
+                m_user.landropId = ju.value("landrop_id", "");
+                m_user.displayName = ju.value("display_name", "");
+                m_user.email = ju.value("email", "");
+                m_user.avatarUrl = ju.value("avatar_url", "");
+                m_user.status = ju.value("status", "active");
+            }
+            if (j.contains("device") && j["device"].is_object()) {
+                auto jd = j["device"];
+                m_device.deviceId = jd.value("device_id", "");
+                m_device.userId = jd.value("user_id", "");
+                m_device.deviceName = jd.value("device_name", "");
+                m_device.deviceType = jd.value("device_type", "desktop");
+                m_device.platform = jd.value("platform", "linux");
+                m_device.status = jd.value("status", "active");
+                m_device.presence = jd.value("presence", "online");
+            }
+        }
+
+        // Validate session against backend
+        UserProfile profile;
+        std::string verifyErr;
+        if (!fetchProfile(profile, &verifyErr)) {
+            if (verifyErr.find("401") != std::string::npos || verifyErr.find("Unauthorized") != std::string::npos) {
+                clearSession();
+                authenticateGuest();
+                if (outError) *outError = "Session expired or invalid";
+                return false;
+            }
+        }
+        return true;
+    } catch (const std::exception& e) {
+        if (outError) *outError = e.what();
+        return false;
+    }
+}
+
+void IdentityClient::clearSession() {
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        path = m_sessionStorePath;
+    }
+    if (!path.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+}
+
 bool IdentityClient::authenticateGuest() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_isGuest = true;
@@ -86,6 +220,7 @@ bool IdentityClient::authenticateGuest() {
 }
 
 void IdentityClient::logout() {
+    clearSession();
     authenticateGuest();
 }
 
@@ -120,30 +255,115 @@ bool IdentityClient::authenticateWithProvider(
 
     try {
         json j = json::parse(res.body);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_token = j.value("token", "");
+            m_isGuest = false;
+
+            if (j.contains("user") && j["user"].is_object()) {
+                auto ju = j["user"];
+                m_user.userId = ju.value("user_id", ju.value("id", ""));
+                m_user.landropId = ju.value("landrop_id", "");
+                m_user.displayName = ju.value("display_name", "");
+                m_user.email = ju.value("email", "");
+                m_user.avatarUrl = ju.value("avatar_url", "");
+                m_user.status = ju.value("status", "active");
+            }
+
+            if (j.contains("device") && j["device"].is_object()) {
+                auto jd = j["device"];
+                m_device.deviceId = jd.value("device_id", jd.value("id", ""));
+                m_device.userId = jd.value("user_id", "");
+                m_device.deviceName = jd.value("device_name", jd.value("name", ""));
+                m_device.deviceType = jd.value("device_type", "desktop");
+                m_device.platform = jd.value("platform", "linux");
+                m_device.status = jd.value("status", "active");
+                m_device.presence = jd.value("presence", "online");
+            }
+        }
+        saveSession();
+        return true;
+    } catch (const std::exception& e) {
+        if (outError) *outError = std::string("JSON parse error: ") + e.what();
+        return false;
+    }
+}
+
+bool IdentityClient::requestMagicLink(const std::string& email, std::string* outToken, std::string* outError) {
+    json payload;
+    payload["email"] = email;
+
+    std::string url;
+    {
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_token = j.value("token", "");
-        m_isGuest = false;
+        url = m_apiBaseUrl + "/api/v1/auth/magic-link/request";
+    }
 
-        if (j.contains("user") && j["user"].is_object()) {
-            auto ju = j["user"];
-            m_user.userId = ju.value("user_id", ju.value("id", ""));
-            m_user.landropId = ju.value("landrop_id", "");
-            m_user.displayName = ju.value("display_name", "");
-            m_user.email = ju.value("email", "");
-            m_user.avatarUrl = ju.value("avatar_url", "");
-            m_user.status = ju.value("status", "active");
-        }
+    HttpResponse res = m_httpClient->post(url, payload.dump(), "", 5);
+    if (!res.isOk()) {
+        if (outError) *outError = res.errorMessage.empty() ? ("HTTP " + std::to_string(res.statusCode)) : res.errorMessage;
+        return false;
+    }
 
-        if (j.contains("device") && j["device"].is_object()) {
-            auto jd = j["device"];
-            m_device.deviceId = jd.value("device_id", jd.value("id", ""));
-            m_device.userId = jd.value("user_id", "");
-            m_device.deviceName = jd.value("device_name", jd.value("name", ""));
-            m_device.deviceType = jd.value("device_type", "desktop");
-            m_device.platform = jd.value("platform", "linux");
-            m_device.status = jd.value("status", "active");
-            m_device.presence = jd.value("presence", "online");
+    try {
+        json j = json::parse(res.body);
+        if (outToken) {
+            *outToken = j.value("token", "");
         }
+        return true;
+    } catch (const std::exception& e) {
+        if (outError) *outError = std::string("JSON parse error: ") + e.what();
+        return false;
+    }
+}
+
+bool IdentityClient::verifyMagicLink(const std::string& token, const std::string& deviceName, const std::string& platform, std::string* outError) {
+    json payload;
+    payload["token"] = token;
+    payload["device_name"] = deviceName.empty() ? "LAN-Drop Desktop" : deviceName;
+    payload["platform"] = platform.empty() ? "linux" : platform;
+
+    std::string url;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        url = m_apiBaseUrl + "/api/v1/auth/magic-link/verify";
+    }
+
+    HttpResponse res = m_httpClient->post(url, payload.dump(), "", 5);
+    if (!res.isOk()) {
+        if (outError) *outError = res.errorMessage.empty() ? ("HTTP " + std::to_string(res.statusCode)) : res.errorMessage;
+        return false;
+    }
+
+    try {
+        json j = json::parse(res.body);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_token = j.value("token", "");
+            m_isGuest = false;
+
+            if (j.contains("user") && j["user"].is_object()) {
+                auto ju = j["user"];
+                m_user.userId = ju.value("user_id", ju.value("id", ""));
+                m_user.landropId = ju.value("landrop_id", "");
+                m_user.displayName = ju.value("display_name", "");
+                m_user.email = ju.value("email", "");
+                m_user.avatarUrl = ju.value("avatar_url", "");
+                m_user.status = ju.value("status", "active");
+            }
+
+            if (j.contains("device") && j["device"].is_object()) {
+                auto jd = j["device"];
+                m_device.deviceId = jd.value("device_id", jd.value("id", ""));
+                m_device.userId = jd.value("user_id", "");
+                m_device.deviceName = jd.value("device_name", jd.value("name", ""));
+                m_device.deviceType = jd.value("device_type", "desktop");
+                m_device.platform = jd.value("platform", "linux");
+                m_device.status = jd.value("status", "active");
+                m_device.presence = jd.value("presence", "online");
+            }
+        }
+        saveSession();
         return true;
     } catch (const std::exception& e) {
         if (outError) *outError = std::string("JSON parse error: ") + e.what();

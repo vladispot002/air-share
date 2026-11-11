@@ -31,6 +31,8 @@ public:
 
     bool loginWithEmail(const std::string& email, const std::string& displayName, std::string* outError = nullptr);
     bool loginWithProvider(const std::string& provider, const std::string& providerUserId, const std::string& email, const std::string& displayName, std::string* outError = nullptr);
+    bool requestMagicLink(const std::string& email, std::string* outToken = nullptr, std::string* outError = nullptr);
+    bool verifyMagicLink(const std::string& token, std::string* outError = nullptr);
     void logout();
 
     bool refreshContacts(std::string* outError = nullptr);

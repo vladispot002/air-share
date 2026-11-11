@@ -36,8 +36,12 @@ public:
 
     static bool isOriginAllowed(const std::string& origin);
 
+    void setStorageDirectory(const std::string& dir);
+    std::string getStorageDirectory() const;
+
 private:
     uint16_t m_port{8849};
+    std::string m_storageDir;
     std::atomic<bool> m_running{false};
     BridgePeerProvider m_peerProvider;
     std::unique_ptr<std::thread> m_serverThread;

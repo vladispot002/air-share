@@ -69,6 +69,20 @@ bool AccountPresenter::loginWithProvider(
     return ok;
 }
 
+bool AccountPresenter::requestMagicLink(const std::string& email, std::string* outToken, std::string* outError) {
+    return m_client->requestMagicLink(email, outToken, outError);
+}
+
+bool AccountPresenter::verifyMagicLink(const std::string& token, std::string* outError) {
+    bool ok = m_client->verifyMagicLink(token, "LAN-Drop Desktop", "linux", outError);
+    if (ok) {
+        refreshDevices();
+        refreshContacts();
+        notifyStateChanged();
+    }
+    return ok;
+}
+
 void AccountPresenter::logout() {
     m_client->logout();
     m_cachedDevices.clear();

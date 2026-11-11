@@ -62,7 +62,7 @@ struct DevicePairingInfo {
  */
 class IdentityClient {
 public:
-    explicit IdentityClient(std::shared_ptr<HttpClient> httpClient = nullptr, const std::string& apiBaseUrl = "http://127.0.0.1:8848");
+    explicit IdentityClient(std::shared_ptr<HttpClient> httpClient = nullptr, const std::string& apiBaseUrl = "http://127.0.0.1:8080");
     virtual ~IdentityClient() = default;
 
     bool isGuest() const;
@@ -75,6 +75,13 @@ public:
     void setAuthToken(const std::string& token);
     void setCurrentUser(const UserProfile& user);
 
+    // Session Persistence
+    void setSessionStorePath(const std::string& path);
+    std::string getSessionStorePath() const;
+    bool saveSession(std::string* outError = nullptr);
+    bool loadSession(std::string* outError = nullptr);
+    void clearSession();
+
     // Auth & Profile
     bool authenticateGuest();
     bool authenticateWithProvider(
@@ -86,6 +93,8 @@ public:
         const std::string& platform,
         std::string* outError = nullptr
     );
+    bool requestMagicLink(const std::string& email, std::string* outToken = nullptr, std::string* outError = nullptr);
+    bool verifyMagicLink(const std::string& token, const std::string& deviceName = "LAN-Drop Desktop", const std::string& platform = "linux", std::string* outError = nullptr);
     void logout();
 
     bool fetchProfile(UserProfile& outProfile, std::string* outError = nullptr);
@@ -120,6 +129,7 @@ private:
     bool m_isGuest{true};
     std::string m_guestId;
     std::string m_token;
+    std::string m_sessionStorePath;
     UserProfile m_user;
     DeviceInfo m_device;
     mutable std::mutex m_mutex;

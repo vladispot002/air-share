@@ -16,7 +16,8 @@ describe('LocalBridgeClient Suite (Workstream E2)', () => {
         status: 'ok',
         service: 'LAN-Drop Local Bridge',
         version: '1.0.2',
-        port: 8848,
+        port: 8849,
+        transferPort: 8848,
       }),
     } as any);
 
@@ -26,7 +27,8 @@ describe('LocalBridgeClient Suite (Workstream E2)', () => {
     const status = await client.getStatus();
     expect(status).not.toBeNull();
     expect(status?.service).toBe('LAN-Drop Local Bridge');
-    expect(status?.port).toBe(8848);
+    expect(status?.port).toBe(8849);
+    expect(status?.transferPort).toBe(8848);
   });
 
   it('TC-BRG-02: returns discovered peers from desktop bridge', async () => {
@@ -57,5 +59,39 @@ describe('LocalBridgeClient Suite (Workstream E2)', () => {
 
     const peers = await client.getDiscoveredPeers();
     expect(peers).toEqual([]);
+  });
+
+  it('TC-BRG-04: uploads file to local desktop bridge successfully', async () => {
+    const mockUploadResult = {
+      status: 'ok',
+      filename: 'sample.pdf',
+      path: '/home/user/Downloads/sample.pdf',
+      bytes: 1024,
+      sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    };
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      json: async () => mockUploadResult,
+    } as any);
+
+    const blob = new Blob(['sample data'], { type: 'application/octet-stream' });
+    const res = await client.uploadFile(blob, 'sample.pdf');
+    expect(res.status).toBe('ok');
+    expect(res.filename).toBe('sample.pdf');
+    expect(res.bytes).toBe(1024);
+    expect(res.sha256).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  });
+
+  it('TC-BRG-05: downloads file from local desktop bridge as blob', async () => {
+    const mockBlob = new Blob(['downloaded content'], { type: 'application/octet-stream' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      blob: async () => mockBlob,
+    } as any);
+
+    const blob = await client.downloadFile('sample.pdf');
+    expect(blob).toBeDefined();
+    expect(blob.size).toBeGreaterThan(0);
   });
 });

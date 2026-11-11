@@ -4403,11 +4403,15 @@ static bool testSuite32_LocalWebBridge() {
             return "";
         }
         send(sock, rawReq.data(), static_cast<int>(rawReq.size()), 0);
+        std::string totalResp;
         char buf[4096];
-        std::memset(buf, 0, sizeof(buf));
-        int recvd = recv(sock, buf, sizeof(buf) - 1, 0);
+        while (true) {
+            int recvd = recv(sock, buf, sizeof(buf) - 1, 0);
+            if (recvd <= 0) break;
+            totalResp.append(buf, recvd);
+        }
         closeSocket(sock);
-        return recvd > 0 ? std::string(buf, recvd) : "";
+        return totalResp;
     };
 
     // 3. GET /bridge/status with valid origin
@@ -4416,6 +4420,8 @@ static bool testSuite32_LocalWebBridge() {
     TEST_ASSERT(statusResp.find("200 OK") != std::string::npos, "GET /bridge/status returns 200 OK");
     TEST_ASSERT(statusResp.find("Access-Control-Allow-Origin: http://localhost:5173") != std::string::npos, "CORS header included in status response");
     TEST_ASSERT(statusResp.find("\"service\":\"LAN-Drop Local Bridge\"") != std::string::npos, "Status JSON body contains service name");
+    TEST_ASSERT(statusResp.find("\"port\":58849") != std::string::npos, "Status JSON reports listening bridge port 58849");
+    TEST_ASSERT(statusResp.find("\"transferPort\":8848") != std::string::npos, "Status JSON reports core P2P transfer port 8848");
 
     // 4. GET /bridge/peers with discovered peers
     std::string peersReq = "GET /bridge/peers HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
@@ -4435,6 +4441,44 @@ static bool testSuite32_LocalWebBridge() {
     std::string evilResp = sendHttpRequest(evilReq);
     TEST_ASSERT(evilResp.find("403 Forbidden") != std::string::npos, "Untrusted origin receives 403 Forbidden");
 
+    // 7. POST /bridge/upload with binary payload
+    std::string uploadDir = (std::filesystem::temp_directory_path() / "landrop_bridge_test_store").string();
+    std::error_code ec;
+    std::filesystem::remove_all(uploadDir, ec);
+    std::filesystem::create_directories(uploadDir, ec);
+    bridge.setStorageDirectory(uploadDir);
+
+    std::string uploadPayload = "Hello, Local Web Bridge bidirectional transfer!";
+    std::ostringstream uploadReq;
+    uploadReq << "POST /bridge/upload?filename=bridge_test.txt HTTP/1.1\r\n"
+              << "Host: 127.0.0.1\r\n"
+              << "Origin: http://localhost:5173\r\n"
+              << "Content-Length: " << uploadPayload.size() << "\r\n\r\n"
+              << uploadPayload;
+    std::string uploadResp = sendHttpRequest(uploadReq.str());
+    TEST_ASSERT(uploadResp.find("200 OK") != std::string::npos, "POST /bridge/upload returns 200 OK");
+    TEST_ASSERT(uploadResp.find("\"status\":\"ok\"") != std::string::npos, "Upload JSON reports status ok");
+    TEST_ASSERT(uploadResp.find("\"filename\":\"bridge_test.txt\"") != std::string::npos, "Upload JSON reports filename");
+    TEST_ASSERT(uploadResp.find("\"sha256\"") != std::string::npos, "Upload JSON reports sha256 checksum");
+
+    // Verify uploaded file on disk
+    std::filesystem::path writtenFile = std::filesystem::path(uploadDir) / "bridge_test.txt";
+    TEST_ASSERT(std::filesystem::exists(writtenFile, ec), "Uploaded file exists in storage dir");
+    TEST_ASSERT(std::filesystem::file_size(writtenFile, ec) == uploadPayload.size(), "Uploaded file size matches payload");
+
+    // 8. GET /bridge/download of existing file
+    std::string downloadReq = "GET /bridge/download?file=bridge_test.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://localhost:5173\r\n\r\n";
+    std::string downloadResp = sendHttpRequest(downloadReq);
+    TEST_ASSERT(downloadResp.find("200 OK") != std::string::npos, "GET /bridge/download returns 200 OK");
+    TEST_ASSERT(downloadResp.find("Content-Type: application/octet-stream") != std::string::npos, "Download response has octet-stream Content-Type");
+    TEST_ASSERT(downloadResp.find(uploadPayload) != std::string::npos, "Download response body matches original uploaded content");
+
+    // 9. GET /bridge/download of non-existent file returns 404
+    std::string missingReq = "GET /bridge/download?file=missing_file.xyz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    std::string missingResp = sendHttpRequest(missingReq);
+    TEST_ASSERT(missingResp.find("404 Not Found") != std::string::npos, "GET /bridge/download missing file returns 404");
+
+    std::filesystem::remove_all(uploadDir, ec);
     bridge.stop();
     TEST_ASSERT(!bridge.isRunning(), "LocalWebBridge stopped cleanly");
     return true;

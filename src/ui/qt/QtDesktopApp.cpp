@@ -156,8 +156,31 @@ void QtDesktopApp::setupUi() {
 }
 
 void QtDesktopApp::setupPresenters() {
-    m_identityClient = std::make_shared<IdentityClient>();
+    QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    QDir().mkpath(configDir);
+
+    const char* envSignal = std::getenv("LANDROP_SIGNALING_URL");
+    std::string identityBase = envSignal ? envSignal : "http://127.0.0.1:8080";
+    if (identityBase.rfind("ws://", 0) == 0) {
+        identityBase = "http://" + identityBase.substr(5);
+    } else if (identityBase.rfind("wss://", 0) == 0) {
+        identityBase = "https://" + identityBase.substr(6);
+    }
+    size_t wsPos = identityBase.find("/ws");
+    if (wsPos != std::string::npos) {
+        identityBase = identityBase.substr(0, wsPos);
+    }
+
+    m_identityClient = std::make_shared<IdentityClient>(nullptr, identityBase);
+    std::string sessionFile = (configDir + "/session.json").toStdString();
+    m_identityClient->setSessionStorePath(sessionFile);
+    m_identityClient->loadSession();
+
     m_accountPresenter = std::make_unique<AccountPresenter>(m_identityClient);
+    if (!m_identityClient->isGuest()) {
+        m_accountPresenter->refreshDevices();
+        m_accountPresenter->refreshContacts();
+    }
     if (m_accountWidget) {
         m_accountWidget->setPresenter(m_accountPresenter.get());
     }
@@ -184,8 +207,6 @@ void QtDesktopApp::setupPresenters() {
     m_settingsPresenter = std::make_unique<SettingsPresenter>(m_settingsWidget);
     m_settingsWidget->setPresenter(m_settingsPresenter.get());
 
-    QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
-    QDir().mkpath(configDir);
     m_settingsPresenter->setConfigPath((configDir + "/settings.json").toStdString());
 
     m_transferPresenter->setStateStore(std::make_shared<TransferStateStore>((configDir + "/transfer_journal.json").toStdString()));
@@ -309,6 +330,7 @@ void QtDesktopApp::setupPresenters() {
 
     // Start Local Web Bridge for browser-desktop interop (Workstream E2)
     m_localWebBridge = std::make_unique<LocalWebBridge>(8849);
+    m_localWebBridge->setStorageDirectory(m_downloadsDirectory);
     m_localWebBridge->start([this]() {
         std::vector<BridgePeerInfo> list;
         if (m_discoveryPresenter) {
