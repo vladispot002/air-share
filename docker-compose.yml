@@ -77,6 +77,9 @@ services:
       - --lt-cred-mech
       - --no-cli
       - --no-multicast-peers
+      # Explicitly allow hairpinning to Coturn's own relay allocations
+      - --allowed-peer-ip=172.18.0.2
+      - --allowed-peer-ip=${EXTERNAL_IP}
       # Anti-SSRF internal network isolation (IPv4 + IPv6)
       - --denied-peer-ip=10.0.0.0-10.255.255.255
       - --denied-peer-ip=172.16.0.0-172.31.255.255
@@ -92,7 +95,8 @@ services:
       - "3478:3478/udp"
       - "49160-49200:49160-49200/udp"
     networks:
-      - landrop-internal
+      landrop-internal:
+        ipv4_address: 172.18.0.2
 
   caddy:
     image: caddy:2.8-alpine
@@ -122,3 +126,6 @@ volumes:
 networks:
   landrop-internal:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
