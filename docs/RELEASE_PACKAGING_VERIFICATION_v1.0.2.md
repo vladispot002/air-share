@@ -1,11 +1,11 @@
 # LAN-Drop v1.0.2 — Independent Release Packaging Verification & Final Merge Gate Report
 
-**Date**: 2026-11-11  
-**Lead Coordinator**: Chief Release Engineer  
-**Branch Audited**: `feature/release-packaging-fixes`  
-**Base Release Commit**: `f666fed76022f52517feb3165adb7d0c6f21d5d5` (`main`, tagged `v1.0.2`)  
-**Remediation HEAD Commit**: `3c01b6ceeda453d0345ce0c42cd1d7db75c2e240`  
-**Tags Audited**: `v1.0.1` (`1ce9504a...`), `v1.0.2` (`a975fb0d...`)  
+**Date**: 2026-11-11
+**Lead Coordinator**: Chief Release Engineer
+**Branch Audited**: `feature/release-packaging-fixes`
+**Base Release Commit**: `f666fed76022f52517feb3165adb7d0c6f21d5d5` (`main`, tagged `v1.0.2`)
+**Remediation HEAD Commit**: `3c01b6ceeda453d0345ce0c42cd1d7db75c2e240`
+**Tags Audited**: `v1.0.1` (`1ce9504a...`), `v1.0.2` (`a975fb0d...`)
 **Final Verdict**: **`APPROVED FOR MERGE`**
 
 ---
@@ -76,7 +76,7 @@ Diff vs `main`: 10 files changed, 117 insertions(+), 41 deletions(-).
 | **DEF-PKG-02** | Fedora packaging script hardcoded `landrop-1.0.1.tar.gz` | Parameterized with `${VERSION}`, passed `-e VERSION`, enforced strict `rpmlint` exit code | `dist/rpm/landrop-1.0.2-1.fc44.x86_64.rpm` generated; `rpmlint` exit code 0. | **PASSED** |
 | **DEF-PKG-03** | CPackDeb missing architecture; LibDataChannel leaked internal C++ headers | Added target architecture detection based on `CMAKE_SYSTEM_PROCESSOR`; added `EXCLUDE_FROM_ALL` | Package control file has `Architecture: amd64`; zero `/usr/include` headers in package. | **PASSED** |
 | **DEF-PKG-04** | AppImage script hardcoded `VERSION="1.0.1"`; network validation failed offline | Updated to `VERSION="1.0.2"`, added offline AppStream pre-validation, invoked appimagetool with `-n` | `dist/LAN-Drop-1.0.2-x86_64.AppImage` (17 MB) generated and tested. | **PASSED** |
-| **DEF-SEC-01** | Absolute developer path `/home/vladis/...` in web test; missing `.env` rules | Replaced with dynamic `import.meta.url` resolution; added `.env*` to `.gitignore`; added `ENV=production` | `npm test` 57/57 passed; `.gitignore` protects secrets; Go server enforces production TURN. | **PASSED** |
+| **DEF-SEC-01** | Developer-specific absolute path leak in web test; missing `.env` rules | Replaced with dynamic `import.meta.url` resolution; added `.env*` to `.gitignore`; added `ENV=production` | `npm test` 57/57 passed; `.gitignore` protects secrets; Go server enforces production TURN. | **PASSED** |
 
 ---
 
@@ -266,9 +266,10 @@ Diff vs `main`: 10 files changed, 117 insertions(+), 41 deletions(-).
 
 ## 14. Exact Commit Hashes
 
-- **Base Release Commit**: [`f666fed76022f52517feb3165adb7d0c6f21d5d5`](file:///home/vladis/lan-drop) (`main`, tagged `v1.0.2`)
-- **Remediation Commit 1**: [`5fb5c1d3c4b047057e11ecb64d02c4c4863a4154`](file:///home/vladis/lan-drop)
-- **Remediation Commit 2 (HEAD)**: [`3c01b6ceeda453d0345ce0c42cd1d7db75c2e240`](file:///home/vladis/lan-drop)
+- **Base Release Commit**: `f666fed76022f52517feb3165adb7d0c6f21d5d5` (`main`, tagged `v1.0.2`)
+- **Remediation Commit 1**: `5fb5c1d3c4b047057e11ecb64d02c4c4863a4154`
+- **Remediation Commit 2**: `3c01b6ceeda453d0345ce0c42cd1d7db75c2e240`
+- **Audit & Plan Documentation**: `f3f8b0b5073a6fbdb2f94c315525ac78991fa26e`
 - **Release Tags**:
   - `v1.0.1` -> `193a2697e65884565a47503282f30246d59ca351` (untouched)
   - `v1.0.2` -> `f666fed76022f52517feb3165adb7d0c6f21d5d5` (untouched)
@@ -279,8 +280,8 @@ Diff vs `main`: 10 files changed, 117 insertions(+), 41 deletions(-).
 
 ```
 ================================================================================
-                           FINAL MERGE GATE DECISION                            
-                            [ APPROVED FOR MERGE ]                              
+                           FINAL MERGE GATE DECISION
+                            [ APPROVED FOR MERGE ]
 ================================================================================
 ```
 

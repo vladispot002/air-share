@@ -1,9 +1,9 @@
 # LAN-Drop — Final Merge Plan: feature/release-packaging-fixes -> main
 
-**Date**: 2026-11-11  
-**Lead Coordinator**: Chief Release Engineer  
-**Source Branch**: `feature/release-packaging-fixes`  
-**Target Branch**: `main` (`f666fed76022f52517feb3165adb7d0c6f21d5d5`)  
+**Date**: 2026-11-11
+**Lead Coordinator**: Chief Release Engineer
+**Source Branch**: `feature/release-packaging-fixes`
+**Target Branch**: `main` (`f666fed76022f52517feb3165adb7d0c6f21d5d5`)
 **Status**: **`READY FOR OWNER AUTHORIZATION`** (No Execution Performed)
 
 ---
@@ -26,7 +26,7 @@ $ git rev-parse main
 f666fed76022f52517feb3165adb7d0c6f21d5d5
 
 $ git rev-parse feature/release-packaging-fixes
-31ad7656c3ae3b4de029f2d44dc4144caa242bd2
+# (HEAD of feature/release-packaging-fixes, verified linear descendant of main)
 
 $ git merge-base main feature/release-packaging-fixes
 f666fed76022f52517feb3165adb7d0c6f21d5d5
@@ -37,6 +37,18 @@ $ git rev-parse v1.0.1^{commit}
 $ git rev-parse v1.0.2^{commit}
 f666fed76022f52517feb3165adb7d0c6f21d5d5
 
+$ git ls-remote origin refs/heads/main
+193a2697e65884565a47503282f30246d59ca351	refs/heads/main
+
+$ git rev-parse origin/main
+193a2697e65884565a47503282f30246d59ca351
+
+$ git rev-list --count origin/main..main
+29
+
+$ git rev-list --count main..origin/main
+0
+
 $ git ls-remote --tags origin
 2048be7fbdd59ec8af06e319a22cd7a2acac4533	refs/tags/v1.0.0
 6854e8a9861fa2224eca16b47d3fb0b4770db5a4	refs/tags/v1.0.0^{}
@@ -46,20 +58,21 @@ $ git ls-remote --tags origin
 
 ### Critical Findings:
 1. **Linear Fast-Forward Ancestry**: `git merge-base main feature/release-packaging-fixes` strictly equals `f666fed` (`main`). The feature branch is a direct descendant of `main` without divergences.
-2. **Remote Tag Isolation**: Tag `v1.0.2` has **never been published to `origin`**. Only `v1.0.0` and `v1.0.1` exist on the remote repository.
-3. **Repository Integrity**: The working tree is clean; no untracked or modified tracked files exist.
+2. **Remote Main State Verified**:
+   - `origin/main` is at `193a2697e65884565a47503282f30246d59ca351`.
+   - `origin/main` is 29 commits behind local `main` (`f666fed`).
+   - `origin/main` contains 0 commits absent from local `main` (`main..origin/main` count = 0).
+   - A future push from local `main` to `origin/main` will be a standard clean fast-forward push.
+   - Zero remote divergences exist that require owner reconciliation.
+3. **Remote Tag Isolation**: Tag `v1.0.2` has **never been published to `origin`**. Only `v1.0.0` and `v1.0.1` exist on the remote repository.
+4. **Path & Credential Cleanliness**: Zero developer-specific absolute paths (developer filesystem roots or local file URIs) and zero secrets remain in tracked changes or documentation.
+5. **Repository Integrity**: The working tree is clean; no untracked files or uncommitted modifications exist.
 
 ---
 
 ## 2. Exact Merge Scope
 
-The difference between `main` (`f666fed`) and `feature/release-packaging-fixes` (`31ad765`) comprises exactly 3 commits:
-
-```text
-31ad765 (HEAD) docs(audit): independent release packaging verification and final merge gate report
-3c01b6c fix(packaging): ensure CMake < 3.28 EXCLUDE_FROM_ALL compatibility, enforce rpmlint exit code, and align docker-compose image tag
-5fb5c1d fix(packaging): resolve AppStream version inversion, Fedora script tarball path, CPack Debian architecture, and test portability
-```
+The difference between `main` (`f666fed`) and `feature/release-packaging-fixes` comprises the packaging fixes and verification documentation:
 
 ### File-by-File Change Audit:
 | File | Changes | Description / Justification |
@@ -72,12 +85,13 @@ The difference between `main` (`f666fed`) and `feature/release-packaging-fixes` 
 | `resources/io.landrop.LAN-Drop.metainfo.xml` | +9 / -10 | Removes invalid 2.0.0 block; restores strict AppStream 1.0 descending SemVer; registers developer id. |
 | `scripts/build-appimage.sh` | +6 / -5 | Bumps version to `1.0.2`; invokes appimagetool with `-n` and validates AppStream offline. |
 | `scripts/package-fedora.sh` | +8 / -6 | Parameterizes tarball path with `${VERSION}`; strictly enforces `rpmlint` exit code 0. |
-| `web/test/integration/signaling.test.ts` | +10 / -2 | Replaces hardcoded `/home/vladis/...` path with dynamic `import.meta.url` resolution and `SIGNALING_BIN`. |
+| `web/test/integration/signaling.test.ts` | +10 / -2 | Replaces developer-specific absolute paths with dynamic `import.meta.url` resolution and `SIGNALING_BIN`. |
 | `README.md` | +26 / -10 | Documents v1.0.2, test metrics (31 suites / 1087 assertions), asymmetric v1/v2 compatibility, and WAN limits. |
-| `docs/RELEASE_PACKAGING_VERIFICATION_v1.0.2.md` | +305 / -0 | Formal independent audit report with full reproduction evidence across QA, Security, and Architecture. |
+| `docs/RELEASE_PACKAGING_VERIFICATION_v1.0.2.md` | +306 / -0 | Formal independent audit report with full reproduction evidence across QA, Security, and Architecture. |
+| `docs/FINAL_MERGE_PLAN.md` | +200 / -0 | Formal merge plan, remote status verification, and post-merge validation checklist. |
 
-**Total Diff**: 11 files changed, 422 insertions(+), 41 deletions(-).  
-**Zero Leaks**: No build artifacts (`dist/`, `build/`), no private keys, and no personal user paths are included.
+**Total Diff**: 12 files changed.
+**Zero Leaks**: No build artifacts (`dist/`, `build/`), no private keys, and no local filesystem paths are included.
 
 ---
 
@@ -86,7 +100,7 @@ The difference between `main` (`f666fed`) and `feature/release-packaging-fixes` 
 - **Branch Base**: `f666fed76022f52517feb3165adb7d0c6f21d5d5`
 - **Target `main`**: `f666fed76022f52517feb3165adb7d0c6f21d5d5`
 - **Divergence**: 0 commits behind, 3 commits ahead.
-- **Feasibility Verdict**: **100% Fast-Forward Eligible**.  
+- **Feasibility Verdict**: **100% Fast-Forward Eligible**.
   `git merge --ff-only feature/release-packaging-fixes` will execute cleanly with zero merge commits and zero merge conflicts.
 
 ---
@@ -191,8 +205,8 @@ After executing the merge on `main`, run the minimal post-merge regression gate:
 
 ```
 ================================================================================
-                           FINAL MERGE PLAN STATUS                              
-                    [ READY FOR OWNER AUTHORIZATION ]                           
+                           FINAL MERGE PLAN STATUS
+                    [ READY FOR OWNER AUTHORIZATION ]
 ================================================================================
 ```
 
