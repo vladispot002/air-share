@@ -626,13 +626,17 @@ func (s *Server) handleIceCandidateRelay(client *room.Client, env *protocol.Enve
 	}
 
 	var candPayload protocol.IceCandidatePayload
-	if err := json.Unmarshal(env.Payload, &candPayload); err != nil || candPayload.Candidate == "" {
+	if err := json.Unmarshal(env.Payload, &candPayload); err != nil {
 		_ = client.Send(protocol.NewErrorEnvelope(
 			protocol.ErrCodeInvalidMessage,
-			"malformed or empty ICE candidate payload",
+			"malformed ICE candidate payload",
 			client.RoomCode,
 			client.ID,
 		))
+		return
+	}
+	if candPayload.Candidate == "" {
+		// End-of-candidates marker in WebRTC standard; ignore gracefully
 		return
 	}
 

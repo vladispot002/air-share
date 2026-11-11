@@ -133,7 +133,7 @@ export class WebRtcCoordinator {
     this.pendingRemoteCandidates = [];
 
     pc.onicecandidate = (event) => {
-      if (event.candidate) {
+      if (event.candidate && event.candidate.candidate) {
         this.signalingClient.sendIceCandidate(event.candidate.toJSON());
       }
     };
@@ -190,6 +190,26 @@ export class WebRtcCoordinator {
       ordered: true,
     });
     this.configureDataChannel(dc);
+
+    // Wait for peer to join the room before transmitting SDP offer
+    if (!this.signalingClient.hasPeerJoined) {
+      await new Promise<void>((resolve, reject) => {
+        const onPeerJoined = () => {
+          cleanup();
+          resolve();
+        };
+        const onError = (errPayload: any) => {
+          cleanup();
+          reject(new Error(`Signaling error while waiting for peer: [${errPayload.code}] ${errPayload.message}`));
+        };
+        const cleanup = () => {
+          this.signalingClient.off('peer_joined', onPeerJoined as any);
+          this.signalingClient.off('error', onError as any);
+        };
+        this.signalingClient.on('peer_joined', onPeerJoined);
+        this.signalingClient.on('error', onError);
+      });
+    }
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);

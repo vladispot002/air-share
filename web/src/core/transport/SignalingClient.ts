@@ -77,6 +77,10 @@ export class SignalingClient {
   private currentRoomCode: string = '';
   private currentRoomToken: string = '';
   private pingInterval: any = null;
+  private peerJoined: boolean = false;
+  private pendingOffer: SdpPayload | null = null;
+  private pendingAnswer: SdpPayload | null = null;
+  private pendingCandidates: IceCandidatePayload[] = [];
 
   constructor(clientId?: string) {
     if (clientId) this.clientId = clientId;
@@ -94,11 +98,32 @@ export class SignalingClient {
     return this.currentRoomToken;
   }
 
+  get hasPeerJoined(): boolean {
+    return this.peerJoined;
+  }
+
   on<K extends keyof SignalingEventMap>(event: K, handler: (data: SignalingEventMap[K]) => void): void {
     if (!this.listeners[event]) {
       this.listeners[event] = [];
     }
     this.listeners[event]!.push(handler);
+
+    // Flush early-arriving payloads that arrived before listener registration
+    if (event === 'sdp_offer' && this.pendingOffer) {
+      const offer = this.pendingOffer;
+      this.pendingOffer = null;
+      queueMicrotask(() => handler(offer as any));
+    } else if (event === 'sdp_answer' && this.pendingAnswer) {
+      const answer = this.pendingAnswer;
+      this.pendingAnswer = null;
+      queueMicrotask(() => handler(answer as any));
+    } else if (event === 'ice_candidate' && this.pendingCandidates.length > 0) {
+      const cands = [...this.pendingCandidates];
+      this.pendingCandidates = [];
+      queueMicrotask(() => {
+        for (const c of cands) handler(c as any);
+      });
+    }
   }
 
   off<K extends keyof SignalingEventMap>(event: K, handler: (data: SignalingEventMap[K]) => void): void {
@@ -193,22 +218,39 @@ export class SignalingClient {
         if (payload.room_token) {
           this.currentRoomToken = payload.room_token;
         }
+        this.peerJoined = true;
         this.emit('peer_joined', payload);
         break;
       }
       case SignalingAction.SdpOffer: {
-        this.emit('sdp_offer', env.payload as SdpPayload);
+        const payload = env.payload as SdpPayload;
+        if (!this.listeners['sdp_offer'] || this.listeners['sdp_offer']!.length === 0) {
+          this.pendingOffer = payload;
+        } else {
+          this.emit('sdp_offer', payload);
+        }
         break;
       }
       case SignalingAction.SdpAnswer: {
-        this.emit('sdp_answer', env.payload as SdpPayload);
+        const payload = env.payload as SdpPayload;
+        if (!this.listeners['sdp_answer'] || this.listeners['sdp_answer']!.length === 0) {
+          this.pendingAnswer = payload;
+        } else {
+          this.emit('sdp_answer', payload);
+        }
         break;
       }
       case SignalingAction.IceCandidate: {
-        this.emit('ice_candidate', env.payload as IceCandidatePayload);
+        const payload = env.payload as IceCandidatePayload;
+        if (!this.listeners['ice_candidate'] || this.listeners['ice_candidate']!.length === 0) {
+          this.pendingCandidates.push(payload);
+        } else {
+          this.emit('ice_candidate', payload);
+        }
         break;
       }
       case SignalingAction.PeerLeft: {
+        this.peerJoined = false;
         this.emit('peer_left', env.payload as PeerLeftPayload);
         break;
       }
