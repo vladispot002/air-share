@@ -7,6 +7,7 @@ import {
   TransferAckMessage,
   TransferCancelMessage,
   ResumeRequestMessage,
+  BatchManifestMessage,
   MessageType,
   AckStatus,
   buildFrame,
@@ -197,5 +198,60 @@ describe('Wire Protocol v2 Framing & Messages', () => {
     const parsed = ResumeRequestMessage.deserialize(bytes);
     expect(parsed.bytesReceivedSoFar).toBe(10737418240n);
   });
-});
 
+  it('TC-WP2-15: BatchManifestMessage serialization and directory hierarchy roundtrip', () => {
+    const manifest = new BatchManifestMessage();
+    manifest.batchId = 'batch-9901';
+    manifest.totalFiles = 3;
+    manifest.totalBytes = 25000000n;
+    manifest.files = [
+      {
+        fileIndex: 0,
+        fileSize: 1000000n,
+        relativePath: 'documents/report.pdf',
+        sha256Hex: '1'.repeat(64),
+      },
+      {
+        fileIndex: 1,
+        fileSize: 20000000n,
+        relativePath: 'media/video.mp4',
+        sha256Hex: '2'.repeat(64),
+      },
+      {
+        fileIndex: 2,
+        fileSize: 4000000n,
+        relativePath: 'README.md',
+        sha256Hex: '3'.repeat(64),
+      },
+    ];
+
+    const bytes = manifest.serialize();
+    const parsed = BatchManifestMessage.deserialize(bytes);
+
+    expect(parsed.batchId).toBe('batch-9901');
+    expect(parsed.totalFiles).toBe(3);
+    expect(parsed.totalBytes).toBe(25000000n);
+    expect(parsed.files.length).toBe(3);
+    expect(parsed.files[0].relativePath).toBe('documents/report.pdf');
+    expect(parsed.files[1].relativePath).toBe('media/video.mp4');
+    expect(parsed.files[2].relativePath).toBe('README.md');
+  });
+
+  it('TC-WP2-16: BatchManifestMessage rejects unsafe relative paths', () => {
+    const manifest = new BatchManifestMessage();
+    manifest.batchId = 'batch-unsafe';
+    manifest.totalFiles = 1;
+    manifest.totalBytes = 100n;
+    manifest.files = [
+      {
+        fileIndex: 0,
+        fileSize: 100n,
+        relativePath: '../../etc/passwd',
+        sha256Hex: '0'.repeat(64),
+      },
+    ];
+
+    const bytes = manifest.serialize();
+    expect(() => BatchManifestMessage.deserialize(bytes)).toThrow(/Unsafe relative path/);
+  });
+});

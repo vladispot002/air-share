@@ -71,25 +71,16 @@ bool TcpSocketChannel::receiveExact(
     int timeoutMs,
     std::atomic<bool>* cancelToken
 ) {
-    if (!isConnected()) {
+    if (!isConnected() || !m_session) {
         return false;
     }
     std::lock_guard<std::mutex> lock(m_recvMutex);
 
-    if (!cancelToken) {
-        if (timeoutMs > 0 && m_session) {
-            uint32_t sec = static_cast<uint32_t>((timeoutMs + 999) / 1000);
-            m_session->setTimeoutSeconds(sec);
-        }
-        return m_session->receiveExact(buffer, length);
-    }
-
-    // Cancellation-aware receive loop
     size_t totalReceived = 0;
     auto start = std::chrono::steady_clock::now();
 
     while (totalReceived < length) {
-        if (cancelToken->load()) {
+        if (cancelToken && cancelToken->load()) {
             return false;
         }
 
@@ -97,12 +88,15 @@ bool TcpSocketChannel::receiveExact(
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start
             ).count();
-            if (elapsed > timeoutMs) {
+            if (elapsed >= timeoutMs) {
                 return false;
+            }
+            int remainingMs = static_cast<int>(timeoutMs - elapsed);
+            if (!m_session->hasDataToRead(std::min(remainingMs, 50))) {
+                continue;
             }
         }
 
-        // Read in small slices (up to 16KB per step) to keep cancel check responsive
         size_t sliceSize = std::min<size_t>(length - totalReceived, 16384);
         if (!m_session->receiveExact(buffer + totalReceived, sliceSize)) {
             return false;
@@ -112,6 +106,24 @@ bool TcpSocketChannel::receiveExact(
 
     return true;
 }
+
+bool TcpSocketChannel::waitForReadable(int timeoutMs, std::atomic<bool>* cancelToken) {
+    if (!isConnected() || !m_session) return false;
+    auto start = std::chrono::steady_clock::now();
+    while (true) {
+        if (cancelToken && cancelToken->load()) return false;
+        int slice = timeoutMs > 0 ? std::min(timeoutMs, 25) : 0;
+        if (m_session->hasDataToRead(slice)) {
+            return true;
+        }
+        if (timeoutMs <= 0) return false;
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start
+        ).count();
+        if (elapsed >= timeoutMs) return false;
+    }
+}
+
 
 size_t TcpSocketChannel::getBufferedAmount() const {
     if (!m_session || !isValidSocket(m_session->getSocketFd())) {

@@ -61,6 +61,7 @@ public:
     const std::string& getPeerFingerprint() const { return m_peerFingerprint; }
     const TlsConfig& getTlsConfig() const { return m_tlsConfig; }
 
+    bool hasDataToRead(int timeoutMs = 0) const;
     double getElapsedSeconds() const;
 
 private:

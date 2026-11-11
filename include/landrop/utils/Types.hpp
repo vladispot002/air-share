@@ -147,6 +147,45 @@ inline bool isSafeFileName(const std::string& fileName) {
     return true;
 }
 
+inline bool isSafeRelativePath(const std::string& relPath) {
+    if (relPath.empty() || relPath.size() > 1024) {
+        return false;
+    }
+    // Cannot start with slash, backslash, dot, or space
+    if (relPath.front() == '/' || relPath.front() == '\\' || relPath.front() == '.' || relPath.front() == ' ') {
+        return false;
+    }
+    // Cannot end with slash, backslash, dot, or space
+    if (relPath.back() == '/' || relPath.back() == '\\' || relPath.back() == '.' || relPath.back() == ' ') {
+        return false;
+    }
+    // Cannot contain directory traversal sequence
+    if (relPath.find("..") != std::string::npos) {
+        return false;
+    }
+    // Cannot contain Windows drive or stream colons
+    if (relPath.find(':') != std::string::npos) {
+        return false;
+    }
+
+    // Split by '/' or '\\' and ensure every segment is a safe filename
+    std::string seg;
+    for (char c : relPath) {
+        if (c == '/' || c == '\\') {
+            if (seg.empty() || !isSafeFileName(seg)) {
+                return false;
+            }
+            seg.clear();
+        } else {
+            seg.push_back(c);
+        }
+    }
+    if (seg.empty() || !isSafeFileName(seg)) {
+        return false;
+    }
+    return true;
+}
+
 inline bool isValidFileSize(uint64_t fileSize, uint64_t maxFileSize = 100ULL * 1024 * 1024 * 1024) {
     return fileSize > 0 && fileSize <= maxFileSize;
 }

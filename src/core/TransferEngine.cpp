@@ -87,6 +87,108 @@ bool TransferEngine::sendFile(
     return sendFileOverChannel(taskId, filePath, channel, options, progressCb, cancelFlag, outError);
 }
 
+std::vector<BatchFileItem> TransferEngine::scanDirectory(const std::string& directoryPath, std::string* outError) {
+    std::vector<BatchFileItem> items;
+    std::error_code ec;
+    std::filesystem::path root(directoryPath);
+
+    if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) {
+        if (outError) *outError = "Path does not exist or is not a directory: " + directoryPath;
+        return items;
+    }
+
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root, std::filesystem::directory_options::skip_permission_denied, ec)) {
+        if (ec) {
+            if (outError) *outError = "Directory scan error: " + ec.message();
+            return {};
+        }
+
+        if (entry.is_symlink(ec)) {
+            continue;
+        }
+
+        if (entry.is_regular_file(ec)) {
+            auto rel = std::filesystem::relative(entry.path(), root, ec).generic_string();
+            if (ec || !isSafeRelativePath(rel)) {
+                if (outError) *outError = "Encountered unsafe relative path in directory: " + rel;
+                return {};
+            }
+
+            uint64_t sz = entry.file_size(ec);
+            if (ec) {
+                if (outError) *outError = "Failed to determine file size: " + entry.path().string();
+                return {};
+            }
+
+            BatchFileItem item;
+            item.localFilePath = entry.path().string();
+            item.relativePath = rel;
+            item.fileSize = sz;
+            items.push_back(std::move(item));
+        }
+    }
+
+    if (items.empty()) {
+        if (outError) *outError = "Directory contains no regular files: " + directoryPath;
+    }
+    return items;
+}
+
+bool TransferEngine::sendBatch(
+    const std::string& taskId,
+    const std::vector<BatchFileItem>& items,
+    const std::string& batchName,
+    const std::string& remoteIp,
+    uint16_t remotePort,
+    const TransferOptions& options,
+    TransferProgressCallback progressCb,
+    std::atomic<bool>* cancelFlag,
+    std::string* outError
+) {
+    auto reportError = [&](const std::string& err) {
+        if (outError) *outError = err;
+        if (progressCb) {
+            TransferProgressUpdate upd;
+            upd.taskId = taskId;
+            upd.state = TransferState::Failed;
+            upd.message = err;
+            upd.totalFiles = static_cast<uint32_t>(items.size());
+            upd.currentFileIndex = 1;
+            progressCb(upd);
+        }
+        return false;
+    };
+
+    if (progressCb) {
+        TransferProgressUpdate upd;
+        upd.taskId = taskId;
+        upd.state = TransferState::Connecting;
+        upd.message = "Connecting to " + remoteIp + ":" + std::to_string(remotePort) + "...";
+        upd.totalFiles = static_cast<uint32_t>(items.size());
+        upd.currentFileIndex = 1;
+        progressCb(upd);
+    }
+
+    auto session = std::make_unique<NetworkSession>("tx-" + taskId, remoteIp, remotePort);
+    if (options.useTls) {
+        TlsConfig tlsConfig;
+        tlsConfig.role = TlsRole::Client;
+        tlsConfig.verifyMode = TlsVerificationMode::VerifyPinnedFingerprint;
+        tlsConfig.expectedFingerprint = options.expectedFingerprint;
+        session->enableTls(tlsConfig);
+    }
+
+    if (!session->connectTo(remoteIp, remotePort)) {
+        if (options.useTls && session->getTlsStatus() != TlsStatus::Connected && session->getTlsStatus() != TlsStatus::None) {
+            return reportError(std::string("TLS connection failed: ") + TlsHelper::statusToString(session->getTlsStatus()));
+        }
+        return reportError("Connection to " + remoteIp + ":" + std::to_string(remotePort) + " failed");
+    }
+
+    auto channel = std::make_shared<TcpSocketChannel>(std::move(session));
+    return sendBatchOverChannel(taskId, items, batchName, channel, options, progressCb, cancelFlag, outError);
+}
+
 bool TransferEngine::sendFileOverChannel(
     const std::string& taskId,
     const std::string& filePath,
@@ -197,7 +299,7 @@ bool TransferEngine::sendFileOverChannel(
     size_t chunkCapacity = options.chunkSize > 0 ? options.chunkSize : (64 * 1024);
     if (chunkCapacity > 4 * 1024 * 1024) chunkCapacity = 4 * 1024 * 1024;
     fhdr.chunkSize = static_cast<uint32_t>(chunkCapacity);
-    fhdr.flags = 0;
+    fhdr.flags = options.enableResume ? protocol::v2::FileHeaderFlags::RESUME_SUPPORTED : protocol::v2::FileHeaderFlags::NONE;
     fhdr.fileName = fileName;
     fhdr.sha256Hex = fileHash;
     auto headerFrame = protocol::v2::buildFrame(protocol::v2::MessageType::FileHeader, fhdr.serialize());
@@ -213,8 +315,69 @@ bool TransferEngine::sendFileOverChannel(
 
     std::vector<uint8_t> chunkBuf(chunkCapacity);
     uint32_t chunkIndex = 0;
-
     uint64_t sentBytes = 0;
+
+    // Resilient resumption negotiation: check if receiver sent a ResumeRequestMessage
+    if (options.enableResume && channel->waitForReadable(options.resumeTimeoutMs, effectiveCancel.get())) {
+        uint8_t maybeResumeByte = 0;
+        if (channel->receiveExact(&maybeResumeByte, 1, 1000, effectiveCancel.get())) {
+        if (maybeResumeByte == 'L') {
+            uint8_t resumeHdrRest[15];
+            if (channel->receiveExact(resumeHdrRest, 15, 5000, effectiveCancel.get())) {
+                uint8_t fullResumeHdr[16];
+                fullResumeHdr[0] = 'L';
+                std::memcpy(fullResumeHdr + 1, resumeHdrRest, 15);
+                protocol::v2::FrameHeader resumeFhdr;
+                std::string resumeFhdrErr;
+                if (protocol::v2::FrameHeader::deserialize(fullResumeHdr, resumeFhdr, &resumeFhdrErr)) {
+                    if (resumeFhdr.msgType == protocol::v2::MessageType::ResumeRequest && resumeFhdr.payloadLength == 136) {
+                        std::vector<uint8_t> resumePayload(136);
+                        if (channel->receiveExact(resumePayload.data(), 136, 5000, effectiveCancel.get())) {
+                            protocol::v2::ResumeRequestMessage req;
+                            std::string reqErr;
+                            if (protocol::v2::ResumeRequestMessage::deserialize(resumePayload.data(), resumePayload.size(), req, &reqErr)) {
+                                bool resumeValid = false;
+                                if (req.fileHash == fileHash &&
+                                    req.bytesReceivedSoFar > 0 &&
+                                    req.bytesReceivedSoFar < fileSize &&
+                                    (req.bytesReceivedSoFar % chunkCapacity == 0)) {
+                                    auto computedPartial = hasher.computePartialFileHash(filePath, req.bytesReceivedSoFar);
+                                    if (computedPartial.has_value() && computedPartial.value() == req.partialSha256) {
+                                        resumeValid = true;
+                                    }
+                                }
+
+                                protocol::v2::TransferAckMessage ack;
+                                if (resumeValid) {
+                                    ack.status = protocol::v2::AckStatus::ResumeAccepted;
+                                    ack.receivedBytes = req.bytesReceivedSoFar;
+                                    ack.message = "Resume accepted at byte offset " + std::to_string(req.bytesReceivedSoFar);
+                                    auto ackFrame = protocol::v2::buildFrame(protocol::v2::MessageType::TransferAck, ack.serialize());
+                                    channel->sendExact(ackFrame.data(), ackFrame.size());
+
+                                    in.seekg(static_cast<std::streamoff>(req.bytesReceivedSoFar), std::ios::beg);
+                                    sentBytes = req.bytesReceivedSoFar;
+                                    chunkIndex = static_cast<uint32_t>(sentBytes / chunkCapacity);
+                                } else {
+                                    ack.status = protocol::v2::AckStatus::ResumeRejected;
+                                    ack.receivedBytes = 0;
+                                    ack.message = "Resume rejected: offset or hash mismatch";
+                                    auto ackFrame = protocol::v2::buildFrame(protocol::v2::MessageType::TransferAck, ack.serialize());
+                                    channel->sendExact(ackFrame.data(), ackFrame.size());
+
+                                    in.seekg(0, std::ios::beg);
+                                    sentBytes = 0;
+                                    chunkIndex = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
     auto startTime = std::chrono::steady_clock::now();
     auto lastProgressReport = startTime;
 
@@ -368,6 +531,309 @@ bool TransferEngine::sendFileOverChannel(
         upd.progressPercentage = 100.0;
         upd.state = TransferState::Completed;
         upd.message = "Transfer verified and completed successfully!";
+        progressCb(upd);
+    }
+
+    return true;
+}
+
+bool TransferEngine::sendBatchOverChannel(
+    const std::string& taskId,
+    const std::vector<BatchFileItem>& items,
+    const std::string& batchName,
+    std::shared_ptr<ITransportChannel> channel,
+    const TransferOptions& options,
+    TransferProgressCallback progressCb,
+    std::atomic<bool>* cancelFlag,
+    std::string* outError
+) {
+    std::shared_ptr<std::atomic<bool>> effectiveCancel;
+    if (cancelFlag) {
+        effectiveCancel = std::shared_ptr<std::atomic<bool>>(cancelFlag, [](std::atomic<bool>*){});
+    } else {
+        effectiveCancel = std::make_shared<std::atomic<bool>>(false);
+    }
+    registerCancelToken(taskId, effectiveCancel);
+    struct CancelScopeCleaner {
+        TransferEngine* engine;
+        std::string tid;
+        ~CancelScopeCleaner() { if (engine) engine->unregisterCancelToken(tid); }
+    } cleaner{this, taskId};
+
+    auto isCancelled = [&]() -> bool {
+        return effectiveCancel->load();
+    };
+
+    auto reportError = [&](const std::string& err) {
+        if (outError) *outError = err;
+        if (progressCb) {
+            TransferProgressUpdate upd;
+            upd.taskId = taskId;
+            upd.state = TransferState::Failed;
+            upd.message = err;
+            progressCb(upd);
+        }
+        return false;
+    };
+
+    if (!channel || !channel->isConnected()) {
+        return reportError("Transport channel is null or not connected");
+    }
+
+    if (items.empty()) {
+        return reportError("Batch file list is empty");
+    }
+
+    std::string effectiveBatchName = batchName.empty() ? ("batch-" + taskId) : batchName;
+
+    // Validate all items exist and compute hashes
+    std::vector<BatchFileItem> preparedItems = items;
+    uint64_t totalBatchBytes = 0;
+    FileChunkHasher hasher;
+
+    for (size_t i = 0; i < preparedItems.size(); ++i) {
+        auto& item = preparedItems[i];
+        if (!isSafeRelativePath(item.relativePath)) {
+            return reportError("Unsafe relative path in batch: " + item.relativePath);
+        }
+        std::error_code ec;
+        std::filesystem::path p(item.localFilePath);
+        if (!std::filesystem::exists(p, ec) || !std::filesystem::is_regular_file(p, ec)) {
+            return reportError("File does not exist or is not regular: " + item.localFilePath);
+        }
+        uint64_t sz = std::filesystem::file_size(p, ec);
+        if (ec) {
+            return reportError("Cannot determine file size: " + item.localFilePath);
+        }
+        item.fileSize = sz;
+        totalBatchBytes += sz;
+
+        if (item.sha256Hex.empty()) {
+            if (isCancelled()) {
+                return reportError("Batch transfer cancelled before hashing");
+            }
+            if (progressCb) {
+                TransferProgressUpdate upd;
+                upd.taskId = taskId;
+                upd.fileName = item.relativePath;
+                upd.totalBytes = totalBatchBytes;
+                upd.bytesTransferred = 0;
+                upd.currentFileIndex = static_cast<uint32_t>(i + 1);
+                upd.totalFiles = static_cast<uint32_t>(preparedItems.size());
+                upd.state = TransferState::Connecting;
+                upd.message = "Hashing file " + std::to_string(i + 1) + " of " + std::to_string(preparedItems.size()) + ": " + item.relativePath;
+                progressCb(upd);
+            }
+            auto hOpt = hasher.computeFullFileHash(item.localFilePath);
+            if (!hOpt.has_value()) {
+                return reportError("Failed to hash file: " + item.localFilePath);
+            }
+            item.sha256Hex = hOpt.value();
+        }
+    }
+
+    if (totalBatchBytes > options.maxFileSizeLimit) {
+        return reportError("Total batch size exceeds maximum limit: " + std::to_string(totalBatchBytes) + " > " + std::to_string(options.maxFileSizeLimit));
+    }
+
+    // Prepare and send BatchManifest
+    protocol::v2::BatchManifestMessage manifest;
+    manifest.totalFiles = static_cast<uint32_t>(preparedItems.size());
+    manifest.totalBytes = totalBatchBytes;
+    manifest.batchId = effectiveBatchName;
+    for (size_t i = 0; i < preparedItems.size(); ++i) {
+        protocol::v2::BatchFileEntry entry;
+        entry.fileIndex = static_cast<uint32_t>(i);
+        entry.fileSize = preparedItems[i].fileSize;
+        entry.relativePath = preparedItems[i].relativePath;
+        entry.sha256Hex = preparedItems[i].sha256Hex;
+        manifest.files.push_back(std::move(entry));
+    }
+
+    auto manifestFrame = protocol::v2::buildFrame(protocol::v2::MessageType::BatchManifest, manifest.serialize());
+    if (!channel->sendExact(manifestFrame.data(), manifestFrame.size())) {
+        return reportError("Failed to send BatchManifest frame to receiver");
+    }
+
+    // Wait for receiver manifest acceptance ACK
+    uint8_t ackHdrBytes[16];
+    if (!channel->receiveExact(ackHdrBytes, 16, 30000, effectiveCancel.get())) {
+        return reportError("Connection timed out waiting for batch manifest acceptance ACK");
+    }
+    protocol::v2::FrameHeader ackFhdr;
+    std::string ackFhdrErr;
+    if (!protocol::v2::FrameHeader::deserialize(ackHdrBytes, ackFhdr, &ackFhdrErr)) {
+        return reportError("Failed to deserialize batch manifest ACK FrameHeader: " + ackFhdrErr);
+    }
+    if (ackFhdr.msgType == protocol::v2::MessageType::TransferCancel) {
+        return reportError("Batch transfer rejected or cancelled by receiver");
+    }
+    if (ackFhdr.msgType != protocol::v2::MessageType::TransferAck) {
+        return reportError("Expected TransferAck for BatchManifest, got message type: " + std::to_string(static_cast<int>(ackFhdr.msgType)));
+    }
+    std::vector<uint8_t> ackPayload(ackFhdr.payloadLength);
+    if (ackFhdr.payloadLength > 0) {
+        if (!channel->receiveExact(ackPayload.data(), ackFhdr.payloadLength, 10000, effectiveCancel.get())) {
+            return reportError("Truncated batch manifest ACK payload");
+        }
+    }
+    protocol::v2::TransferAckMessage manifestAck;
+    std::string ackErr;
+    if (!protocol::v2::TransferAckMessage::deserialize(ackPayload.data(), ackPayload.size(), manifestAck, &ackErr)) {
+        return reportError("Failed to parse batch manifest TransferAckMessage: " + ackErr);
+    }
+    if (manifestAck.status != protocol::v2::AckStatus::Success) {
+        return reportError("Receiver rejected batch: " + manifestAck.message);
+    }
+
+    // Stream each file in the batch
+    size_t chunkCapacity = options.chunkSize > 0 ? options.chunkSize : (64 * 1024);
+    if (chunkCapacity > 4 * 1024 * 1024) chunkCapacity = 4 * 1024 * 1024;
+    std::vector<uint8_t> chunkBuf(chunkCapacity);
+
+    uint64_t sentBatchBytes = 0;
+    auto batchStartTime = std::chrono::steady_clock::now();
+    auto lastProgressReport = batchStartTime;
+
+    for (size_t i = 0; i < preparedItems.size(); ++i) {
+        const auto& item = preparedItems[i];
+        if (isCancelled()) {
+            protocol::v2::TransferCancelMessage cmsg;
+            cmsg.errorCode = 2;
+            cmsg.reason = "Batch transfer cancelled by user";
+            auto cancelFrame = protocol::v2::buildFrame(protocol::v2::MessageType::TransferCancel, cmsg.serialize());
+            channel->sendExact(cancelFrame.data(), cancelFrame.size());
+            channel->close();
+            return reportError("Batch transfer cancelled by user");
+        }
+
+        // 1. Send FileHeader for this file
+        protocol::v2::FileHeaderMessage fhdr;
+        fhdr.fileSize = item.fileSize;
+        fhdr.chunkSize = static_cast<uint32_t>(chunkCapacity);
+        fhdr.flags = 0;
+        fhdr.fileName = item.relativePath;
+        fhdr.sha256Hex = item.sha256Hex;
+        auto headerFrame = protocol::v2::buildFrame(protocol::v2::MessageType::FileHeader, fhdr.serialize());
+        if (!channel->sendExact(headerFrame.data(), headerFrame.size())) {
+            return reportError("Failed to send FileHeader for: " + item.relativePath);
+        }
+
+        std::ifstream in(item.localFilePath, std::ios::binary);
+        if (!in.is_open()) {
+            return reportError("Failed to open local file: " + item.localFilePath);
+        }
+
+        uint64_t sentFileBytes = 0;
+        uint32_t chunkIndex = 0;
+
+        while (sentFileBytes < item.fileSize && in) {
+            if (isCancelled()) {
+                protocol::v2::TransferCancelMessage cmsg;
+                cmsg.errorCode = 2;
+                cmsg.reason = "Batch transfer cancelled by user";
+                auto cancelFrame = protocol::v2::buildFrame(protocol::v2::MessageType::TransferCancel, cmsg.serialize());
+                channel->sendExact(cancelFrame.data(), cancelFrame.size());
+                channel->close();
+                return reportError("Batch transfer cancelled by user");
+            }
+
+            in.read(reinterpret_cast<char*>(chunkBuf.data()), static_cast<std::streamsize>(chunkBuf.size()));
+            size_t count = static_cast<size_t>(in.gcount());
+            if (count == 0) break;
+
+            protocol::v2::ChunkDataMessage cmsg;
+            cmsg.offset = sentFileBytes;
+            cmsg.chunkIndex = chunkIndex++;
+            cmsg.chunkCrc32 = protocol::v2::computeCrc32(chunkBuf.data(), count);
+            cmsg.data.assign(chunkBuf.data(), chunkBuf.data() + count);
+
+            auto chunkFrame = protocol::v2::buildFrame(protocol::v2::MessageType::ChunkData, cmsg.serialize());
+            if (!channel->sendExact(chunkFrame.data(), chunkFrame.size())) {
+                return reportError("Connection interrupted while sending chunk for: " + item.relativePath);
+            }
+
+            sentFileBytes += count;
+            sentBatchBytes += count;
+
+            auto now = std::chrono::steady_clock::now();
+            double elapsedTotal = std::chrono::duration<double>(now - batchStartTime).count();
+            double speedBps = elapsedTotal > 0.05 ? (static_cast<double>(sentBatchBytes) / elapsedTotal) : 0.0;
+
+            if (options.speedLimitKbps > 0) {
+                double maxSpeedBps = static_cast<double>(options.speedLimitKbps) * 1024.0;
+                if (speedBps > maxSpeedBps && maxSpeedBps > 0.0) {
+                    double expectedSeconds = static_cast<double>(sentBatchBytes) / maxSpeedBps;
+                    double delay = expectedSeconds - elapsedTotal;
+                    if (delay > 0.001) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(delay * 1000.0)));
+                    }
+                }
+            }
+
+            if (progressCb && std::chrono::duration<double>(now - lastProgressReport).count() >= 0.1) {
+                lastProgressReport = now;
+                TransferProgressUpdate upd;
+                upd.taskId = taskId;
+                upd.fileName = item.relativePath;
+                upd.totalBytes = totalBatchBytes;
+                upd.bytesTransferred = sentBatchBytes;
+                upd.progressPercentage = totalBatchBytes > 0 ? ((static_cast<double>(sentBatchBytes) / static_cast<double>(totalBatchBytes)) * 100.0) : 100.0;
+                upd.speedBytesPerSec = speedBps;
+                upd.state = TransferState::Transferring;
+                upd.message = "Streaming file " + std::to_string(i + 1) + " of " + std::to_string(preparedItems.size()) + ": " + item.relativePath;
+                upd.currentFileIndex = static_cast<uint32_t>(i + 1);
+                upd.totalFiles = static_cast<uint32_t>(preparedItems.size());
+                progressCb(upd);
+            }
+        }
+        in.close();
+
+        if (sentFileBytes < item.fileSize) {
+            return reportError("File read ended prematurely for: " + item.relativePath);
+        }
+
+        // Wait for receiver ACK for this file
+        uint8_t fileAckHdrBytes[16];
+        if (!channel->receiveExact(fileAckHdrBytes, 16, 30000, effectiveCancel.get())) {
+            return reportError("Connection dropped waiting for file verification ACK: " + item.relativePath);
+        }
+        protocol::v2::FrameHeader fileAckFhdr;
+        std::string fileAckFhdrErr;
+        if (!protocol::v2::FrameHeader::deserialize(fileAckHdrBytes, fileAckFhdr, &fileAckFhdrErr)) {
+            return reportError("Failed to deserialize file ACK FrameHeader: " + fileAckFhdrErr);
+        }
+        std::vector<uint8_t> fileAckPayload(fileAckFhdr.payloadLength);
+        if (fileAckFhdr.payloadLength > 0) {
+            if (!channel->receiveExact(fileAckPayload.data(), fileAckFhdr.payloadLength, 10000, effectiveCancel.get())) {
+                return reportError("Truncated file ACK payload for: " + item.relativePath);
+            }
+        }
+        protocol::v2::TransferAckMessage fileAckMsg;
+        std::string fileAckErr;
+        if (!protocol::v2::TransferAckMessage::deserialize(fileAckPayload.data(), fileAckPayload.size(), fileAckMsg, &fileAckErr)) {
+            return reportError("Failed to parse file TransferAckMessage: " + fileAckErr);
+        }
+        if (fileAckMsg.status != protocol::v2::AckStatus::Success) {
+            return reportError("Receiver rejected file " + item.relativePath + ": " + fileAckMsg.message);
+        }
+    }
+
+    if (options.closeChannelOnCompletion) {
+        channel->close();
+    }
+
+    if (progressCb) {
+        TransferProgressUpdate upd;
+        upd.taskId = taskId;
+        upd.fileName = effectiveBatchName;
+        upd.totalBytes = totalBatchBytes;
+        upd.bytesTransferred = sentBatchBytes;
+        upd.progressPercentage = 100.0;
+        upd.state = TransferState::Completed;
+        upd.message = "Batch transfer verified and completed successfully!";
+        upd.currentFileIndex = static_cast<uint32_t>(preparedItems.size());
+        upd.totalFiles = static_cast<uint32_t>(preparedItems.size());
         progressCb(upd);
     }
 
@@ -571,6 +1037,7 @@ bool TransferEngine::receiveFileOverChannel(
     std::string fileName;
     uint64_t fileSize = 0;
     std::string expectedHash;
+    protocol::v2::FileHeaderMessage fileHeaderMsg;
 
     if (isV2) {
         uint8_t header16[16];
@@ -583,8 +1050,314 @@ bool TransferEngine::receiveFileOverChannel(
         if (!protocol::v2::FrameHeader::deserialize(header16, fhdr, &hdrErr)) {
             return finishWithFailure("", "Invalid WireProtocol v2 frame header: " + hdrErr);
         }
+        if (fhdr.msgType == protocol::v2::MessageType::BatchManifest) {
+            std::vector<uint8_t> payload(fhdr.payloadLength);
+            if (fhdr.payloadLength > 0) {
+                if (!channel->receiveExact(payload.data(), fhdr.payloadLength, 10000, effectiveCancel.get())) {
+                    return finishWithFailure("", "Failed to receive BatchManifest payload");
+                }
+            }
+            if (fhdr.crc32OrSeq != 0) {
+                uint32_t actualCrc = protocol::v2::computeCrc32(payload.data(), payload.size());
+                if (actualCrc != fhdr.crc32OrSeq) {
+                    return finishWithFailure("", "BatchManifest CRC-32 checksum mismatch");
+                }
+            }
+            protocol::v2::BatchManifestMessage manifest;
+            std::string manifestErr;
+            if (!protocol::v2::BatchManifestMessage::deserialize(payload.data(), payload.size(), manifest, &manifestErr)) {
+                return finishWithFailure("", "Failed to parse BatchManifestMessage: " + manifestErr);
+            }
+            if (manifest.totalFiles == 0 || manifest.files.size() != manifest.totalFiles) {
+                return finishWithFailure("", "BatchManifest contains invalid file count: " + std::to_string(manifest.totalFiles));
+            }
+
+            // Path safety check for all files in manifest
+            for (const auto& entry : manifest.files) {
+                if (!isSafeRelativePath(entry.relativePath)) {
+                    protocol::v2::TransferAckMessage rejAck;
+                    rejAck.status = protocol::v2::AckStatus::PathUnsafe;
+                    rejAck.message = "Batch rejected due to unsafe relative path: " + entry.relativePath;
+                    auto rejFrame = protocol::v2::buildFrame(protocol::v2::MessageType::TransferAck, rejAck.serialize());
+                    channel->sendExact(rejFrame.data(), rejFrame.size());
+                    return finishWithFailure(manifest.batchId, rejAck.message);
+                }
+            }
+
+            std::filesystem::path canonicalBase = std::filesystem::weakly_canonical(std::filesystem::path(saveDirectory));
+
+            // Check available disk space
+            std::error_code ec;
+            auto space = std::filesystem::space(canonicalBase, ec);
+            if (!ec && space.available < manifest.totalBytes) {
+                return finishWithFailure(manifest.batchId, "Insufficient disk space for batch: available=" + std::to_string(space.available) + ", required=" + std::to_string(manifest.totalBytes));
+            }
+
+            // User confirmation if callback provided
+            if (onIncoming) {
+                std::string displayName = manifest.batchId.empty() ? ("Batch (" + std::to_string(manifest.totalFiles) + " files)") : manifest.batchId;
+                bool accepted = onIncoming(taskId, displayName, manifest.totalBytes, senderAddr);
+                if (!accepted) {
+                    protocol::v2::TransferAckMessage rejAck;
+                    rejAck.status = protocol::v2::AckStatus::Rejected;
+                    rejAck.message = "Batch transfer rejected by local user";
+                    auto rejFrame = protocol::v2::buildFrame(protocol::v2::MessageType::TransferAck, rejAck.serialize());
+                    channel->sendExact(rejFrame.data(), rejFrame.size());
+                    return finishWithFailure(manifest.batchId, "Batch transfer rejected by local user");
+                }
+            }
+
+            // Send acceptance ACK for manifest
+            protocol::v2::TransferAckMessage manifestAck;
+            manifestAck.status = protocol::v2::AckStatus::Success;
+            manifestAck.receivedBytes = 0;
+            manifestAck.message = "Batch manifest accepted";
+            auto ackFrame = protocol::v2::buildFrame(protocol::v2::MessageType::TransferAck, manifestAck.serialize());
+            if (!channel->sendExact(ackFrame.data(), ackFrame.size())) {
+                return finishWithFailure(manifest.batchId, "Failed to send batch manifest acceptance ACK");
+            }
+
+            // Receive each file in the batch
+            uint64_t totalBatchReceived = 0;
+            auto batchStartTime = std::chrono::steady_clock::now();
+            auto lastProgressReport = batchStartTime;
+
+            for (uint32_t fileIdx = 0; fileIdx < manifest.totalFiles; ++fileIdx) {
+                if (isCancelled()) {
+                    return finishWithFailure(manifest.batchId, "Transfer cancelled by receiver");
+                }
+
+                // 1. Receive FileHeader for file fileIdx
+                uint8_t fileHdrBytes[16];
+                if (!channel->receiveExact(fileHdrBytes, 16, 15000, effectiveCancel.get())) {
+                    return finishWithFailure(manifest.batchId, "Interrupted while reading FileHeader for file index " + std::to_string(fileIdx));
+                }
+                protocol::v2::FrameHeader fileFhdr;
+                std::string fileFhdrErr;
+                if (!protocol::v2::FrameHeader::deserialize(fileHdrBytes, fileFhdr, &fileFhdrErr)) {
+                    return finishWithFailure(manifest.batchId, "Invalid FileHeader frame for file index " + std::to_string(fileIdx) + ": " + fileFhdrErr);
+                }
+                if (fileFhdr.msgType == protocol::v2::MessageType::TransferCancel) {
+                    return finishWithFailure(manifest.batchId, "Transfer cancelled by sender");
+                }
+                if (fileFhdr.msgType != protocol::v2::MessageType::FileHeader) {
+                    return finishWithFailure(manifest.batchId, "Expected FileHeader for file index " + std::to_string(fileIdx) + ", got " + std::to_string(static_cast<int>(fileFhdr.msgType)));
+                }
+
+                std::vector<uint8_t> filePayload(fileFhdr.payloadLength);
+                if (fileFhdr.payloadLength > 0) {
+                    if (!channel->receiveExact(filePayload.data(), fileFhdr.payloadLength, 15000, effectiveCancel.get())) {
+                        return finishWithFailure(manifest.batchId, "Failed to receive FileHeader payload for file index " + std::to_string(fileIdx));
+                    }
+                }
+                if (fileFhdr.crc32OrSeq != 0) {
+                    uint32_t actualCrc = protocol::v2::computeCrc32(filePayload.data(), filePayload.size());
+                    if (actualCrc != fileFhdr.crc32OrSeq) {
+                        return finishWithFailure(manifest.batchId, "FileHeader CRC mismatch for file index " + std::to_string(fileIdx));
+                    }
+                }
+                protocol::v2::FileHeaderMessage currentFhdr;
+                std::string currentFhdrErr;
+                if (!protocol::v2::FileHeaderMessage::deserialize(filePayload.data(), filePayload.size(), currentFhdr, &currentFhdrErr)) {
+                    return finishWithFailure(manifest.batchId, "Failed to parse FileHeaderMessage for file index " + std::to_string(fileIdx) + ": " + currentFhdrErr);
+                }
+
+                if (currentFhdr.fileName != manifest.files[fileIdx].relativePath) {
+                    return finishWithFailure(manifest.batchId, "Manifest mismatch: expected " + manifest.files[fileIdx].relativePath + ", got " + currentFhdr.fileName);
+                }
+
+                std::filesystem::path destPath = canonicalBase / std::filesystem::path(currentFhdr.fileName);
+                std::filesystem::path canonicalDest = std::filesystem::weakly_canonical(destPath);
+                auto rel = std::filesystem::relative(canonicalDest, canonicalBase);
+                if (rel.empty() || rel.string().rfind("..", 0) == 0 || canonicalDest == canonicalBase) {
+                    return finishWithFailure(currentFhdr.fileName, "Path traversal attempt detected in batch file: " + currentFhdr.fileName);
+                }
+
+                // Handle duplicate file names if needed
+                if (std::filesystem::exists(destPath, ec)) {
+                    if (options.autoRenameDuplicates) {
+                        std::string stem = destPath.stem().string();
+                        std::string ext = destPath.extension().string();
+                        int counter = 1;
+                        while (counter < 10000) {
+                            std::filesystem::path candidate = destPath.parent_path() / (stem + " (" + std::to_string(counter) + ")" + ext);
+                            if (!std::filesystem::exists(candidate, ec)) {
+                                destPath = candidate;
+                                break;
+                            }
+                            counter++;
+                        }
+                    }
+                }
+
+                // Ensure parent directory exists
+                std::filesystem::create_directories(destPath.parent_path(), ec);
+                if (ec) {
+                    return finishWithFailure(currentFhdr.fileName, "Failed to create directory structure: " + destPath.parent_path().string());
+                }
+
+                // Temporary .part file in destination directory
+                std::filesystem::path partPath = destPath.parent_path() / ("." + destPath.filename().string() + "." + taskId + ".part");
+                std::filesystem::remove(partPath, ec);
+
+                std::ofstream outFile(partPath, std::ios::binary);
+                if (!outFile.is_open()) {
+                    return finishWithFailure(currentFhdr.fileName, "Failed to open temporary file: " + partPath.string());
+                }
+
+                landrop::crypto::Sha256 fileHasher;
+                uint64_t fileReceived = 0;
+                uint32_t expectedChunkIndex = 0;
+                uint64_t expectedOffset = 0;
+
+                while (fileReceived < currentFhdr.fileSize) {
+                    if (isCancelled()) {
+                        outFile.close();
+                        std::filesystem::remove(partPath, ec);
+                        return finishWithFailure(manifest.batchId, "Transfer cancelled by receiver");
+                    }
+
+                    uint8_t chunkHdrBytes[16];
+                    if (!channel->receiveExact(chunkHdrBytes, 16, 15000, effectiveCancel.get())) {
+                        outFile.close();
+                        std::filesystem::remove(partPath, ec);
+                        return finishWithFailure(currentFhdr.fileName, "Interrupted while reading ChunkData frame header");
+                    }
+                    protocol::v2::FrameHeader chunkFhdr;
+                    std::string chunkHdrErr;
+                    if (!protocol::v2::FrameHeader::deserialize(chunkHdrBytes, chunkFhdr, &chunkHdrErr)) {
+                        outFile.close();
+                        std::filesystem::remove(partPath, ec);
+                        return finishWithFailure(currentFhdr.fileName, "Failed to deserialize ChunkData frame header: " + chunkHdrErr);
+                    }
+                    if (chunkFhdr.msgType == protocol::v2::MessageType::TransferCancel) {
+                        outFile.close();
+                        std::filesystem::remove(partPath, ec);
+                        return finishWithFailure(manifest.batchId, "Transfer cancelled by sender");
+                    }
+                    if (chunkFhdr.msgType != protocol::v2::MessageType::ChunkData) {
+                        outFile.close();
+                        std::filesystem::remove(partPath, ec);
+                        return finishWithFailure(currentFhdr.fileName, "Expected ChunkData frame, got " + std::to_string(static_cast<int>(chunkFhdr.msgType)));
+                    }
+
+                    std::vector<uint8_t> chunkPayload(chunkFhdr.payloadLength);
+                    if (!channel->receiveExact(chunkPayload.data(), chunkFhdr.payloadLength, 30000, effectiveCancel.get())) {
+                        outFile.close();
+                        std::filesystem::remove(partPath, ec);
+                        return finishWithFailure(currentFhdr.fileName, "Interrupted while receiving ChunkData payload");
+                    }
+                    if (chunkFhdr.crc32OrSeq != 0) {
+                        uint32_t actualCrc = protocol::v2::computeCrc32(chunkPayload.data(), chunkPayload.size());
+                        if (actualCrc != chunkFhdr.crc32OrSeq) {
+                            outFile.close();
+                            std::filesystem::remove(partPath, ec);
+                            return finishWithFailure(currentFhdr.fileName, "Chunk frame CRC-32 checksum mismatch");
+                        }
+                    }
+
+                    protocol::v2::ChunkDataMessage cmsg;
+                    std::string cmsgErr;
+                    if (!protocol::v2::ChunkDataMessage::deserialize(chunkPayload.data(), chunkPayload.size(), cmsg, &cmsgErr)) {
+                        outFile.close();
+                        std::filesystem::remove(partPath, ec);
+                        return finishWithFailure(currentFhdr.fileName, "Failed to parse ChunkDataMessage: " + cmsgErr);
+                    }
+
+                    if (cmsg.chunkIndex != expectedChunkIndex || cmsg.offset != expectedOffset) {
+                        outFile.close();
+                        std::filesystem::remove(partPath, ec);
+                        return finishWithFailure(currentFhdr.fileName, "Chunk sequence mismatch");
+                    }
+
+                    outFile.write(reinterpret_cast<const char*>(cmsg.data.data()), static_cast<std::streamsize>(cmsg.data.size()));
+                    if (!outFile.good()) {
+                        outFile.close();
+                        std::filesystem::remove(partPath, ec);
+                        return finishWithFailure(currentFhdr.fileName, "Disk write error");
+                    }
+
+                    fileHasher.update(cmsg.data.data(), cmsg.data.size());
+                    fileReceived += cmsg.data.size();
+                    totalBatchReceived += cmsg.data.size();
+                    expectedChunkIndex++;
+                    expectedOffset += cmsg.data.size();
+
+                    auto now = std::chrono::steady_clock::now();
+                    double elapsed = std::chrono::duration<double>(now - batchStartTime).count();
+                    double speedBps = elapsed > 0.05 ? (static_cast<double>(totalBatchReceived) / elapsed) : 0.0;
+
+                    if (progressCb && std::chrono::duration<double>(now - lastProgressReport).count() >= 0.1) {
+                        lastProgressReport = now;
+                        TransferProgressUpdate upd;
+                        upd.taskId = taskId;
+                        upd.fileName = currentFhdr.fileName;
+                        upd.totalBytes = manifest.totalBytes;
+                        upd.bytesTransferred = totalBatchReceived;
+                        upd.progressPercentage = manifest.totalBytes > 0 ? ((static_cast<double>(totalBatchReceived) / static_cast<double>(manifest.totalBytes)) * 100.0) : 100.0;
+                        upd.speedBytesPerSec = speedBps;
+                        upd.state = TransferState::Transferring;
+                        upd.message = "Receiving file " + std::to_string(fileIdx + 1) + " of " + std::to_string(manifest.totalFiles) + ": " + currentFhdr.fileName;
+                        upd.currentFileIndex = fileIdx + 1;
+                        upd.totalFiles = manifest.totalFiles;
+                        progressCb(upd);
+                    }
+                }
+
+                outFile.close();
+
+                // Check file SHA-256
+                std::string computedHash = fileHasher.finalize();
+                bool hashMatch = (computedHash.size() == currentFhdr.sha256Hex.size()) &&
+                    std::equal(computedHash.begin(), computedHash.end(), currentFhdr.sha256Hex.begin(),
+                               [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); });
+                if (!hashMatch) {
+                    std::filesystem::remove(partPath, ec);
+                    return finishWithFailure(currentFhdr.fileName, "Integrity verification failed for " + currentFhdr.fileName);
+                }
+
+                std::filesystem::rename(partPath, destPath, ec);
+                if (ec) {
+                    std::filesystem::remove(partPath, ec);
+                    return finishWithFailure(currentFhdr.fileName, "Failed to finalize file: " + ec.message());
+                }
+
+                // Send ACK for this file
+                protocol::v2::TransferAckMessage fileAck;
+                fileAck.status = protocol::v2::AckStatus::Success;
+                fileAck.receivedBytes = currentFhdr.fileSize;
+                fileAck.message = "File verified";
+                auto ackFileFrame = protocol::v2::buildFrame(protocol::v2::MessageType::TransferAck, fileAck.serialize());
+                channel->sendExact(ackFileFrame.data(), ackFileFrame.size());
+            }
+
+            if (options.closeChannelOnCompletion) {
+                channel->close();
+            }
+
+            if (progressCb) {
+                TransferProgressUpdate upd;
+                upd.taskId = taskId;
+                upd.fileName = manifest.batchId;
+                upd.totalBytes = manifest.totalBytes;
+                upd.bytesTransferred = totalBatchReceived;
+                upd.progressPercentage = 100.0;
+                upd.state = TransferState::Completed;
+                upd.message = "Batch received and verified successfully (" + std::to_string(manifest.totalFiles) + " files)";
+                upd.currentFileIndex = manifest.totalFiles;
+                upd.totalFiles = manifest.totalFiles;
+                progressCb(upd);
+            }
+
+            if (onFinished) {
+                onFinished(taskId, manifest.batchId, true, saveDirectory, "");
+            }
+
+            return true;
+        }
+
         if (fhdr.msgType != protocol::v2::MessageType::FileHeader) {
-            return finishWithFailure("", "Expected FileHeader frame, got message type: " + std::to_string(static_cast<int>(fhdr.msgType)));
+            return finishWithFailure("", "Expected FileHeader or BatchManifest frame, got message type: " + std::to_string(static_cast<int>(fhdr.msgType)));
         }
         std::vector<uint8_t> payload(fhdr.payloadLength);
         if (fhdr.payloadLength > 0) {
@@ -598,7 +1371,6 @@ bool TransferEngine::receiveFileOverChannel(
                 return finishWithFailure("", "FileHeader CRC-32 checksum mismatch");
             }
         }
-        protocol::v2::FileHeaderMessage fileHeaderMsg;
         std::string msgErr;
         if (!protocol::v2::FileHeaderMessage::deserialize(payload.data(), payload.size(), fileHeaderMsg, &msgErr)) {
             return finishWithFailure("", "Failed to parse FileHeaderMessage: " + msgErr);
@@ -693,20 +1465,87 @@ bool TransferEngine::receiveFileOverChannel(
         }
     }
 
-    // SEC-05: Task-unique staging part file to avoid collision
-    std::filesystem::path partPath = canonicalBase / ("." + cleanName.string() + "." + taskId + ".part");
-    std::filesystem::remove(partPath, ec);
+    // Resilient resumption staging: keep consistent .part file path
+    std::filesystem::path partPath = canonicalBase / ("." + cleanName.string() + ".part");
+    bool canResume = isV2 && ((fileHeaderMsg.flags & protocol::v2::FileHeaderFlags::RESUME_SUPPORTED) != 0);
 
-    std::ofstream outFile(partPath, std::ios::binary);
-    if (!outFile.is_open()) {
-        return finishWithFailure(fileName, "Failed to open temporary file: " + partPath.string());
-    }
-
-    // DEBT-09: Single-pass in-flight SHA-256 calculation to avoid double disk read
     landrop::crypto::Sha256 inFlightHasher;
     uint64_t totalReceived = 0;
     uint32_t expectedChunkIndex = 0;
     uint64_t expectedOffset = 0;
+
+    bool didResume = false;
+    if (canResume && std::filesystem::exists(partPath, ec)) {
+        uint64_t existingBytes = std::filesystem::file_size(partPath, ec);
+        uint32_t chunkSize = fileHeaderMsg.chunkSize > 0 ? fileHeaderMsg.chunkSize : (64 * 1024);
+        uint64_t alignedOffset = (existingBytes / chunkSize) * chunkSize;
+        if (alignedOffset > 0 && alignedOffset < fileSize) {
+            if (existingBytes > alignedOffset) {
+                std::filesystem::resize_file(partPath, alignedOffset, ec);
+            }
+            FileChunkHasher hasher;
+            auto partialHashOpt = hasher.computePartialFileHash(partPath.string(), alignedOffset);
+            if (partialHashOpt.has_value()) {
+                protocol::v2::ResumeRequestMessage req;
+                req.fileHash = fileHeaderMsg.sha256Hex;
+                req.bytesReceivedSoFar = alignedOffset;
+                req.partialSha256 = partialHashOpt.value();
+                auto reqFrame = protocol::v2::buildFrame(protocol::v2::MessageType::ResumeRequest, req.serialize());
+                if (channel->sendExact(reqFrame.data(), reqFrame.size())) {
+                    uint8_t ackHdrBytes[16];
+                    if (channel->receiveExact(ackHdrBytes, 16, 5000, effectiveCancel.get())) {
+                        protocol::v2::FrameHeader ackFhdr;
+                        std::string ackFhdrErr;
+                        if (protocol::v2::FrameHeader::deserialize(ackHdrBytes, ackFhdr, &ackFhdrErr)) {
+                            if (ackFhdr.msgType == protocol::v2::MessageType::TransferAck) {
+                                std::vector<uint8_t> ackPayload(ackFhdr.payloadLength);
+                                if (ackFhdr.payloadLength == 0 || channel->receiveExact(ackPayload.data(), ackFhdr.payloadLength, 5000, effectiveCancel.get())) {
+                                    protocol::v2::TransferAckMessage ackMsg;
+                                    std::string ackErr;
+                                    if (protocol::v2::TransferAckMessage::deserialize(ackPayload.data(), ackPayload.size(), ackMsg, &ackErr)) {
+                                        if (ackMsg.status == protocol::v2::AckStatus::ResumeAccepted && ackMsg.receivedBytes == alignedOffset) {
+                                            didResume = true;
+                                            totalReceived = alignedOffset;
+                                            expectedOffset = alignedOffset;
+                                            expectedChunkIndex = static_cast<uint32_t>(alignedOffset / chunkSize);
+                                            // Seed inFlightHasher with the verified partial content
+                                            std::ifstream preIn(partPath, std::ios::binary);
+                                            if (preIn.is_open()) {
+                                                std::vector<uint8_t> preBuf(64 * 1024);
+                                                uint64_t preRemain = alignedOffset;
+                                                while (preRemain > 0 && preIn) {
+                                                    size_t toRead = static_cast<size_t>(std::min<uint64_t>(preRemain, preBuf.size()));
+                                                    preIn.read(reinterpret_cast<char*>(preBuf.data()), static_cast<std::streamsize>(toRead));
+                                                    size_t readCount = static_cast<size_t>(preIn.gcount());
+                                                    if (readCount == 0) break;
+                                                    inFlightHasher.update(preBuf.data(), readCount);
+                                                    preRemain -= readCount;
+                                                }
+                                                preIn.close();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    std::ofstream outFile;
+    if (didResume) {
+        outFile.open(partPath, std::ios::binary | std::ios::in | std::ios::out | std::ios::ate);
+    } else {
+        std::filesystem::remove(partPath, ec);
+        outFile.open(partPath, std::ios::binary | std::ios::trunc);
+    }
+
+    if (!outFile.is_open()) {
+        return finishWithFailure(fileName, "Failed to open temporary file: " + partPath.string());
+    }
+
     auto startTime = std::chrono::steady_clock::now();
     auto lastProgressReport = startTime;
     constexpr uint32_t kMaxChunkSize = 4 * 1024 * 1024;
@@ -717,16 +1556,19 @@ bool TransferEngine::receiveFileOverChannel(
         upd.taskId = taskId;
         upd.fileName = fileName;
         upd.totalBytes = fileSize;
-        upd.bytesTransferred = 0;
+        upd.bytesTransferred = totalReceived;
+        upd.progressPercentage = fileSize > 0 ? ((static_cast<double>(totalReceived) / static_cast<double>(fileSize)) * 100.0) : 0.0;
         upd.state = TransferState::Transferring;
-        upd.message = "Receiving chunks...";
+        upd.message = didResume ? ("Resuming from byte " + std::to_string(totalReceived) + "...") : "Receiving chunks...";
         progressCb(upd);
     }
 
     while (totalReceived < fileSize) {
         if (isCancelled()) {
             outFile.close();
-            std::filesystem::remove(partPath, ec);
+            if (!canResume) {
+                std::filesystem::remove(partPath, ec);
+            }
             return finishWithFailure(fileName, "Transfer cancelled by receiver");
         }
 
@@ -734,7 +1576,9 @@ bool TransferEngine::receiveFileOverChannel(
             uint8_t chunkHdrBytes[16];
             if (!channel->receiveExact(chunkHdrBytes, 16, 15000, effectiveCancel.get())) {
                 outFile.close();
-                std::filesystem::remove(partPath, ec);
+                if (!canResume) {
+                    std::filesystem::remove(partPath, ec);
+                }
                 return finishWithFailure(fileName, "Interrupted while reading ChunkData frame header");
             }
             protocol::v2::FrameHeader chunkFhdr;
@@ -865,11 +1709,15 @@ bool TransferEngine::receiveFileOverChannel(
         return finishWithFailure(fileName, "Integrity verification failed: SHA-256 mismatch (expected=" + expectedHash + ", actual=" + computedHash + ")");
     }
 
-    // Atomic rename .part -> destPath
+    // Atomic rename .part -> destPath (with cross-device fallback)
     std::filesystem::rename(partPath, destPath, ec);
     if (ec) {
-        std::filesystem::remove(partPath, ec);
-        return finishWithFailure(fileName, "Failed to finalize received file: " + ec.message());
+        ec.clear();
+        std::filesystem::copy_file(partPath, destPath, std::filesystem::copy_options::overwrite_existing, ec);
+        std::filesystem::remove(partPath);
+        if (ec) {
+            return finishWithFailure(fileName, "Failed to finalize received file: " + ec.message());
+        }
     }
 
     // Send positive ACK (WireProtocol v2 TransferAckMessage or legacy 1-byte ACK)

@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { FileStreamSender } from '../../src/core/streaming/FileStreamSender';
-import { FileStreamReceiver, sanitizeFileName } from '../../src/core/streaming/FileStreamReceiver';
+import { FileStreamReceiver, sanitizeFileName, sanitizeRelativePath } from '../../src/core/streaming/FileStreamReceiver';
 import { AckStatus } from '../../src/core/protocol/WireProtocolV2';
 import { Sha256Stream } from '../../src/core/crypto/Sha256';
+import { createStorageSink } from '../../src/core/streaming/StorageSink';
 
 // In-memory duplex mock of WebRTC RTCDataChannel
 class MockDataChannel {
@@ -379,5 +380,87 @@ describe('FileStreamSender & FileStreamReceiver Suite (DEF-13)', () => {
     expect(receiverAcksSent.length).toBe(1);
     expect(receiverAcksSent[0].status).toBe(AckStatus.Success);
     expect(receiverAcksSent[0].receivedBytes).toBe(128n);
+  });
+
+  it('TC-STR-11: sanitizeRelativePath rejects traversal, reserved devices, and validates clean nested paths', () => {
+    // Valid relative paths
+    expect(sanitizeRelativePath('photo.jpg')).toBe('photo.jpg');
+    expect(sanitizeRelativePath('sub/folder/file.txt')).toBe('sub/folder/file.txt');
+    expect(sanitizeRelativePath('deep\\nested\\doc.pdf')).toBe('deep/nested/doc.pdf');
+
+    // Traversal and unsafe prefixes
+    expect(() => sanitizeRelativePath('')).toThrow();
+    expect(() => sanitizeRelativePath('/root.txt')).toThrow();
+    expect(() => sanitizeRelativePath('sub/')).toThrow();
+    expect(() => sanitizeRelativePath('sub//file.txt')).toThrow();
+    expect(() => sanitizeRelativePath('../escape.txt')).toThrow();
+    expect(() => sanitizeRelativePath('sub/../escape.txt')).toThrow();
+    expect(() => sanitizeRelativePath('sub/./escape.txt')).toThrow();
+    expect(() => sanitizeRelativePath('C:/Windows/System32')).toThrow();
+    expect(() => sanitizeRelativePath('docs/NUL.txt')).toThrow();
+    expect(() => sanitizeRelativePath('docs/COM1')).toThrow();
+  });
+
+  it('TC-STR-12: Multi-file batch transfer with directory structure (sendBatch & receiveTransfer)', async () => {
+    const [senderCh, receiverCh] = createChannelPair();
+    const sender = new FileStreamSender(senderCh as any, { chunkSize: 32 });
+    const receiver = new FileStreamReceiver(receiverCh as any);
+
+    const f1Data = new TextEncoder().encode('File 1 root text');
+    const f2Data = new TextEncoder().encode('File 2 in subfolder text');
+    const f3Data = new Uint8Array(100).fill(77);
+
+    const f1Sha = new Sha256Stream().update(f1Data).digestHex();
+    const f2Sha = new Sha256Stream().update(f2Data).digestHex();
+    const f3Sha = new Sha256Stream().update(f3Data).digestHex();
+
+    const items = [
+      { file: new File([f1Data], 'doc1.txt'), relativePath: 'doc1.txt' },
+      { file: new File([f2Data], 'doc2.txt'), relativePath: 'sub/doc2.txt' },
+      { file: new File([f3Data], 'doc3.bin'), relativePath: 'sub/deep/doc3.bin' },
+    ];
+
+    senderCh.addEventListener('open', () => {}); // ready
+    receiverCh.addEventListener('open', () => {});
+
+    const [acks, transferResult] = await Promise.all([
+      sender.sendBatch(items, 'test-batch-001'),
+      receiver.receiveTransfer(),
+    ]);
+
+    expect(acks.length).toBe(3);
+    for (const a of acks) {
+      expect(a.status).toBe(AckStatus.Success);
+    }
+
+    expect(transferResult.isBatch).toBe(true);
+    expect(transferResult.batchId).toBe('test-batch-001');
+    expect(transferResult.files.length).toBe(3);
+
+    expect(transferResult.files[0].fileName).toBe('doc1.txt');
+    expect(transferResult.files[0].sha256Hex).toBe(f1Sha);
+
+    expect(transferResult.files[1].fileName).toBe('sub/doc2.txt');
+    expect(transferResult.files[1].sha256Hex).toBe(f2Sha);
+
+    expect(transferResult.files[2].fileName).toBe('sub/deep/doc3.bin');
+    expect(transferResult.files[2].sha256Hex).toBe(f3Sha);
+
+    // Verify received blob contents
+    const b1Buf = new Uint8Array(await transferResult.files[0].blob!.arrayBuffer());
+    expect(new TextDecoder().decode(b1Buf)).toBe('File 1 root text');
+
+    const b2Buf = new Uint8Array(await transferResult.files[1].blob!.arrayBuffer());
+    expect(new TextDecoder().decode(b2Buf)).toBe('File 2 in subfolder text');
+  });
+
+  it('TC-STR-13: StorageSink creates MemoryStorageSink and streams data correctly', async () => {
+    const sink = await createStorageSink('test.bin', false);
+    await sink.write(new Uint8Array([1, 2, 3]));
+    await sink.write(new Uint8Array([4, 5]));
+    const blob = await sink.finalize();
+    expect(blob.size).toBe(5);
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    expect(Array.from(buf)).toEqual([1, 2, 3, 4, 5]);
   });
 });

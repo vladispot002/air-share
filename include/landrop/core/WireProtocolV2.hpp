@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstring>
 #include "landrop/utils/SocketCompat.hpp"
+#include "landrop/utils/Types.hpp"
 
 namespace landrop::protocol::v2 {
 
@@ -23,7 +24,8 @@ enum class MessageType : uint16_t {
     TransferCancel = 0x0005,
     Ping           = 0x0006,
     Pong           = 0x0007,
-    ResumeRequest  = 0x0008
+    ResumeRequest  = 0x0008,
+    BatchManifest  = 0x0009
 };
 
 enum class AckStatus : uint8_t {
@@ -156,6 +158,25 @@ struct ResumeRequestMessage {
 
     std::vector<uint8_t> serialize() const;
     static bool deserialize(const uint8_t* data, size_t size, ResumeRequestMessage& outMsg, std::string* outError = nullptr);
+};
+
+// Batch File Entry for multi-file and directory transfer
+struct BatchFileEntry {
+    uint32_t fileIndex{0};
+    uint64_t fileSize{0};
+    std::string relativePath; // Relative path, e.g. "photos/sample.jpg" or "data.csv"
+    std::string sha256Hex;    // 64-char SHA-256 hex digest
+};
+
+// Batch Manifest payload (0x0009)
+struct BatchManifestMessage {
+    std::string batchId;
+    uint32_t totalFiles{0};
+    uint64_t totalBytes{0};
+    std::vector<BatchFileEntry> files;
+
+    std::vector<uint8_t> serialize() const;
+    static bool deserialize(const uint8_t* data, size_t size, BatchManifestMessage& outMsg, std::string* outError = nullptr);
 };
 
 // Helper to construct a complete wire frame (header + payload)

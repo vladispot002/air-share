@@ -3,14 +3,22 @@ import {
   ChunkDataMessage,
   TransferAckMessage,
   ResumeRequestMessage,
+  BatchManifestMessage,
   MessageType,
   AckStatus,
   FileHeaderFlags,
   buildFrame,
   FrameReassembler,
 } from '../protocol/WireProtocolV2';
+import { computeCrc32 } from '../protocol/Crc32';
 import { waitForBufferedAmountLow } from '../transport/WebRtcCoordinator';
 import { computeFileSha256, computePartialFileSha256 } from '../crypto/Sha256';
+
+export interface BatchSendItem {
+  file: File | Blob | { name: string; size: number; slice(start?: number, end?: number): Blob; arrayBuffer?(): Promise<ArrayBuffer> };
+  relativePath?: string;
+  name?: string;
+}
 
 export interface FileStreamSenderOptions {
   chunkSize?: number; // default: 64 KB
@@ -18,6 +26,7 @@ export interface FileStreamSenderOptions {
   negotiationTimeoutMs?: number; // default: 1000 ms
   onProgress?: (bytesSent: number, totalBytes: number) => void;
   onHashProgress?: (bytesHashed: number, totalBytes: number) => void;
+  onBatchProgress?: (currentFileIndex: number, totalFiles: number, bytesSent: number, totalBytes: number, currentFileName: string) => void;
 }
 
 export class FileStreamSender {
@@ -26,6 +35,7 @@ export class FileStreamSender {
   private negotiationTimeoutMs: number;
   private onProgress?: (bytesSent: number, totalBytes: number) => void;
   private onHashProgress?: (bytesHashed: number, totalBytes: number) => void;
+  private onBatchProgress?: (currentFileIndex: number, totalFiles: number, bytesSent: number, totalBytes: number, currentFileName: string) => void;
 
   constructor(
     private channel: RTCDataChannel,
@@ -36,6 +46,7 @@ export class FileStreamSender {
     this.negotiationTimeoutMs = options.negotiationTimeoutMs ?? 1000;
     this.onProgress = options.onProgress;
     this.onHashProgress = options.onHashProgress;
+    this.onBatchProgress = options.onBatchProgress;
   }
 
   async sendFile(
@@ -181,6 +192,126 @@ export class FileStreamSender {
     }
 
     // 3. Await TransferAckMessage
+    return this.waitForAck();
+  }
+
+  async sendBatch(
+    items: BatchSendItem[],
+    batchId?: string
+  ): Promise<TransferAckMessage[]> {
+    if (this.channel.readyState !== 'open') {
+      throw new Error(`Cannot send batch: DataChannel state is ${this.channel.readyState}`);
+    }
+    if (!items || items.length === 0) {
+      throw new Error('Batch file list is empty');
+    }
+
+    const effectiveBatchId = batchId || `batch-${Date.now()}`;
+    let totalBatchBytes = 0n;
+    const preparedFiles: {
+      item: BatchSendItem;
+      relativePath: string;
+      size: bigint;
+      sha256Hex: string;
+    }[] = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const relPath = it.relativePath || ('name' in it.file ? (it.file as any).name : (it.name || `file_${i + 1}`));
+      const sz = BigInt(it.file.size);
+      totalBatchBytes += sz;
+
+      const sha256Hex = await computeFileSha256(
+        it.file as Blob,
+        1024 * 1024,
+        this.onHashProgress
+      );
+
+      preparedFiles.push({
+        item: it,
+        relativePath: relPath,
+        size: sz,
+        sha256Hex,
+      });
+    }
+
+    // 1. Send BatchManifestMessage
+    const manifest = new BatchManifestMessage();
+    manifest.batchId = effectiveBatchId;
+    manifest.totalFiles = preparedFiles.length;
+    manifest.totalBytes = totalBatchBytes;
+    manifest.files = preparedFiles.map((pf, idx) => ({
+      fileIndex: idx,
+      fileSize: pf.size,
+      relativePath: pf.relativePath,
+      sha256Hex: pf.sha256Hex,
+    }));
+
+    const manifestFrame = buildFrame(MessageType.BatchManifest, manifest.serialize());
+    (this.channel as any).send(manifestFrame);
+
+    // Wait for batch acceptance ACK
+    await this.waitForAck((ack) => {
+      if (ack.status !== AckStatus.Success) {
+        throw new Error(`Batch rejected by receiver: ${ack.message}`);
+      }
+    });
+
+    const acks: TransferAckMessage[] = [];
+    let sentBatchBytes = 0;
+
+    // Stream each file
+    for (let i = 0; i < preparedFiles.length; i++) {
+      const pf = preparedFiles[i];
+      const file = pf.item.file;
+
+      const headerMsg = new FileHeaderMessage();
+      headerMsg.fileSize = pf.size;
+      headerMsg.chunkSize = this.chunkSize;
+      headerMsg.flags = FileHeaderFlags.NONE;
+      headerMsg.fileName = pf.relativePath;
+      headerMsg.sha256Hex = pf.sha256Hex;
+
+      const headerFrame = buildFrame(MessageType.FileHeader, headerMsg.serialize());
+      (this.channel as any).send(headerFrame);
+
+      let offset = 0;
+      let chunkIndex = 0;
+
+      while (offset < file.size) {
+        const nextChunkEnd = Math.min(offset + this.chunkSize, file.size);
+        const slice = file.slice(offset, nextChunkEnd);
+        const chunkBuf = new Uint8Array(await slice.arrayBuffer());
+
+        const chunkMsg = new ChunkDataMessage();
+        chunkMsg.offset = BigInt(offset);
+        chunkMsg.chunkIndex = chunkIndex++;
+        chunkMsg.chunkCrc32 = computeCrc32(chunkBuf);
+        chunkMsg.data = chunkBuf;
+
+        await waitForBufferedAmountLow(this.channel);
+        (this.channel as any).send(buildFrame(MessageType.ChunkData, chunkMsg.serialize()));
+
+        offset += chunkBuf.length;
+        sentBatchBytes += chunkBuf.length;
+
+        if (this.onProgress) {
+          this.onProgress(sentBatchBytes, Number(totalBatchBytes));
+        }
+        if (this.onBatchProgress) {
+          this.onBatchProgress(i + 1, preparedFiles.length, sentBatchBytes, Number(totalBatchBytes), pf.relativePath);
+        }
+      }
+
+      // Wait for file ACK
+      const fileAck = await this.waitForAck();
+      acks.push(fileAck);
+    }
+
+    return acks;
+  }
+
+  private waitForAck(validator?: (ack: TransferAckMessage) => void): Promise<TransferAckMessage> {
     return new Promise<TransferAckMessage>((resolve, reject) => {
       const reassembler = new FrameReassembler();
       let settled = false;
@@ -220,10 +351,15 @@ export class FileStreamSender {
               }
               settled = true;
               cleanup();
-              if (ack.status === AckStatus.Success) {
-                resolve(ack);
-              } else {
-                reject(new Error(`Transfer failed with status ${ack.status}: ${ack.message}`));
+              try {
+                if (validator) validator(ack);
+                if (ack.status === AckStatus.Success) {
+                  resolve(ack);
+                } else {
+                  reject(new Error(`Transfer failed with status ${ack.status}: ${ack.message}`));
+                }
+              } catch (err) {
+                reject(err);
               }
               return;
             } else if (f.header.msgType === MessageType.TransferCancel) {
