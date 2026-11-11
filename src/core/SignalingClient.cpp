@@ -227,6 +227,15 @@ bool SignalingClient::joinRoom(const std::string& roomCode) {
     return sendEnvelope("JOIN_ROOM", p.dump());
 }
 
+bool SignalingClient::bindClient(const std::string& token, const std::string& userId, const std::string& deviceId) {
+    if (token.empty()) return false;
+    json p;
+    p["token"] = token;
+    if (!userId.empty()) p["user_id"] = userId;
+    if (!deviceId.empty()) p["device_id"] = deviceId;
+    return sendEnvelope("BIND_CLIENT", p.dump());
+}
+
 bool SignalingClient::sendSdpOffer(const std::string& sdp, const std::string& e2eeKey) {
     // Glare resolution: ONLY Initiator may send SDP offer (F-01 / F-09)
     std::function<void(const ErrorInfo&)> errCb;

@@ -180,6 +180,7 @@ void QtDesktopApp::setupPresenters() {
     if (!m_identityClient->isGuest()) {
         m_accountPresenter->refreshDevices();
         m_accountPresenter->refreshContacts();
+        m_accountPresenter->refreshHistory();
     }
     if (m_accountWidget) {
         m_accountWidget->setPresenter(m_accountPresenter.get());
@@ -458,6 +459,7 @@ void QtDesktopApp::startBackgroundTransferServer() {
             }, Qt::QueuedConnection);
         },
         [this](const std::string& taskId, const std::string& fileName, bool success, const std::string& savedPath, const std::string& error) {
+            recordTransferHistory(taskId, "download", "LAN Direct", fileName, 0, success, "TcpDirect");
             QMetaObject::invokeMethod(this, [this, taskId, fileName, success, savedPath, error]() {
                 if (success) {
                     statusBar()->showMessage(QString("✓ Received %1 (%2)").arg(QString::fromStdString(fileName)).arg(QString::fromStdString(savedPath)));
@@ -517,6 +519,7 @@ void QtDesktopApp::handleSendFile(const std::string& taskId, const std::string& 
                         &err
                     );
 
+                    recordTransferHistory(taskId, "upload", targetPeerId, QFileInfo(QString::fromStdString(filePath)).fileName().toStdString(), QFileInfo(QString::fromStdString(filePath)).size(), ok, "WebRtcDataChannel");
                     QMetaObject::invokeMethod(this, [this, taskId, ok, err, targetPeerId]() {
                         if (ok) {
                             statusBar()->showMessage(QString("✓ File successfully sent over WebRTC to %1").arg(QString::fromStdString(targetPeerId)));
@@ -557,7 +560,7 @@ void QtDesktopApp::handleSendFile(const std::string& taskId, const std::string& 
 
     statusBar()->showMessage(QString("Connecting to %1:%2 to send file...").arg(QString::fromStdString(remoteIp)).arg(remotePort));
 
-    launchWorker([this, taskId, filePath, remoteIp, remotePort]() {
+    launchWorker([this, taskId, filePath, remoteIp, remotePort, targetPeerId]() {
         TransferOptions opts;
         if (m_settingsPresenter) {
             opts.speedLimitKbps = m_settingsPresenter->getSpeedLimitKbps();
@@ -581,6 +584,7 @@ void QtDesktopApp::handleSendFile(const std::string& taskId, const std::string& 
             &err
         );
 
+        recordTransferHistory(taskId, "upload", targetPeerId, QFileInfo(QString::fromStdString(filePath)).fileName().toStdString(), QFileInfo(QString::fromStdString(filePath)).size(), ok, "TcpDirect");
         QMetaObject::invokeMethod(this, [this, taskId, ok, err, remoteIp, remotePort]() {
             if (ok) {
                 statusBar()->showMessage(QString("✓ File successfully sent to %1:%2").arg(QString::fromStdString(remoteIp)).arg(remotePort));
@@ -641,6 +645,10 @@ void QtDesktopApp::handleSendBatch(
                         &err
                     );
 
+                    uint64_t totalBytes = 0;
+                    for (const auto& itm : items) totalBytes += itm.fileSize;
+                    recordTransferHistory(taskId, "upload", targetPeerId, batchName, totalBytes, ok, "WebRtcDataChannel");
+
                     QMetaObject::invokeMethod(this, [this, taskId, ok, err, targetPeerId, batchName]() {
                         if (ok) {
                             statusBar()->showMessage(QString("✓ Batch '%1' successfully sent over WebRTC to %2").arg(QString::fromStdString(batchName)).arg(QString::fromStdString(targetPeerId)));
@@ -685,7 +693,7 @@ void QtDesktopApp::handleSendBatch(
         .arg(QString::fromStdString(batchName))
         .arg(items.size()));
 
-    launchWorker([this, taskId, items, batchName, remoteIp, remotePort]() {
+    launchWorker([this, taskId, items, batchName, remoteIp, remotePort, targetPeerId]() {
         TransferOptions opts;
         if (m_settingsPresenter) {
             opts.speedLimitKbps = m_settingsPresenter->getSpeedLimitKbps();
@@ -710,6 +718,10 @@ void QtDesktopApp::handleSendBatch(
             &err
         );
 
+        uint64_t totalBytes = 0;
+        for (const auto& itm : items) totalBytes += itm.fileSize;
+        recordTransferHistory(taskId, "upload", targetPeerId, batchName, totalBytes, ok, "TcpDirect");
+
         QMetaObject::invokeMethod(this, [this, taskId, ok, err, remoteIp, remotePort, batchName]() {
             if (ok) {
                 statusBar()->showMessage(QString("✓ Batch '%1' successfully sent to %2:%3")
@@ -723,6 +735,41 @@ void QtDesktopApp::handleSendBatch(
                 }
             }
         }, Qt::QueuedConnection);
+    });
+}
+
+void QtDesktopApp::recordTransferHistory(
+    const std::string& taskId,
+    const std::string& direction,
+    const std::string& peerId,
+    const std::string& fileName,
+    uint64_t fileSize,
+    bool success,
+    const std::string& transportType
+) {
+    if (!m_accountPresenter || m_accountPresenter->isGuest()) return;
+
+    TransferHistoryItem item;
+    item.transferId = taskId;
+    item.direction = direction;
+    item.peerLandropId = peerId;
+    item.peerDeviceName = peerId;
+    item.status = success ? "COMPLETED" : "FAILED";
+    item.transportType = transportType;
+    item.totalBytes = fileSize;
+
+    if (!fileName.empty()) {
+        TransferFileMetadata fm;
+        fm.fileName = fileName;
+        fm.fileSize = fileSize;
+        item.files.push_back(fm);
+    }
+
+    launchWorker([this, item]() {
+        if (m_accountPresenter) {
+            std::string err;
+            m_accountPresenter->recordTransfer(item, &err);
+        }
     });
 }
 
@@ -753,6 +800,11 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
     opts.signalingHttpUrl = deriveWsHttpUrl(signalingWsUrl);
     opts.autoFetchTurn = true;
     opts.dataChannelLabel = "lan-drop-data";
+    if (m_identityClient && !m_identityClient->isGuest()) {
+        opts.authToken = m_identityClient->getAuthToken();
+        opts.userId = m_identityClient->getCurrentUser().userId;
+        opts.deviceId = m_identityClient->getCurrentDevice().deviceId;
+    }
 
     auto coordinator = std::make_shared<WebRtcSessionCoordinator>("gui-host", WebRtcConfig{}, opts);
 
@@ -876,6 +928,7 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
                     nullptr,
                     &err
                 );
+                recordTransferHistory(taskId, "upload", peerId, QFileInfo(filePath).fileName().toStdString(), QFileInfo(filePath).size(), ok, "WebRtcDataChannel");
                 QMetaObject::invokeMethod(this, [this, ok, err, peerId]() {
                     if (ok) {
                         statusBar()->showMessage(QString("✓ File successfully sent over WebRTC to %1").arg(QString::fromStdString(peerId)), 5000);
@@ -910,8 +963,9 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
                         nullptr, // cancelFlag
                         &rxErr,  // outError
                         nullptr, // onIncoming
-                        [this](const std::string&, const std::string& fileName, bool success, const std::string& savedPath, const std::string& err) {
+                        [this, coordinator](const std::string&, const std::string& fileName, bool success, const std::string& savedPath, const std::string& err) {
                             (void)savedPath;
+                            recordTransferHistory("rtc-rx-" + fileName, "download", "WebRTC Peer (" + coordinator->getRoomCode() + ")", fileName, 0, success, "WebRtcDataChannel");
                             QMetaObject::invokeMethod(this, [this, fileName, success, err]() {
                                 if (success) {
                                     statusBar()->showMessage(QString("✓ Received file: %1").arg(QString::fromStdString(fileName)), 5000);
@@ -952,6 +1006,11 @@ void QtDesktopApp::onJoinRoomRequested(const QString& roomCode) {
     opts.signalingHttpUrl = deriveWsHttpUrl(signalingWsUrl);
     opts.autoFetchTurn = true;
     opts.dataChannelLabel = "lan-drop-data";
+    if (m_identityClient && !m_identityClient->isGuest()) {
+        opts.authToken = m_identityClient->getAuthToken();
+        opts.userId = m_identityClient->getCurrentUser().userId;
+        opts.deviceId = m_identityClient->getCurrentDevice().deviceId;
+    }
 
     auto coordinator = std::make_shared<WebRtcSessionCoordinator>("gui-joiner", WebRtcConfig{}, opts);
 
@@ -997,8 +1056,9 @@ void QtDesktopApp::onJoinRoomRequested(const QString& roomCode) {
                     nullptr, // cancelFlag
                     &rxErr,  // outError
                     nullptr, // onIncoming
-                    [this](const std::string&, const std::string& fileName, bool success, const std::string& savedPath, const std::string& err) {
+                    [this, coordinator](const std::string&, const std::string& fileName, bool success, const std::string& savedPath, const std::string& err) {
                         (void)savedPath;
+                        recordTransferHistory("rtc-rx-" + fileName, "download", "WebRTC Peer (" + coordinator->getRoomCode() + ")", fileName, 0, success, "WebRtcDataChannel");
                         QMetaObject::invokeMethod(this, [this, fileName, success, err]() {
                             if (success) {
                                 statusBar()->showMessage(QString("✓ Received file: %1").arg(QString::fromStdString(fileName)), 5000);

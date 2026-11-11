@@ -4902,6 +4902,128 @@ bool testSuite34_IdentityAndAccountSubsystem() {
         TEST_ASSERT(presenter.getDevices().empty(), "TC-AP-12: Cached devices cleared on logout");
     }
 
+    // 5. Transfer History Synchronized API (getHistory, recordHistory, clearHistory)
+    {
+        auto mockHttp = std::make_shared<MockIdentityHttpClient>();
+        IdentityClient client(mockHttp, "http://127.0.0.1:8848");
+        client.setAuthToken("jwt-valid-token");
+
+        // getHistory
+        mockHttp->responseStatus = 200;
+        mockHttp->responseBody = R"([
+            {
+                "transfer_id": "xfer-1",
+                "user_id": "u-user-1",
+                "direction": "upload",
+                "peer_landrop_id": "bob_builder",
+                "peer_device_name": "Bob MacBook",
+                "total_bytes": 1048576,
+                "status": "COMPLETED",
+                "transport_type": "WebRtcDataChannel",
+                "files": [
+                    { "file_name": "presentation.pdf", "file_size": 1048576, "sha256_hex": "abc123" }
+                ],
+                "started_at": "2026-11-11T20:00:00Z",
+                "completed_at": "2026-11-11T20:00:02Z"
+            }
+        ])";
+
+        std::vector<TransferHistoryItem> history;
+        std::string err;
+        bool getOk = client.getHistory(history, 10, &err);
+        TEST_ASSERT(getOk, "TC-HIST-01: getHistory succeeds");
+        TEST_ASSERT(history.size() == 1, "TC-HIST-02: 1 history item returned");
+        TEST_ASSERT(history[0].transferId == "xfer-1", "TC-HIST-03: transferId correctly parsed");
+        TEST_ASSERT(history[0].direction == "upload", "TC-HIST-04: direction correctly parsed");
+        TEST_ASSERT(history[0].files.size() == 1, "TC-HIST-05: files list populated");
+        TEST_ASSERT(history[0].files[0].fileName == "presentation.pdf", "TC-HIST-06: file_name populated");
+
+        // recordHistory
+        mockHttp->responseStatus = 201;
+        mockHttp->responseBody = R"({"status": "created"})";
+        TransferHistoryItem newItem;
+        newItem.transferId = "xfer-2";
+        newItem.direction = "download";
+        newItem.peerLandropId = "sarah_mac";
+        newItem.totalBytes = 2048;
+        newItem.status = "COMPLETED";
+        newItem.transportType = "TcpDirect";
+        bool recOk = client.recordHistory(newItem, &err);
+        TEST_ASSERT(recOk, "TC-HIST-07: recordHistory succeeds");
+
+        // clearHistory
+        mockHttp->responseStatus = 200;
+        mockHttp->responseBody = R"({"cleared": true})";
+        bool clearOk = client.clearHistory(&err);
+        TEST_ASSERT(clearOk, "TC-HIST-08: clearHistory succeeds");
+    }
+
+    // 6. Secure Session Storage & Permissions
+    {
+        auto mockHttp = std::make_shared<MockIdentityHttpClient>();
+        IdentityClient client(mockHttp, "http://127.0.0.1:8848");
+
+        std::string testPath = "/tmp/test_landrop_session_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + ".json";
+        client.setSessionStorePath(testPath);
+
+        UserProfile u;
+        u.userId = "u-sec-1";
+        u.landropId = "sec_user";
+        u.email = "sec@example.com";
+        client.setCurrentUser(u);
+        client.setAuthToken("jwt-sec-token");
+
+        std::string err;
+        bool saveOk = client.saveSession(&err);
+        TEST_ASSERT(saveOk, "TC-SEC-01: saveSession succeeds");
+        TEST_ASSERT(std::filesystem::exists(testPath), "TC-SEC-02: Session file written to disk");
+
+#if !defined(_WIN32)
+        auto perms = std::filesystem::status(testPath).permissions();
+        bool isOwnerOnly = ((perms & std::filesystem::perms::owner_read) != std::filesystem::perms::none) &&
+                           ((perms & std::filesystem::perms::owner_write) != std::filesystem::perms::none) &&
+                           ((perms & std::filesystem::perms::group_read) == std::filesystem::perms::none) &&
+                           ((perms & std::filesystem::perms::others_read) == std::filesystem::perms::none);
+        TEST_ASSERT(isOwnerOnly, "TC-SEC-03: Session file created with strict 0600 user-only permissions");
+#endif
+        std::filesystem::remove(testPath);
+    }
+
+    // 7. Unified Room Code Normalization (URLs, hash fragments, Crockford substitutions)
+    {
+        std::string err;
+        // Plain Crockford canonical
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-K8M4-P9X2", &err) == "DROP-K8M4-P9X2", "TC-NORM-01: Canonical code matches");
+        // Lowercase and dashes omitted
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("k8m4p9x2", &err) == "DROP-K8M4-P9X2", "TC-NORM-02: Raw lowercase normalized");
+        // URL with hash fragment
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("https://landrop-server.duckdns.org/#DROP-06ZS-6PT1", &err) == "DROP-06ZS-6PT1", "TC-NORM-03: Full pairing URL with hash fragment normalized");
+        // URL with path
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("http://localhost:8080/DROP-06ZS-6PT1", &err) == "DROP-06ZS-6PT1", "TC-NORM-04: URL path normalized");
+        // Crockford confusion substitutions (O -> 0, I, L -> 1)
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("oil2oil2", &err) == "DROP-0112-0112", "TC-NORM-05: Crockford O/I/L substitutions handled");
+        // Whitespace tolerance
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("  drop - 06zs - 6pt1 \n", &err) == "DROP-06ZS-6PT1", "TC-NORM-06: Whitespace-tolerant normalization");
+        // Invalid character rejection
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-INVALID!", &err).empty(), "TC-NORM-07: Invalid characters rejected");
+    }
+
+    // 8. SignalingClient BIND_CLIENT
+    {
+        landrop::signaling::SignalingClient sc("client-bind-test");
+        std::string sentMsg;
+        sc.setCustomSender([&sentMsg](const std::string& msg) {
+            sentMsg = msg;
+            return true;
+        });
+
+        bool bindOk = sc.bindClient("jwt-test-token", "u-123", "dev-456");
+        TEST_ASSERT(bindOk, "TC-BIND-01: bindClient succeeds");
+        TEST_ASSERT(sentMsg.find("BIND_CLIENT") != std::string::npos, "TC-BIND-02: BIND_CLIENT action sent in envelope");
+        TEST_ASSERT(sentMsg.find("jwt-test-token") != std::string::npos, "TC-BIND-03: Token present in envelope payload");
+        TEST_ASSERT(sentMsg.find("u-123") != std::string::npos, "TC-BIND-04: User ID present in envelope payload");
+    }
+
     return true;
 }
 

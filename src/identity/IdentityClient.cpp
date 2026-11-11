@@ -128,6 +128,11 @@ bool IdentityClient::saveSession(std::string* outError) {
             return false;
         }
         f << j.dump(2);
+        f.close();
+#if !defined(_WIN32)
+        std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                     std::filesystem::perm_options::replace, ec);
+#endif
         return true;
     } catch (const std::exception& e) {
         if (outError) *outError = e.what();
@@ -842,6 +847,138 @@ bool IdentityClient::getRecentUsers(std::vector<RecentUserInfo>& outRecents, std
         if (outError) *outError = e.what();
         return false;
     }
+}
+
+bool IdentityClient::getHistory(std::vector<TransferHistoryItem>& outHistory, int limit, std::string* outError) {
+    std::string url, token;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_token.empty()) {
+            if (outError) *outError = "Not authenticated";
+            return false;
+        }
+        url = m_apiBaseUrl + "/api/v1/history?limit=" + std::to_string(limit > 0 ? limit : 20);
+        token = m_token;
+    }
+
+    HttpRequest req;
+    req.method = "GET";
+    req.url = url;
+    req.headers["Authorization"] = "Bearer " + token;
+
+    HttpResponse res = m_httpClient->send(req);
+    if (!res.isOk()) {
+        if (outError) *outError = res.errorMessage.empty() ? ("HTTP " + std::to_string(res.statusCode)) : res.errorMessage;
+        return false;
+    }
+
+    try {
+        json arr = json::parse(res.body);
+        outHistory.clear();
+        for (const auto& item : arr) {
+            TransferHistoryItem h;
+            h.transferId = item.value("transfer_id", "");
+            h.userId = item.value("user_id", "");
+            h.direction = item.value("direction", "upload");
+            h.peerUserId = item.value("peer_user_id", "");
+            h.peerLandropId = item.value("peer_landrop_id", "");
+            h.peerDeviceName = item.value("peer_device_name", "");
+            h.totalBytes = item.value("total_bytes", static_cast<uint64_t>(0));
+            h.status = item.value("status", "COMPLETED");
+            h.transportType = item.value("transport_type", "WebRtcDataChannel");
+            h.startedAt = item.value("started_at", "");
+            h.completedAt = item.value("completed_at", "");
+
+            if (item.contains("files") && item["files"].is_array()) {
+                for (const auto& f : item["files"]) {
+                    TransferFileMetadata fm;
+                    fm.fileName = f.value("file_name", "");
+                    fm.fileSize = f.value("file_size", static_cast<uint64_t>(0));
+                    fm.sha256Hex = f.value("sha256_hex", "");
+                    h.files.push_back(fm);
+                }
+            }
+            outHistory.push_back(h);
+        }
+        return true;
+    } catch (const std::exception& e) {
+        if (outError) *outError = e.what();
+        return false;
+    }
+}
+
+bool IdentityClient::recordHistory(const TransferHistoryItem& item, std::string* outError) {
+    std::string url, token, userId;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_token.empty()) {
+            if (outError) *outError = "Not authenticated";
+            return false;
+        }
+        url = m_apiBaseUrl + "/api/v1/history";
+        token = m_token;
+        userId = m_user.userId;
+    }
+
+    json payload;
+    payload["transfer_id"] = item.transferId.empty() ? ("xfer-" + generateRandomHex(8)) : item.transferId;
+    payload["user_id"] = userId;
+    payload["direction"] = item.direction.empty() ? "upload" : item.direction;
+    payload["peer_user_id"] = item.peerUserId;
+    payload["peer_landrop_id"] = item.peerLandropId;
+    payload["peer_device_name"] = item.peerDeviceName;
+    payload["total_bytes"] = item.totalBytes;
+    payload["status"] = item.status.empty() ? "COMPLETED" : item.status;
+    payload["transport_type"] = item.transportType.empty() ? "WebRtcDataChannel" : item.transportType;
+
+    json filesArr = json::array();
+    for (const auto& f : item.files) {
+        filesArr.push_back({
+            {"file_name", f.fileName},
+            {"file_size", f.fileSize},
+            {"sha256_hex", f.sha256Hex}
+        });
+    }
+    payload["files"] = filesArr;
+
+    HttpRequest req;
+    req.method = "POST";
+    req.url = url;
+    req.headers["Authorization"] = "Bearer " + token;
+    req.headers["Content-Type"] = "application/json";
+    req.body = payload.dump();
+
+    HttpResponse res = m_httpClient->send(req);
+    if (!res.isOk()) {
+        if (outError) *outError = res.errorMessage.empty() ? ("HTTP " + std::to_string(res.statusCode)) : res.errorMessage;
+        return false;
+    }
+    return true;
+}
+
+bool IdentityClient::clearHistory(std::string* outError) {
+    std::string url, token;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_token.empty()) {
+            if (outError) *outError = "Not authenticated";
+            return false;
+        }
+        url = m_apiBaseUrl + "/api/v1/history";
+        token = m_token;
+    }
+
+    HttpRequest req;
+    req.method = "DELETE";
+    req.url = url;
+    req.headers["Authorization"] = "Bearer " + token;
+
+    HttpResponse res = m_httpClient->send(req);
+    if (!res.isOk()) {
+        if (outError) *outError = res.errorMessage.empty() ? ("HTTP " + std::to_string(res.statusCode)) : res.errorMessage;
+        return false;
+    }
+    return true;
 }
 
 } // namespace landrop

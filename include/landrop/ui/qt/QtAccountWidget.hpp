@@ -30,6 +30,9 @@ public:
     QListWidget* getContactsList() const { return m_contactsList; }
     QListWidget* getDevicesList() const { return m_devicesList; }
     QPushButton* getPairDeviceBtn() const { return m_pairDeviceBtn; }
+    QListWidget* getHistoryList() const { return m_historyList; }
+    QPushButton* getRefreshHistoryBtn() const { return m_refreshHistoryBtn; }
+    QPushButton* getClearHistoryBtn() const { return m_clearHistoryBtn; }
 
     void updateView();
 
@@ -41,6 +44,8 @@ private slots:
     void onAddContactClicked();
     void onPairDeviceClicked();
     void onContactItemDoubleClicked(QListWidgetItem* item);
+    void onRefreshHistoryClicked();
+    void onClearHistoryClicked();
 
 private:
     void setupUi();
@@ -61,6 +66,10 @@ private:
 
     QListWidget* m_devicesList{nullptr};
     QPushButton* m_pairDeviceBtn{nullptr};
+
+    QListWidget* m_historyList{nullptr};
+    QPushButton* m_refreshHistoryBtn{nullptr};
+    QPushButton* m_clearHistoryBtn{nullptr};
 };
 
 } // namespace landrop::ui

@@ -1,4 +1,4 @@
-import { UserAccount, Device } from "./types";
+import { UserAccount, Device, ContactEntry, TransferHistoryRecord } from "./types";
 
 export interface IdentityState {
   isGuest: boolean;
@@ -176,6 +176,93 @@ export class IdentityClient {
     const res = await fetch(`${this.baseUrl}/api/v1/users/search?q=${encodeURIComponent(query)}&limit=${limit}`);
     if (!res.ok) return [];
     return res.json();
+  }
+
+  public async listDevices(): Promise<Device[]> {
+    if (this.state.isGuest || !this.state.token) return [];
+    try {
+      const res = await fetch(`${this.baseUrl}/api/v1/devices`, {
+        headers: { Authorization: `Bearer ${this.state.token}` },
+      });
+      if (!res.ok) return [];
+      return await res.json();
+    } catch {
+      return [];
+    }
+  }
+
+  public async revokeDevice(deviceId: string): Promise<boolean> {
+    if (this.state.isGuest || !this.state.token) return false;
+    try {
+      const res = await fetch(`${this.baseUrl}/api/v1/devices/revoke`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.state.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ device_id: deviceId }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  public async listContacts(): Promise<ContactEntry[]> {
+    if (this.state.isGuest || !this.state.token) return [];
+    try {
+      const res = await fetch(`${this.baseUrl}/api/v1/contacts`, {
+        headers: { Authorization: `Bearer ${this.state.token}` },
+      });
+      if (!res.ok) return [];
+      return await res.json();
+    } catch {
+      return [];
+    }
+  }
+
+  public async getHistory(limit = 20): Promise<TransferHistoryRecord[]> {
+    if (this.state.isGuest || !this.state.token) return [];
+    try {
+      const res = await fetch(`${this.baseUrl}/api/v1/history?limit=${limit}`, {
+        headers: { Authorization: `Bearer ${this.state.token}` },
+      });
+      if (!res.ok) return [];
+      return await res.json();
+    } catch {
+      return [];
+    }
+  }
+
+  public async recordHistory(record: Partial<TransferHistoryRecord>): Promise<TransferHistoryRecord | null> {
+    if (this.state.isGuest || !this.state.token) return null;
+    try {
+      const res = await fetch(`${this.baseUrl}/api/v1/history`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.state.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(record),
+      });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    }
+  }
+
+  public async clearHistory(): Promise<boolean> {
+    if (this.state.isGuest || !this.state.token) return false;
+    try {
+      const res = await fetch(`${this.baseUrl}/api/v1/history`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${this.state.token}` },
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
 
   public bindWebSocket(ws: WebSocket): void {

@@ -15,6 +15,7 @@
 #include "landrop/ui/qt/QtStorageWidget.hpp"
 #include "landrop/ui/qt/QtSettingsWidget.hpp"
 #include "landrop/ui/qt/QtAccountWidget.hpp"
+#include "landrop/core/WebRtcSessionCoordinator.hpp"
 #include "landrop/utils/SocketCompat.hpp"
 
 using namespace landrop;
@@ -39,6 +40,7 @@ private slots:
     void testPeerProviderIntegration();
     void testDirectoryValidationLogic();
     void testDownloadsPathGuiSelectionAndSync();
+    void testAccountTransferHistoryAndUrlNormalization();
 };
 
 void TestQtGui::testAppInitialization() {
@@ -521,6 +523,99 @@ void TestQtGui::testDownloadsPathGuiSelectionAndSync() {
     // Clean up
     QDir(customDir).removeRecursively();
     QDir(anotherDir).removeRecursively();
+}
+
+void TestQtGui::testAccountTransferHistoryAndUrlNormalization() {
+    QtDesktopApp app;
+    app.initialize();
+
+    auto* accountWidget = app.getAccountWidget();
+    auto* presenter = app.getAccountPresenter();
+    QVERIFY(accountWidget != nullptr);
+    QVERIFY(presenter != nullptr);
+
+    // 1. Initial State: Guest mode history list is empty
+    QVERIFY(presenter->isGuest());
+    QVERIFY(accountWidget->getHistoryList() != nullptr);
+    QCOMPARE(accountWidget->getHistoryList()->count(), 0);
+
+    // 2. Authenticated user receives populated history
+    landrop::UserProfile profile;
+    profile.userId = "usr-qt-test";
+    profile.landropId = "qt_tester";
+    profile.displayName = "Qt Tester";
+    profile.email = "qt@landrop.local";
+    profile.status = "active";
+    presenter->getClient()->setCurrentUser(profile);
+    presenter->getClient()->setAuthToken("jwt-token-qt");
+
+    std::vector<landrop::TransferHistoryItem> testHistory;
+    landrop::TransferHistoryItem item1;
+    item1.transferId = "xfer-101";
+    item1.direction = "upload";
+    item1.peerUserId = "peer-web-01";
+    item1.peerDeviceName = "Chrome Web Client";
+    item1.totalBytes = 10485760; // 10 MB
+    item1.status = "completed";
+    item1.startedAt = "2026-11-11T20:00:00Z";
+    item1.completedAt = "2026-11-11T20:00:02Z";
+
+    landrop::TransferFileMetadata f1;
+    f1.fileName = "report.pdf";
+    f1.fileSize = 4194304;
+    f1.sha256Hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    item1.files.push_back(f1);
+
+    landrop::TransferFileMetadata f2;
+    f2.fileName = "presentation.pptx";
+    f2.fileSize = 6291456;
+    f2.sha256Hex = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+    item1.files.push_back(f2);
+
+    testHistory.push_back(item1);
+    presenter->setHistory(testHistory);
+    accountWidget->updateView();
+
+    // Verify history widget display
+    QCOMPARE(accountWidget->getHistoryList()->count(), 1);
+    QString itemText = accountWidget->getHistoryList()->item(0)->text();
+    QVERIFY(itemText.contains("⬆️ Sent"));
+    QVERIFY(itemText.contains("report.pdf"));
+    QVERIFY(itemText.contains("(+1 more)"));
+    QVERIFY(itemText.contains("Chrome Web Client"));
+
+    // 3. Test Room Code & Pairing URL Normalization in Coordinator
+    // Standard 8-char code
+    std::string err;
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("06ZS-6PT1", &err)), QString("DROP-06ZS-6PT1"));
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("06zs6pt1", &err)), QString("DROP-06ZS-6PT1"));
+
+    // DROP- prefix
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("DROP-06ZS-6PT1", &err)), QString("DROP-06ZS-6PT1"));
+
+    // Crockford substitutions (O -> 0, I/L -> 1)
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("DROP-O6ZS-6PTL", &err)), QString("DROP-06ZS-6PT1"));
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("DROP-o6zs-6pti", &err)), QString("DROP-06ZS-6PT1"));
+
+    // Full URL with hash fragment
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("https://landrop-server.duckdns.org/#DROP-06ZS-6PT1", &err)), QString("DROP-06ZS-6PT1"));
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("http://localhost:5173/#06ZS-6PT1", &err)), QString("DROP-06ZS-6PT1"));
+
+    // Full URL with join path
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("https://landrop-server.duckdns.org/join/DROP-06ZS-6PT1", &err)), QString("DROP-06ZS-6PT1"));
+
+    // Whitespace handling
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("   DROP-06ZS-6PT1   \n", &err)), QString("DROP-06ZS-6PT1"));
+
+    // Invalid codes
+    QVERIFY(WebRtcSessionCoordinator::normalizeRoomCode("", &err).empty());
+    QVERIFY(WebRtcSessionCoordinator::normalizeRoomCode("TOO-SHORT", &err).empty() || WebRtcSessionCoordinator::normalizeRoomCode("abc", &err).empty());
+
+    // 4. Logout clears history in UI
+    presenter->logout();
+    accountWidget->updateView();
+    QVERIFY(presenter->isGuest());
+    QCOMPARE(accountWidget->getHistoryList()->count(), 0);
 }
 
 int main(int argc, char* argv[]) {

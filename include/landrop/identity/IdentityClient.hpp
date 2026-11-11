@@ -54,6 +54,27 @@ struct DevicePairingInfo {
     std::string expiresAt;
 };
 
+struct TransferFileMetadata {
+    std::string fileName;
+    uint64_t fileSize{0};
+    std::string sha256Hex;
+};
+
+struct TransferHistoryItem {
+    std::string transferId;
+    std::string userId;
+    std::string direction{"upload"}; // "upload", "download"
+    std::string peerUserId;
+    std::string peerLandropId;
+    std::string peerDeviceName;
+    std::vector<TransferFileMetadata> files;
+    uint64_t totalBytes{0};
+    std::string status{"COMPLETED"}; // "COMPLETED", "FAILED", "CANCELLED"
+    std::string transportType{"WebRtcDataChannel"}; // "WebRtcDataChannel", "TcpDirect"
+    std::string startedAt;
+    std::string completedAt;
+};
+
 /**
  * @brief IdentityClient connects to the LAN-Drop identity backend.
  * Provides user accounts, multi-device management, contacts, and pairing.
@@ -122,6 +143,11 @@ public:
     bool blockUser(const std::string& targetUserId, std::string* outError = nullptr);
     bool setFavorite(const std::string& targetUserId, bool isFavorite, std::string* outError = nullptr);
     bool getRecentUsers(std::vector<RecentUserInfo>& outRecents, std::string* outError = nullptr);
+
+    // Transfer History (Synchronized with Backend)
+    bool getHistory(std::vector<TransferHistoryItem>& outHistory, int limit = 20, std::string* outError = nullptr);
+    bool recordHistory(const TransferHistoryItem& item, std::string* outError = nullptr);
+    bool clearHistory(std::string* outError = nullptr);
 
 private:
     std::shared_ptr<HttpClient> m_httpClient;

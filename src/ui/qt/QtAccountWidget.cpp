@@ -164,7 +164,6 @@ void QtAccountWidget::setupUi() {
         }
     });
     devBtnRow->addWidget(revokeBtn);
-
     devicesLayout->addLayout(devBtnRow);
 
     splitter->addWidget(contactsBox);
@@ -173,6 +172,25 @@ void QtAccountWidget::setupUi() {
     splitter->setStretchFactor(1, 1);
 
     mainLayout->addWidget(splitter, 1);
+
+    // History Column / Box
+    auto* historyBox = new QGroupBox("📜 Synchronized Cloud Transfer History", this);
+    auto* historyLayout = new QVBoxLayout(historyBox);
+
+    m_historyList = new QListWidget(historyBox);
+    historyLayout->addWidget(m_historyList, 1);
+
+    auto* histBtnRow = new QHBoxLayout();
+    m_refreshHistoryBtn = new QPushButton("↺ Refresh History", historyBox);
+    connect(m_refreshHistoryBtn, &QPushButton::clicked, this, &QtAccountWidget::onRefreshHistoryClicked);
+    histBtnRow->addWidget(m_refreshHistoryBtn);
+
+    m_clearHistoryBtn = new QPushButton("🗑️ Clear Cloud History", historyBox);
+    connect(m_clearHistoryBtn, &QPushButton::clicked, this, &QtAccountWidget::onClearHistoryClicked);
+    histBtnRow->addWidget(m_clearHistoryBtn);
+
+    historyLayout->addLayout(histBtnRow);
+    mainLayout->addWidget(historyBox, 1);
 }
 
 void QtAccountWidget::updateView() {
@@ -184,6 +202,7 @@ void QtAccountWidget::updateView() {
         m_authActionBtn->setText("Sign In / Register");
         m_contactsList->clear();
         m_devicesList->clear();
+        if (m_historyList) m_historyList->clear();
     } else {
         auto user = m_presenter->getCurrentUser();
         m_statusLabel->setText(QString("🛡️ %1 (%2)").arg(QString::fromStdString(user.displayName), QString::fromStdString(user.landropId)));
@@ -216,6 +235,29 @@ void QtAccountWidget::updateView() {
             auto* item = new QListWidgetItem(label, m_devicesList);
             item->setData(Qt::UserRole, QString::fromStdString(d.deviceId));
             m_devicesList->addItem(item);
+        }
+
+        // History list
+        if (m_historyList) {
+            m_historyList->clear();
+            for (const auto& h : m_presenter->getHistory()) {
+                QString dirIcon = (h.direction == "upload") ? "⬆️ Sent" : "⬇️ Received";
+                QString fileSummary;
+                if (!h.files.empty()) {
+                    fileSummary = QString::fromStdString(h.files[0].fileName);
+                    if (h.files.size() > 1) {
+                        fileSummary += QString(" (+%1 more)").arg(h.files.size() - 1);
+                    }
+                } else {
+                    fileSummary = "Files";
+                }
+                double mb = static_cast<double>(h.totalBytes) / (1024.0 * 1024.0);
+                QString peerInfo = QString::fromStdString(!h.peerLandropId.empty() ? h.peerLandropId : (!h.peerDeviceName.empty() ? h.peerDeviceName : "Anonymous"));
+                QString label = QString("%1: %2 (%3 MB) — Peer: %4 — [%5]")
+                    .arg(dirIcon, fileSummary, QString::number(mb, 'f', 2), peerInfo, QString::fromStdString(h.status));
+                auto* item = new QListWidgetItem(label, m_historyList);
+                m_historyList->addItem(item);
+            }
         }
     }
 }
@@ -269,6 +311,28 @@ void QtAccountWidget::onContactItemDoubleClicked(QListWidgetItem* item) {
     QString landropId = item->data(Qt::UserRole + 1).toString();
     if (!targetUserId.isEmpty()) {
         emit sendFileToContact(targetUserId, landropId);
+    }
+}
+
+void QtAccountWidget::onRefreshHistoryClicked() {
+    if (!m_presenter) return;
+    std::string err;
+    if (!m_presenter->refreshHistory(20, &err)) {
+        if (!err.empty()) {
+            QMessageBox::warning(this, "History Error", QString::fromStdString(err));
+        }
+    }
+}
+
+void QtAccountWidget::onClearHistoryClicked() {
+    if (!m_presenter) return;
+    if (m_presenter->isGuest()) return;
+    auto reply = QMessageBox::question(this, "Clear History", "Are you sure you want to clear your synchronized transfer history?");
+    if (reply == QMessageBox::Yes) {
+        std::string err;
+        if (!m_presenter->clearHistory(&err)) {
+            QMessageBox::warning(this, "Clear History Failed", QString::fromStdString(err));
+        }
     }
 }
 

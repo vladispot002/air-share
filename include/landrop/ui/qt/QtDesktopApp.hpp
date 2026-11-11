@@ -60,6 +60,15 @@ public:
     void startBackgroundTransferServer();
     void handleSendFile(const std::string& taskId, const std::string& targetPeerId, const std::string& filePath);
     void handleSendBatch(const std::string& taskId, const std::string& targetPeerId, const std::vector<BatchFileItem>& items, const std::string& batchName);
+    void recordTransferHistory(
+        const std::string& taskId,
+        const std::string& direction,
+        const std::string& peerId,
+        const std::string& fileName,
+        uint64_t fileSize,
+        bool success,
+        const std::string& transportType
+    );
     void launchWorker(std::function<void()> task);
 
 public slots:

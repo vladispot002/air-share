@@ -31,6 +31,10 @@ std::vector<RecentUserInfo> AccountPresenter::getRecentUsers() const {
     return m_cachedRecents;
 }
 
+std::vector<TransferHistoryItem> AccountPresenter::getHistory() const {
+    return m_cachedHistory;
+}
+
 void AccountPresenter::setContacts(const std::vector<ContactInfo>& contacts) {
     m_cachedContacts = contacts;
     notifyStateChanged();
@@ -38,6 +42,11 @@ void AccountPresenter::setContacts(const std::vector<ContactInfo>& contacts) {
 
 void AccountPresenter::setDevices(const std::vector<DeviceInfo>& devices) {
     m_cachedDevices = devices;
+    notifyStateChanged();
+}
+
+void AccountPresenter::setHistory(const std::vector<TransferHistoryItem>& history) {
+    m_cachedHistory = history;
     notifyStateChanged();
 }
 
@@ -64,6 +73,7 @@ bool AccountPresenter::loginWithProvider(
     if (ok) {
         refreshDevices();
         refreshContacts();
+        refreshHistory();
         notifyStateChanged();
     }
     return ok;
@@ -78,6 +88,7 @@ bool AccountPresenter::verifyMagicLink(const std::string& token, std::string* ou
     if (ok) {
         refreshDevices();
         refreshContacts();
+        refreshHistory();
         notifyStateChanged();
     }
     return ok;
@@ -88,6 +99,7 @@ void AccountPresenter::logout() {
     m_cachedDevices.clear();
     m_cachedContacts.clear();
     m_cachedRecents.clear();
+    m_cachedHistory.clear();
     notifyStateChanged();
 }
 
@@ -167,6 +179,42 @@ bool AccountPresenter::revokeDevice(const std::string& deviceId, std::string* ou
 
 bool AccountPresenter::generatePairingSession(DevicePairingInfo& outSession, std::string* outError) {
     return m_client->createPairingSession(outSession, outError);
+}
+
+bool AccountPresenter::refreshHistory(int limit, std::string* outError) {
+    if (m_client->isGuest()) {
+        m_cachedHistory.clear();
+        return true;
+    }
+    std::vector<TransferHistoryItem> history;
+    if (m_client->getHistory(history, limit, outError)) {
+        m_cachedHistory = history;
+        notifyStateChanged();
+        return true;
+    }
+    return false;
+}
+
+bool AccountPresenter::recordTransfer(const TransferHistoryItem& item, std::string* outError) {
+    if (m_client->isGuest()) return false;
+    bool ok = m_client->recordHistory(item, outError);
+    if (ok) {
+        refreshHistory();
+    }
+    return ok;
+}
+
+bool AccountPresenter::clearHistory(std::string* outError) {
+    if (m_client->isGuest()) {
+        m_cachedHistory.clear();
+        return true;
+    }
+    bool ok = m_client->clearHistory(outError);
+    if (ok) {
+        m_cachedHistory.clear();
+        notifyStateChanged();
+    }
+    return ok;
 }
 
 void AccountPresenter::setOnStateChanged(std::function<void()> callback) {

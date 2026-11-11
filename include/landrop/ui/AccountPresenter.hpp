@@ -24,10 +24,12 @@ public:
     std::vector<DeviceInfo> getDevices() const;
     std::vector<ContactInfo> getContacts() const;
     std::vector<RecentUserInfo> getRecentUsers() const;
+    std::vector<TransferHistoryItem> getHistory() const;
     std::shared_ptr<IdentityClient> getClient() const { return m_client; }
 
     void setContacts(const std::vector<ContactInfo>& contacts);
     void setDevices(const std::vector<DeviceInfo>& devices);
+    void setHistory(const std::vector<TransferHistoryItem>& history);
 
     bool loginWithEmail(const std::string& email, const std::string& displayName, std::string* outError = nullptr);
     bool loginWithProvider(const std::string& provider, const std::string& providerUserId, const std::string& email, const std::string& displayName, std::string* outError = nullptr);
@@ -45,6 +47,10 @@ public:
     bool revokeDevice(const std::string& deviceId, std::string* outError = nullptr);
     bool generatePairingSession(DevicePairingInfo& outSession, std::string* outError = nullptr);
 
+    bool refreshHistory(int limit = 20, std::string* outError = nullptr);
+    bool recordTransfer(const TransferHistoryItem& item, std::string* outError = nullptr);
+    bool clearHistory(std::string* outError = nullptr);
+
     void setOnStateChanged(std::function<void()> callback);
 
 private:
@@ -54,6 +60,7 @@ private:
     std::vector<DeviceInfo> m_cachedDevices;
     std::vector<ContactInfo> m_cachedContacts;
     std::vector<RecentUserInfo> m_cachedRecents;
+    std::vector<TransferHistoryItem> m_cachedHistory;
     std::function<void()> m_onStateChanged;
 };
 
