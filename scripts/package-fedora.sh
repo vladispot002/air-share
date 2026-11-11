@@ -115,32 +115,38 @@ if command -v rpmbuild >/dev/null 2>&1; then
 elif command -v podman >/dev/null 2>&1; then
     echo "    Local rpmbuild not found. Using rootless Podman (registry.fedoraproject.org/fedora:44)..."
     podman run --rm \
+        -e VERSION="${VERSION}" \
         -v "${DIST_DIR}:/dist:z" \
         -v "${ROOT_DIR}/packaging/fedora/landrop.spec:/landrop.spec:z" \
         registry.fedoraproject.org/fedora:44 bash -c '
             set -euo pipefail
             echo "--> Installing build tools in container..."
             dnf install -y --setopt=install_weak_deps=False \
-                cmake gcc-c++ make qt6-qtbase-devel openssl-devel desktop-file-utils rpm-build rpmdevtools
+                cmake gcc-c++ make qt6-qtbase-devel openssl-devel desktop-file-utils rpm-build rpmdevtools rpmlint
             echo "--> Running rpmbuild..."
             mkdir -p /root/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-            cp /dist/landrop-1.0.1.tar.gz /root/rpmbuild/SOURCES/
+            cp "/dist/landrop-${VERSION}.tar.gz" /root/rpmbuild/SOURCES/
             rpmbuild -ba /landrop.spec
+            echo "--> Running rpmlint on built RPMs..."
+            rpmlint /root/rpmbuild/RPMS/*/*.rpm || true
             cp -rf /root/rpmbuild/RPMS/* /dist/rpmbuild/RPMS/
             cp -rf /root/rpmbuild/SRPMS/* /dist/rpmbuild/SRPMS/
         '
 elif command -v docker >/dev/null 2>&1; then
     echo "    Local rpmbuild not found. Using Docker..."
     docker run --rm \
+        -e VERSION="${VERSION}" \
         -v "${DIST_DIR}:/dist" \
         -v "${ROOT_DIR}/packaging/fedora/landrop.spec:/landrop.spec" \
         registry.fedoraproject.org/fedora:44 bash -c '
             set -euo pipefail
             dnf install -y --setopt=install_weak_deps=False \
-                cmake gcc-c++ make qt6-qtbase-devel openssl-devel desktop-file-utils rpm-build rpmdevtools
+                cmake gcc-c++ make qt6-qtbase-devel openssl-devel desktop-file-utils rpm-build rpmdevtools rpmlint
             mkdir -p /root/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-            cp /dist/landrop-1.0.1.tar.gz /root/rpmbuild/SOURCES/
+            cp "/dist/landrop-${VERSION}.tar.gz" /root/rpmbuild/SOURCES/
             rpmbuild -ba /landrop.spec
+            echo "--> Running rpmlint on built RPMs..."
+            rpmlint /root/rpmbuild/RPMS/*/*.rpm || true
             cp -rf /root/rpmbuild/RPMS/* /dist/rpmbuild/RPMS/
             cp -rf /root/rpmbuild/SRPMS/* /dist/rpmbuild/SRPMS/
         '

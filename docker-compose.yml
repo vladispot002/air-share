@@ -13,6 +13,7 @@ services:
       - ALL
     environment:
       - PORT=8080
+      - ENV=production
       - TURN_SECRET=${TURN_SECRET}
       - COTURN_STATIC_AUTH_SECRET=${TURN_SECRET}
       - COTURN_REALM=${DOMAIN_NAME}

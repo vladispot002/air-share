@@ -1,8 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, ChildProcess } from 'child_process';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { SignalingClient, ErrorPayload } from '../../src/core/transport/SignalingClient';
 import { fetchTurnConfig } from '../../src/core/transport/WebRtcCoordinator';
 import { isValidRoomCode } from '../../src/core/session/RoomCodeNormalizer';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ROOT_DIR = path.resolve(__dirname, '../../..');
+const SIGNALING_BIN = process.env.SIGNALING_BIN || path.join(ROOT_DIR, 'backend/signaling/bin/signaling-server');
+const WEB_DIST = path.join(ROOT_DIR, 'web/dist');
 
 const TEST_PORT = 18095;
 const SERVER_URL = `http://127.0.0.1:${TEST_PORT}`;
@@ -14,8 +22,8 @@ describe('Signaling & WebRTC Integration Suite (Live Go Daemon)', () => {
   beforeAll(async () => {
     // Spawn Go signaling server on dedicated test port
     serverProcess = spawn(
-      '/home/vladis/lan-drop/backend/signaling/bin/signaling-server',
-      ['-port', String(TEST_PORT), '-web-dir', '/home/vladis/lan-drop/web/dist'],
+      SIGNALING_BIN,
+      ['-port', String(TEST_PORT), '-web-dir', WEB_DIST],
       { stdio: 'ignore' }
     );
 

@@ -47,3 +47,8 @@ demo_received/
 node_modules/
 dist/
 Design LAN-Drop macOS UI.zip
+
+# Environment and Secrets
+.env
+.env.*
+!.env.example

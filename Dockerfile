@@ -46,14 +46,19 @@ RUN apk --no-cache add ca-certificates tzdata wget \
 
 WORKDIR /app
 
+LABEL org.opencontainers.image.title="LAN-Drop Signaling Service" \
+      org.opencontainers.image.description="Signaling and WebRTC relay coordinator for LAN-Drop" \
+      org.opencontainers.image.version="1.0.2" \
+      org.opencontainers.image.vendor="LAN-Drop Team" \
+      org.opencontainers.image.licenses="MIT"
+
 # Copy compiled artifacts from builder stages
 COPY --from=web-builder --chown=landrop:landrop /build/web/dist /app/web/dist
 COPY --from=go-builder --chown=landrop:landrop /bin/signaling-server /app/signaling-server
 
 # Default configuration environment
 ENV PORT=8080 \
-    WEB_DIR=/app/web/dist \
-    GIN_MODE=release
+    WEB_DIR=/app/web/dist
 
 # Expose HTTP/WebSocket signaling port
 EXPOSE 8080

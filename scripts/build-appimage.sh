@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
 APPDIR="${DIST_DIR}/LAN-Drop.AppDir"
 BUILD_DIR="${ROOT_DIR}/build-appimage"
-VERSION="1.0.1"
+VERSION="1.0.2"
 
 echo "=================================================="
 echo "  [LAN-Drop] Building Linux AppImage & AppDir     "
@@ -39,7 +39,6 @@ cp -f "${BUILD_DIR}/lan_drop" "${APPDIR}/usr/bin/"
 cp -f "${ROOT_DIR}/resources/lan-drop.desktop" "${APPDIR}/usr/share/applications/"
 cp -f "${ROOT_DIR}/resources/lan-drop.svg" "${APPDIR}/usr/share/icons/hicolor/scalable/apps/"
 cp -f "${ROOT_DIR}/resources/io.landrop.LAN-Drop.metainfo.xml" "${APPDIR}/usr/share/metainfo/"
-cp -f "${ROOT_DIR}/resources/io.landrop.LAN-Drop.metainfo.xml" "${APPDIR}/usr/share/metainfo/lan-drop.appdata.xml"
 cp -f "${ROOT_DIR}/resources/styles.qss" "${APPDIR}/usr/share/landrop/"
 cp -f "${ROOT_DIR}/resources/lan-drop.svg" "${APPDIR}/usr/share/landrop/"
 
@@ -111,8 +110,12 @@ fi
 
 if [ -n "${APPIMAGETOOL_BIN}" ] && [ -x "${APPIMAGETOOL_BIN}" ]; then
     echo "--> Packaging AppImage with ${APPIMAGETOOL_BIN}..."
-    ARCH=x86_64 "${APPIMAGETOOL_BIN}" --appimage-extract-and-run "${APPDIR}" "${OUTPUT_APPIMAGE}" || \
-    ARCH=x86_64 "${APPIMAGETOOL_BIN}" "${APPDIR}" "${OUTPUT_APPIMAGE}"
+    if command -v appstreamcli >/dev/null 2>&1; then
+        echo "--> Verifying AppStream metadata offline..."
+        appstreamcli validate --no-net "${APPDIR}/usr/share/metainfo/io.landrop.LAN-Drop.metainfo.xml"
+    fi
+    ARCH=x86_64 "${APPIMAGETOOL_BIN}" --appimage-extract-and-run -n "${APPDIR}" "${OUTPUT_APPIMAGE}" || \
+    ARCH=x86_64 "${APPIMAGETOOL_BIN}" -n "${APPDIR}" "${OUTPUT_APPIMAGE}"
     echo "==> AppImage created successfully: ${OUTPUT_APPIMAGE}"
 else
     echo "--> Note: 'appimagetool' not available. AppDir is fully staged at:"

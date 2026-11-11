@@ -46,30 +46,29 @@
     <category>Qt</category>
   </categories>
   <content_rating type="oars-1.1" />
+  <developer id="io.landrop">
+    <name>LAN-Drop Team</name>
+  </developer>
   <releases>
     <release version="1.0.2" date="2026-11-11">
       <description>
-        <p>Production Hardened Maintenance Release:</p>
+        <p>Production Hardened Maintenance and Connectivity Release:</p>
         <ul>
           <li>Wire Protocol v2 binary framing with CRC-32 and incremental SHA-256 verification.</li>
           <li>Real WebRTC DataChannel integration via libdatachannel with SCTP backpressure control.</li>
+          <li>Resilient byte-offset resumption for interrupted transfers.</li>
+          <li>Integrated lan_drop doctor diagnostic command for network health audits.</li>
           <li>Hardened TurnConfigClient and signaling server reverse-proxy validation.</li>
           <li>Thread-safe MulticastBeacon lifecycle and mobile C-ABI bridge concurrency fixes.</li>
         </ul>
       </description>
     </release>
-    <release version="2.0.0" date="2026-11-10">
+    <release version="1.0.1" date="2026-10-23">
       <description>
-        <p>Stage 4 Production Release:</p>
-        <ul>
-          <li>Integrated multi-stage containerized signaling and TURN deployment.</li>
-          <li>Full Debian (.deb) and AppImage packaging support.</li>
-          <li>Integrated lan_drop doctor diagnostic command for network health audits.</li>
-          <li>Resilient byte-offset resumption for interrupted transfers.</li>
-        </ul>
+        <p>Fix desktop application launcher, path permissions, and release packaging.</p>
       </description>
     </release>
-    <release version="1.0.1" date="2026-10-15">
+    <release version="1.0.0" date="2026-10-15">
       <description>
         <p>Initial stable release with Qt 6 desktop radar and local TLS transfer engine.</p>
       </description>
