@@ -77,7 +77,6 @@ services:
       - --lt-cred-mech
       - --no-cli
       - --no-multicast-peers
-      - --no-loopback-peers
       # Anti-SSRF internal network isolation (IPv4 + IPv6)
       - --denied-peer-ip=10.0.0.0-10.255.255.255
       - --denied-peer-ip=172.16.0.0-172.31.255.255
