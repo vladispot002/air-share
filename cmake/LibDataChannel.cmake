@@ -20,14 +20,28 @@ if (LANDROP_ENABLE_WEBRTC)
         set(PREFER_SYSTEM_LIB OFF CACHE BOOL "Prefer system libraries for libdatachannel dependencies" FORCE)
         set(NO_MEDIA ON CACHE BOOL "Disable libdatachannel media transport" FORCE)
         
-        FetchContent_Declare(
-            LibDataChannel
-            GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
-            GIT_TAG v0.22.2
-            GIT_SHALLOW TRUE
-            EXCLUDE_FROM_ALL
-        )
-        FetchContent_MakeAvailable(LibDataChannel)
+        if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
+            FetchContent_Declare(
+                LibDataChannel
+                GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
+                GIT_TAG v0.22.2
+                GIT_SHALLOW TRUE
+                EXCLUDE_FROM_ALL
+            )
+            FetchContent_MakeAvailable(LibDataChannel)
+        else()
+            FetchContent_Declare(
+                LibDataChannel
+                GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
+                GIT_TAG v0.22.2
+                GIT_SHALLOW TRUE
+            )
+            FetchContent_GetProperties(LibDataChannel)
+            if(NOT libdatachannel_POPULATED)
+                FetchContent_Populate(LibDataChannel)
+                add_subdirectory(${libdatachannel_SOURCE_DIR} ${libdatachannel_BINARY_DIR} EXCLUDE_FROM_ALL)
+            endif()
+        endif()
     endif()
 
     add_compile_definitions(LANDROP_HAVE_WEBRTC=1)

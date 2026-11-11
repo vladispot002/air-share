@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: landrop/signaling:2.0.0
+    image: landrop/signaling:1.0.2
     container_name: landrop-signaling
     restart: unless-stopped
     read_only: true

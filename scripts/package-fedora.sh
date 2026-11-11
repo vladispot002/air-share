@@ -128,7 +128,7 @@ elif command -v podman >/dev/null 2>&1; then
             cp "/dist/landrop-${VERSION}.tar.gz" /root/rpmbuild/SOURCES/
             rpmbuild -ba /landrop.spec
             echo "--> Running rpmlint on built RPMs..."
-            rpmlint /root/rpmbuild/RPMS/*/*.rpm || true
+            rpmlint /root/rpmbuild/RPMS/*/*.rpm
             cp -rf /root/rpmbuild/RPMS/* /dist/rpmbuild/RPMS/
             cp -rf /root/rpmbuild/SRPMS/* /dist/rpmbuild/SRPMS/
         '
@@ -146,7 +146,7 @@ elif command -v docker >/dev/null 2>&1; then
             cp "/dist/landrop-${VERSION}.tar.gz" /root/rpmbuild/SOURCES/
             rpmbuild -ba /landrop.spec
             echo "--> Running rpmlint on built RPMs..."
-            rpmlint /root/rpmbuild/RPMS/*/*.rpm || true
+            rpmlint /root/rpmbuild/RPMS/*/*.rpm
             cp -rf /root/rpmbuild/RPMS/* /dist/rpmbuild/RPMS/
             cp -rf /root/rpmbuild/SRPMS/* /dist/rpmbuild/SRPMS/
         '
