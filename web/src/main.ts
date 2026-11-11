@@ -50,6 +50,15 @@ const statusText = document.getElementById('statusText');
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput') as HTMLInputElement | null;
 
+// Outgoing Staging Elements
+const outgoingFilesCard = document.getElementById('outgoingFilesCard');
+const outgoingBadge = document.getElementById('outgoingBadge');
+const outgoingSizeBadge = document.getElementById('outgoingSizeBadge');
+const outgoingFilesList = document.getElementById('outgoingFilesList');
+const clearFilesBtn = document.getElementById('clearFilesBtn') as HTMLButtonElement | null;
+const addMoreFilesBtn = document.getElementById('addMoreFilesBtn') as HTMLButtonElement | null;
+const sendFilesBtn = document.getElementById('sendFilesBtn') as HTMLButtonElement | null;
+
 const transferCard = document.getElementById('transferCard');
 const transferFileName = document.getElementById('transferFileName');
 const transferSpeed = document.getElementById('transferSpeed');
@@ -74,7 +83,8 @@ let activeChannel: RTCDataChannel | null = null;
 let activeRoomCode: string | null = null;
 let isBusy = false;
 
-// FIFO Send Queue to prevent concurrent frame collision over single RTCDataChannel (Defect 7)
+// Staged Outgoing Files and FIFO Send Queue
+const stagedFiles: File[] = [];
 const sendQueue: File[] = [];
 let isSending = false;
 
@@ -130,6 +140,18 @@ function openQrModal(roomCode: string, pairingUrl: string) {
 
 function closeQrModal() {
   if (qrModal) qrModal.classList.remove('active');
+  if (isBusy && !activeChannel) {
+    if (coordinator) {
+      coordinator.close();
+      coordinator = null;
+    }
+    if (signalingClient) {
+      signalingClient.close();
+      signalingClient = null;
+    }
+    isBusy = false;
+    setStatus('Ready', 'ready');
+  }
 }
 
 if (copyCodeBtn) {
@@ -182,7 +204,13 @@ async function startReceivingLoop(channel: RTCDataChannel) {
   }
 }
 
+const receivedResults: ReceivedFileResult[] = [];
+
 function onFileReceived(res: ReceivedFileResult) {
+  receivedResults.push(res);
+  if (receivedResults.length > 50) {
+    receivedResults.shift();
+  }
   hideTransferCard();
   const blob = res.blob || new Blob();
   const downloadUrl = URL.createObjectURL(blob);
@@ -227,6 +255,95 @@ function onFileReceived(res: ReceivedFileResult) {
   }
 }
 
+function renderOutgoingFiles() {
+  if (!outgoingFilesCard || !outgoingFilesList) return;
+  if (stagedFiles.length === 0) {
+    outgoingFilesCard.style.display = 'none';
+    outgoingFilesList.innerHTML = '';
+    return;
+  }
+  outgoingFilesCard.style.display = 'flex';
+  const totalBytes = stagedFiles.reduce((acc, f) => acc + f.size, 0);
+  if (outgoingBadge) {
+    outgoingBadge.textContent = `${stagedFiles.length} ${stagedFiles.length === 1 ? 'file' : 'files'}`;
+  }
+  if (outgoingSizeBadge) {
+    outgoingSizeBadge.textContent = formatBytes(totalBytes);
+  }
+
+  outgoingFilesList.innerHTML = '';
+  stagedFiles.forEach((f, idx) => {
+    const item = document.createElement('div');
+    item.className = 'outgoing-item';
+
+    const left = document.createElement('div');
+    left.className = 'outgoing-item-left';
+
+    const icon = document.createElement('span');
+    icon.textContent = '📄';
+
+    const name = document.createElement('span');
+    name.className = 'outgoing-item-name';
+    name.textContent = f.name;
+    name.title = f.name;
+
+    const size = document.createElement('span');
+    size.className = 'outgoing-item-size';
+    size.textContent = `(${formatBytes(f.size)})`;
+
+    left.appendChild(icon);
+    left.appendChild(name);
+    left.appendChild(size);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn-remove';
+    removeBtn.textContent = '✕';
+    removeBtn.title = 'Remove file';
+    removeBtn.onclick = (e) => {
+      e.stopPropagation();
+      removeStagedFile(idx);
+    };
+
+    item.appendChild(left);
+    item.appendChild(removeBtn);
+    outgoingFilesList.appendChild(item);
+  });
+
+  if (sendFilesBtn) {
+    if (activeChannel && activeChannel.readyState === 'open') {
+      sendFilesBtn.textContent = `🚀 Send ${stagedFiles.length} ${stagedFiles.length === 1 ? 'File' : 'Files'}`;
+      sendFilesBtn.disabled = false;
+    } else {
+      sendFilesBtn.textContent = `📷 Host Room to Send`;
+      sendFilesBtn.disabled = false;
+    }
+  }
+}
+
+function addFiles(files: FileList | File[]) {
+  if (!files || files.length === 0) return;
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    const exists = stagedFiles.some((s) => s.name === f.name && s.size === f.size);
+    if (!exists) {
+      stagedFiles.push(f);
+    }
+  }
+  renderOutgoingFiles();
+}
+
+function removeStagedFile(index: number) {
+  if (index >= 0 && index < stagedFiles.length) {
+    stagedFiles.splice(index, 1);
+    renderOutgoingFiles();
+  }
+}
+
+function clearStagedFiles() {
+  stagedFiles.length = 0;
+  renderOutgoingFiles();
+}
+
 function setupDataChannel(channel: RTCDataChannel, roomCode: string) {
   activeChannel = channel;
   activeRoomCode = roomCode;
@@ -236,11 +353,13 @@ function setupDataChannel(channel: RTCDataChannel, roomCode: string) {
   if (qrStatus) {
     qrStatus.textContent = '✓ Peer connected! Ready for transfers.';
   }
+  closeQrModal();
 
   channel.onclose = () => {
     setStatus('Peer disconnected', 'ready');
     activeChannel = null;
     coordinator?.close();
+    renderOutgoingFiles();
   };
 
   channel.onerror = (e) => {
@@ -249,6 +368,16 @@ function setupDataChannel(channel: RTCDataChannel, roomCode: string) {
   };
 
   startReceivingLoop(channel);
+
+  renderOutgoingFiles();
+
+  // If files were staged prior to connection, automatically send them
+  if (stagedFiles.length > 0) {
+    for (const f of stagedFiles) {
+      sendQueue.push(f);
+    }
+    clearStagedFiles();
+  }
 
   // Process any pending items in the send queue
   processSendQueue();
@@ -296,13 +425,29 @@ async function processSendQueue() {
 }
 
 function sendFile(file: File) {
-  sendQueue.push(file);
-  if (!activeChannel || activeChannel.readyState !== 'open') {
-    hostRoomFlow();
-  } else {
+  addFiles([file]);
+  if (activeChannel && activeChannel.readyState === 'open') {
+    for (const f of stagedFiles) {
+      sendQueue.push(f);
+    }
+    clearStagedFiles();
     processSendQueue();
   }
 }
+
+// Expose on window for CDP automation and testing
+(window as any).lanDrop = {
+  sendFile,
+  addFiles,
+  removeStagedFile,
+  clearStagedFiles,
+  renderOutgoingFiles,
+  getStagedFiles: () => stagedFiles,
+  getReceivedFiles: () => receivedResults,
+  getActiveChannel: () => activeChannel,
+  getPeerConnection: () => coordinator?.connection,
+  getCoordinator: () => coordinator,
+};
 
 async function hostRoomFlow() {
   if (isBusy) return;
@@ -417,13 +562,27 @@ if (joinBtn && roomInput) {
 
   roomInput.addEventListener('input', () => {
     try {
-      if (roomInput.value.trim().length >= 8) {
-        const canonical = normalizeRoomCode(roomInput.value);
+      const trimmed = roomInput.value.trim();
+      if (trimmed.length >= 8 || trimmed.includes('#') || trimmed.startsWith('http')) {
+        const canonical = normalizeRoomCode(trimmed);
         roomInput.dataset.normalized = canonical;
       }
     } catch {
       delete roomInput.dataset.normalized;
     }
+  });
+
+  roomInput.addEventListener('paste', () => {
+    setTimeout(() => {
+      try {
+        const val = roomInput.value.trim();
+        if (val) {
+          const canonical = normalizeRoomCode(val);
+          roomInput.value = canonical;
+          roomInput.dataset.normalized = canonical;
+        }
+      } catch {}
+    }, 0);
   });
 
   roomInput.addEventListener('keydown', (e) => {
@@ -439,8 +598,15 @@ if (dropzone && fileInput) {
   dropzone.onclick = () => fileInput.click();
   fileInput.onchange = () => {
     if (fileInput.files && fileInput.files.length > 0) {
-      for (let i = 0; i < fileInput.files.length; i++) {
-        sendFile(fileInput.files[i]);
+      const filesCopy = Array.from(fileInput.files);
+      fileInput.value = ''; // Always reset so re-selecting same file fires onchange
+      addFiles(filesCopy);
+      if (activeChannel && activeChannel.readyState === 'open') {
+        for (const f of stagedFiles) {
+          sendQueue.push(f);
+        }
+        clearStagedFiles();
+        processSendQueue();
       }
     }
   };
@@ -454,12 +620,42 @@ if (dropzone && fileInput) {
   dropzone.ondrop = (e) => {
     e.preventDefault();
     dropzone.classList.remove('dragover');
-    if (e.dataTransfer && e.dataTransfer.files.length > 0) {
-      for (let i = 0; i < e.dataTransfer.files.length; i++) {
-        sendFile(e.dataTransfer.files[i]);
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const filesCopy = Array.from(e.dataTransfer.files);
+      addFiles(filesCopy);
+      if (activeChannel && activeChannel.readyState === 'open') {
+        for (const f of stagedFiles) {
+          sendQueue.push(f);
+        }
+        clearStagedFiles();
+        processSendQueue();
       }
     }
   };
+}
+
+// Staged Outgoing Actions
+if (sendFilesBtn) {
+  sendFilesBtn.onclick = () => {
+    if (stagedFiles.length === 0) return;
+    if (activeChannel && activeChannel.readyState === 'open') {
+      for (const f of stagedFiles) {
+        sendQueue.push(f);
+      }
+      clearStagedFiles();
+      processSendQueue();
+    } else {
+      hostRoomFlow();
+    }
+  };
+}
+
+if (addMoreFilesBtn && fileInput) {
+  addMoreFilesBtn.onclick = () => fileInput.click();
+}
+
+if (clearFilesBtn) {
+  clearFilesBtn.onclick = () => clearStagedFiles();
 }
 
 // Check URL Hash on load & on hashchange

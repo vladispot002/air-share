@@ -336,9 +336,16 @@ export class SignalingClient {
 
   leaveRoom(): void {
     if (this.currentRoomCode) {
-      this.sendEnvelope(SignalingAction.LeaveRoom, this.currentRoomCode);
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.sendEnvelope(SignalingAction.LeaveRoom, this.currentRoomCode);
+        } catch {
+          // Ignore send failures during teardown
+        }
+      }
       this.currentRoomCode = '';
       this.currentRoomToken = '';
+      this.peerJoined = false;
     }
   }
 

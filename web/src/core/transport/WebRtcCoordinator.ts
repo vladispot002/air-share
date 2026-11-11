@@ -14,7 +14,8 @@ export interface TurnApiResponse {
 export async function fetchTurnConfig(
   signalingHttpUrl: string,
   token: string,
-  clientId?: string
+  clientId?: string,
+  timeoutMs: number = 4000
 ): Promise<RTCConfiguration> {
   const url = new URL('/api/v1/turn-config', signalingHttpUrl);
   // DEF-12: Never expose secret token in URL query string
@@ -22,22 +23,30 @@ export async function fetchTurnConfig(
     url.searchParams.set('client_id', clientId);
   }
 
-  const res = await fetch(url.toString(), {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
-    },
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (!res.ok) {
-    throw new Error(`Failed to fetch TURN configuration: HTTP ${res.status}`);
+  try {
+    const res = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+      },
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      throw new Error(`Failed to fetch TURN configuration: HTTP ${res.status}`);
+    }
+
+    const data = (await res.json()) as TurnApiResponse;
+    return {
+      iceServers: data.ice_servers as RTCIceServer[],
+    };
+  } finally {
+    clearTimeout(timer);
   }
-
-  const data = (await res.json()) as TurnApiResponse;
-  return {
-    iceServers: data.ice_servers as RTCIceServer[],
-  };
 }
 
 /**
@@ -126,6 +135,9 @@ export class WebRtcCoordinator {
     const rtcConfig = customConfig || this.config || {
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
     };
+    if (typeof window !== 'undefined' && (window as any).__LAN_DROP_ICE_POLICY) {
+      rtcConfig.iceTransportPolicy = (window as any).__LAN_DROP_ICE_POLICY;
+    }
 
     const pc = new RTCPeerConnection(rtcConfig);
     this.peerConnection = pc;
@@ -134,6 +146,11 @@ export class WebRtcCoordinator {
 
     pc.onicecandidate = (event) => {
       if (event.candidate && event.candidate.candidate) {
+        if (typeof window !== 'undefined' && typeof (window as any).__LAN_DROP_CANDIDATE_FILTER === 'function') {
+          if (!(window as any).__LAN_DROP_CANDIDATE_FILTER(event.candidate.candidate)) {
+            return;
+          }
+        }
         this.signalingClient.sendIceCandidate(event.candidate.toJSON());
       }
     };
@@ -157,6 +174,14 @@ export class WebRtcCoordinator {
   }
 
   private async handleRemoteCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+    if (!candidate || !candidate.candidate) {
+      return;
+    }
+    if (typeof window !== 'undefined' && typeof (window as any).__LAN_DROP_CANDIDATE_FILTER === 'function') {
+      if (!(window as any).__LAN_DROP_CANDIDATE_FILTER(candidate.candidate)) {
+        return;
+      }
+    }
     if (!this.peerConnection || !this.hasRemoteDescription) {
       this.pendingRemoteCandidates.push(candidate);
       return;
@@ -164,7 +189,7 @@ export class WebRtcCoordinator {
     try {
       await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (err) {
-      console.error('Failed to add remote ICE candidate:', err);
+      console.warn('Failed to add remote ICE candidate:', err);
     }
   }
 
@@ -172,17 +197,17 @@ export class WebRtcCoordinator {
     if (!this.peerConnection) return;
     while (this.pendingRemoteCandidates.length > 0) {
       const c = this.pendingRemoteCandidates.shift();
-      if (c) {
+      if (c && c.candidate) {
         try {
           await this.peerConnection.addIceCandidate(new RTCIceCandidate(c));
         } catch (err) {
-          console.error('Failed to flush remote ICE candidate:', err);
+          console.warn('Failed to flush remote ICE candidate:', err);
         }
       }
     }
   }
 
-  async startInitiator(): Promise<RTCDataChannel> {
+  async startInitiator(timeoutMs: number = 25000): Promise<RTCDataChannel> {
     this.isInitiator = true;
     const pc = await this.setupPeerConnection();
 
@@ -194,6 +219,11 @@ export class WebRtcCoordinator {
     // Wait for peer to join the room before transmitting SDP offer
     if (!this.signalingClient.hasPeerJoined) {
       await new Promise<void>((resolve, reject) => {
+        let timer: any = setTimeout(() => {
+          cleanup();
+          reject(new Error(`Timeout (${timeoutMs}ms) waiting for peer to join room`));
+        }, timeoutMs);
+
         const onPeerJoined = () => {
           cleanup();
           resolve();
@@ -203,6 +233,10 @@ export class WebRtcCoordinator {
           reject(new Error(`Signaling error while waiting for peer: [${errPayload.code}] ${errPayload.message}`));
         };
         const cleanup = () => {
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
           this.signalingClient.off('peer_joined', onPeerJoined as any);
           this.signalingClient.off('error', onError as any);
         };
@@ -218,7 +252,45 @@ export class WebRtcCoordinator {
     return new Promise((resolve, reject) => {
       let settled = false;
 
+      let timeoutTimer: any = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error(`Connection timeout (${timeoutMs}ms) establishing DataChannel with peer`));
+        }
+      }, timeoutMs);
+
+      const onIceStateChange = () => {
+        if (pc.iceConnectionState === 'failed') {
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(new Error('WebRTC ICE connection failed (NAT traversal or relay failure)'));
+          }
+        }
+      };
+
+      const onConnStateChange = () => {
+        if (pc.connectionState === 'failed') {
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(new Error('WebRTC PeerConnection state failed'));
+          }
+        }
+      };
+
+      pc.addEventListener('iceconnectionstatechange', onIceStateChange);
+      pc.addEventListener('connectionstatechange', onConnStateChange);
+
       const cleanup = () => {
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+        pc.removeEventListener('iceconnectionstatechange', onIceStateChange);
+        pc.removeEventListener('connectionstatechange', onConnStateChange);
+
         if (this.onSdpAnswerHandler) {
           this.signalingClient.off('sdp_answer', this.onSdpAnswerHandler as any);
           this.onSdpAnswerHandler = undefined;
@@ -267,6 +339,13 @@ export class WebRtcCoordinator {
       };
       this.signalingClient.on('sdp_answer', this.onSdpAnswerHandler);
 
+      if (dc.readyState === 'open') {
+        settled = true;
+        cleanup();
+        resolve(dc);
+        return;
+      }
+
       dc.onopen = () => {
         if (!settled) {
           settled = true;
@@ -291,14 +370,52 @@ export class WebRtcCoordinator {
     });
   }
 
-  async startJoiner(): Promise<RTCDataChannel> {
+  async startJoiner(timeoutMs: number = 25000): Promise<RTCDataChannel> {
     this.isInitiator = false;
     const pc = await this.setupPeerConnection();
 
     return new Promise((resolve, reject) => {
       let settled = false;
 
+      let timeoutTimer: any = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error(`Connection timeout (${timeoutMs}ms) negotiating with host`));
+        }
+      }, timeoutMs);
+
+      const onIceStateChange = () => {
+        if (pc.iceConnectionState === 'failed') {
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(new Error('WebRTC ICE connection failed on joiner (NAT traversal or relay failure)'));
+          }
+        }
+      };
+
+      const onConnStateChange = () => {
+        if (pc.connectionState === 'failed') {
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(new Error('WebRTC PeerConnection state failed on joiner'));
+          }
+        }
+      };
+
+      pc.addEventListener('iceconnectionstatechange', onIceStateChange);
+      pc.addEventListener('connectionstatechange', onConnStateChange);
+
       const cleanup = () => {
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+        pc.removeEventListener('iceconnectionstatechange', onIceStateChange);
+        pc.removeEventListener('connectionstatechange', onConnStateChange);
+
         if (this.onSdpOfferHandler) {
           this.signalingClient.off('sdp_offer', this.onSdpOfferHandler as any);
           this.onSdpOfferHandler = undefined;
@@ -409,11 +526,15 @@ export class WebRtcCoordinator {
     }
 
     if (this.dataChannel) {
-      this.dataChannel.close();
+      try {
+        this.dataChannel.close();
+      } catch {}
       this.dataChannel = null;
     }
     if (this.peerConnection) {
-      this.peerConnection.close();
+      try {
+        this.peerConnection.close();
+      } catch {}
       this.peerConnection = null;
     }
     this.pendingRemoteCandidates = [];
