@@ -160,7 +160,7 @@ void QtDesktopApp::setupPresenters() {
     QDir().mkpath(configDir);
 
     const char* envSignal = std::getenv("LANDROP_SIGNALING_URL");
-    std::string identityBase = envSignal ? envSignal : "http://127.0.0.1:8080";
+    std::string identityBase = envSignal ? envSignal : "https://landrop-server.duckdns.org";
     if (identityBase.rfind("ws://", 0) == 0) {
         identityBase = "http://" + identityBase.substr(5);
     } else if (identityBase.rfind("wss://", 0) == 0) {
@@ -794,7 +794,7 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
         "WebRTC support is not compiled into this build. Rebuild with -DLANDROP_ENABLE_WEBRTC=ON.");
 #else
     const char* envSignaling = std::getenv("LANDROP_SIGNALING_URL");
-    std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "ws://127.0.0.1:8080/ws/signaling";
+    std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "wss://landrop-server.duckdns.org/ws/signaling";
 
     CoordinatorOptions opts;
     opts.signalingHttpUrl = deriveWsHttpUrl(signalingWsUrl);
@@ -1000,7 +1000,7 @@ void QtDesktopApp::onJoinRoomRequested(const QString& roomCode) {
         "WebRTC support is not compiled into this build. Rebuild with -DLANDROP_ENABLE_WEBRTC=ON.");
 #else
     const char* envSignaling = std::getenv("LANDROP_SIGNALING_URL");
-    std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "ws://127.0.0.1:8080/ws/signaling";
+    std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "wss://landrop-server.duckdns.org/ws/signaling";
 
     CoordinatorOptions opts;
     opts.signalingHttpUrl = deriveWsHttpUrl(signalingWsUrl);

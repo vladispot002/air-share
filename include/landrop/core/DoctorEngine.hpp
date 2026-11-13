@@ -60,7 +60,7 @@ struct DoctorReport {
 
 struct DoctorOptions {
     std::string stunServer{"stun.l.google.com:19302"};
-    std::string signalingUrl{"http://localhost:8080/healthz"};
+    std::string signalingUrl{"https://landrop-server.duckdns.org/healthz"};
     uint16_t tcpPort{8848};
     uint16_t udpPort{52637};
     int timeoutMs{2500};

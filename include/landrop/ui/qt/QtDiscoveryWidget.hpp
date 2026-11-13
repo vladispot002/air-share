@@ -7,6 +7,9 @@
 #include <QHBoxLayout>
 #include <QScrollArea>
 #include <QFrame>
+#include <QStackedWidget>
+#include <QLineEdit>
+#include <QSpinBox>
 #include <vector>
 #include "landrop/ui/IView.hpp"
 
@@ -30,6 +33,8 @@ public:
     QPushButton* getLoopbackBtn() const { return m_loopbackBtn; }
     QPushButton* getGlobalP2pBtn() const { return m_globalP2pBtn; }
     QLabel* getStatusLabel() const { return m_statusLabel; }
+    QPushButton* getLanTabBtn() const { return m_lanTabBtn; }
+    QPushButton* getGlobalTabBtn() const { return m_globalTabBtn; }
 
     // IDiscoveryView overrides
 
@@ -43,6 +48,10 @@ signals:
     void hostRoomRequested(const QString& filePath = QString());
     void joinRoomRequested(const QString& roomCode);
 
+public slots:
+    void switchToLanMode();
+    void switchToGlobalMode();
+
 private slots:
     void onRefreshClicked();
     void onToggleScanClicked();
@@ -51,6 +60,9 @@ private slots:
     void onGlobalP2pClicked();
     void onDeviceSendClicked(const QString& peerId);
     void onDeviceRemoveClicked(const QString& peerId);
+    void onGlobalHostClicked();
+    void onGlobalJoinClicked();
+    void onGlobalDirectConnectClicked();
 
 private:
     DiscoveryPresenter* m_presenter{nullptr};
@@ -63,6 +75,19 @@ private:
     QPushButton* m_loopbackBtn{nullptr};
     QPushButton* m_globalP2pBtn{nullptr};
 
+    // Mode Selector (LAN vs Global P2P across different networks)
+    QPushButton* m_lanTabBtn{nullptr};
+    QPushButton* m_globalTabBtn{nullptr};
+    QStackedWidget* m_modeStack{nullptr};
+    QWidget* m_lanPage{nullptr};
+    QWidget* m_globalPage{nullptr};
+
+    // Global P2P Controls
+    QLineEdit* m_globalRoomInput{nullptr};
+    QLineEdit* m_globalDirectIpInput{nullptr};
+    QSpinBox* m_globalDirectPortSpin{nullptr};
+    QLabel* m_globalServerStatusLabel{nullptr};
+
     QWidget* m_cardsContainer{nullptr};
     QVBoxLayout* m_cardsLayout{nullptr};
     QWidget* m_emptyStateWidget{nullptr};
@@ -71,6 +96,8 @@ private:
     bool m_isScanning{true};
 
     void setupUi();
+    void setupLanPage();
+    void setupGlobalPage();
     void updateMyDeviceCard();
     void renderDeviceCards(const std::vector<DeviceViewModel>& devices);
     void renderEmptyState();

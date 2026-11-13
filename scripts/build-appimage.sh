@@ -82,6 +82,7 @@ export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib/x86_64-linux-gnu:${HERE}
 export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export QT_PLUGIN_PATH="${HERE}/usr/plugins:${QT_PLUGIN_PATH:-}"
 export QML2_IMPORT_PATH="${HERE}/usr/qml:${QML2_IMPORT_PATH:-}"
+export LANDROP_SIGNALING_URL="${LANDROP_SIGNALING_URL:-wss://landrop-server.duckdns.org/ws/signaling}"
 
 EXEC="${HERE}/usr/bin/lan_drop"
 if [ ! -f "${EXEC}" ]; then

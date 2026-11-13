@@ -622,7 +622,7 @@ int main(int argc, char* argv[]) {
             } else {
                 std::string filePath = argv[2];
                 const char* envSignaling = std::getenv("LANDROP_SIGNALING_URL");
-                std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "ws://127.0.0.1:8080/ws/signaling";
+                std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "wss://landrop-server.duckdns.org/ws/signaling";
                 for (int i = 3; i < argc; ++i) {
                     std::string arg = argv[i];
                     if (arg == "--signaling" && i + 1 < argc) {
@@ -645,7 +645,7 @@ int main(int argc, char* argv[]) {
                 std::string roomCode = argv[2];
                 std::string saveDir = "./downloads";
                 const char* envSignaling = std::getenv("LANDROP_SIGNALING_URL");
-                std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "ws://127.0.0.1:8080/ws/signaling";
+                std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "wss://landrop-server.duckdns.org/ws/signaling";
                 for (int i = 3; i < argc; ++i) {
                     std::string arg = argv[i];
                     if (arg == "--signaling" && i + 1 < argc) {
