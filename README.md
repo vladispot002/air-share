@@ -14,7 +14,7 @@
 
 **LAN-Drop** is an ultra-fast, secure, cross-platform file transfer system designed for seamless data exchange across local networks (LAN/Wi-Fi) and the public Internet. It bridges desktop applications and web browsers with zero external cloud file storage, end-to-end cryptographic integrity, and account-optional instant guest pairing.
 
-[Features](#-key-features) • [Architecture](#-architecture-overview) • [Installation](#-installation) • [Building from Source](#-building-from-source) • [Quick Start](#-quick-start--usage) • [Configuration](#-configuration) • [Testing](#-testing) • [Troubleshooting](#-troubleshooting)
+[Features](#-key-features) • [Architecture](#-architecture-overview) • [Installation](#-installation) • [Building from Source](#-building-from-source) • [Quick Start](#-quick-start--usage) • [Configuration](#-configuration) • [Testing](#-testing) • [Troubleshooting](#-troubleshooting) • [AI Disclosure](#-artificial-intelligence-in-engineering)
 
 </div>
 
@@ -439,6 +439,20 @@ lan-drop/
 2. Maintain strict `-std=c++20` standard compliance with zero compiler warnings (`-Wall -Wextra -Wpedantic`).
 3. Ensure all tests pass (`ctest`, `npm test`, `go test ./...`) before submitting changes.
 4. Open a pull request against `vladispot002/air-share`.
+
+---
+
+## 🤖 Artificial Intelligence in Engineering
+
+The engineering and development of LAN-Drop incorporated modern **AI-assisted software engineering methodologies**, leveraging autonomous multi-agent orchestration, large language models (LLMs), and automated verification agents to assist human engineers in architecture planning, systems programming, test suite synthesis, and release engineering.
+
+### Architectural Separation & Guarantees:
+- **Zero Runtime AI Dependencies**: The LAN-Drop application at runtime is 100% deterministic systems software compiled from native C++20, Qt 6, Go 1.23, and TypeScript. It contains **no neural networks, no machine learning runtimes, and makes zero calls to external AI APIs or cloud LLMs**. All data transfers, cryptographic operations, and protocol framing execute entirely locally and deterministically on user devices.
+- **Autonomous Multi-Agent Framework**: Development utilized specialized agent roles (defined in `.agents/`) for architecture design (`architect`), systems development (`developer`), independent test authoring (`tester`), and adversarial code review (`reviewer`).
+- **Strict Verification Gates**: All AI-assisted contributions were subjected to continuous human oversight, strict compiler diagnostics (`-Wall -Wextra -Wpedantic`), and automated verification suites (32 test suites, 1,116 assertions) validated in clean host and container environments.
+
+For the full authoritative disclosure on tools, governance, agent roles, and verification evidence, refer to:  
+📄 **[Disclosure: Artificial Intelligence in the Software Development Process](docs/AI_DEVELOPMENT_DISCLOSURE.md)**
 
 ---
 
