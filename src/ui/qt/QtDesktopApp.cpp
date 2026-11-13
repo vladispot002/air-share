@@ -498,6 +498,20 @@ void QtDesktopApp::handleSendFile(const std::string& taskId, const std::string& 
             if (channel && channel->isConnected()) {
                 statusBar()->showMessage(QString("Streaming file over WebRTC to %1...").arg(QString::fromStdString(targetPeerId)));
                 launchWorker([this, taskId, filePath, targetPeerId, channel]() {
+                    // Temporarily signal standby receiver on this channel to yield
+                    std::shared_ptr<std::atomic<bool>> rxCancel;
+                    {
+                        std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+                        auto it = m_activeRxCancelTokens.find(targetPeerId);
+                        if (it != m_activeRxCancelTokens.end()) {
+                            rxCancel = it->second;
+                        }
+                    }
+                    if (rxCancel) {
+                        rxCancel->store(true);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    }
+
                     TransferOptions opts;
                     opts.closeChannelOnCompletion = false;
                     if (m_settingsPresenter) {
@@ -520,6 +534,11 @@ void QtDesktopApp::handleSendFile(const std::string& taskId, const std::string& 
                         nullptr,
                         &err
                     );
+
+                    // Restore standby receiver
+                    if (rxCancel) {
+                        rxCancel->store(false);
+                    }
 
                     recordTransferHistory(taskId, "upload", targetPeerId, QFileInfo(QString::fromStdString(filePath)).fileName().toStdString(), QFileInfo(QString::fromStdString(filePath)).size(), ok, "WebRtcDataChannel");
                     QMetaObject::invokeMethod(this, [this, taskId, ok, err, targetPeerId]() {
@@ -809,8 +828,31 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
     }
 
     auto coordinator = std::make_shared<WebRtcSessionCoordinator>("gui-host", WebRtcConfig{}, opts);
+    std::string tempPendingId = "host-pending-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    {
+        std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+        m_pendingCoordinators[tempPendingId] = coordinator;
+    }
 
-    coordinator->onRoomReady = [this, coordinator, filePath, signalingWsUrl](const std::string& code) {
+    coordinator->onError = [this, coordinator](const std::string& err) {
+        std::string code = coordinator->getRoomCode();
+        {
+            std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+            if (!code.empty()) {
+                m_pendingCoordinators.erase("host:" + code);
+            }
+        }
+        QMetaObject::invokeMethod(this, [this, err]() {
+            statusBar()->showMessage(QString("✗ WebRTC Signaling Error: %1").arg(QString::fromStdString(err)), 7000);
+        }, Qt::QueuedConnection);
+    };
+
+    coordinator->onRoomReady = [this, coordinator, filePath, signalingWsUrl, tempPendingId](const std::string& code) {
+        {
+            std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+            m_pendingCoordinators["host:" + code] = coordinator;
+            m_pendingCoordinators.erase(tempPendingId);
+        }
         QMetaObject::invokeMethod(this, [this, coordinator, code, filePath, signalingWsUrl]() {
             auto* dlg = new QDialog(this);
             dlg->setWindowTitle("Optical Pairing — Global P2P Room");
@@ -893,6 +935,8 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
         {
             std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
             m_globalCoordinators[peerId] = coordinator;
+            m_pendingCoordinators.erase("host:" + roomCode);
+            m_activeRxCancelTokens[peerId] = std::make_shared<std::atomic<bool>>(false);
         }
         QMetaObject::invokeMethod(this, [this, peerId, roomCode]() {
             if (m_discoveryWidget) {
@@ -956,7 +1000,17 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
                 }, Qt::QueuedConnection);
 
                 // After sending, enter receive loop to allow bidirectional transfers
+                auto rxCancel = [this, peerId]() -> std::shared_ptr<std::atomic<bool>> {
+                    std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+                    auto it = m_activeRxCancelTokens.find(peerId);
+                    return (it != m_activeRxCancelTokens.end()) ? it->second : nullptr;
+                }();
+
                 while (coordinator->getState() == CoordinatorState::Connected && channel && channel->isConnected()) {
+                    if (rxCancel && rxCancel->load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        continue;
+                    }
                     TransferOptions rxOpts;
                     rxOpts.autoRenameDuplicates = true;
                     rxOpts.closeChannelOnCompletion = false;
@@ -976,7 +1030,7 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
                                 }
                             }, Qt::QueuedConnection);
                         },
-                        nullptr,
+                        rxCancel.get(),
                         &rxErr,
                         [this, coordinator](const std::string& tid, const std::string& fn, uint64_t fs, const std::string&) -> bool {
                             QMetaObject::invokeMethod(this, [this, coordinator, tid, fn, fs]() {
@@ -1006,13 +1060,29 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
                             }, Qt::QueuedConnection);
                         }
                     );
-                    if (!rxOk) break;
+                    if (!rxOk) {
+                        if (rxCancel && rxCancel->load()) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                            continue;
+                        }
+                        break;
+                    }
                 }
             });
         } else {
             // Hosting in Receive / Standby mode: listen for incoming files continuously
-            launchWorker([this, coordinator, channel]() {
+            launchWorker([this, coordinator, channel, peerId]() {
+                auto rxCancel = [this, peerId]() -> std::shared_ptr<std::atomic<bool>> {
+                    std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+                    auto it = m_activeRxCancelTokens.find(peerId);
+                    return (it != m_activeRxCancelTokens.end()) ? it->second : nullptr;
+                }();
+
                 while (coordinator->getState() == CoordinatorState::Connected && channel && channel->isConnected()) {
+                    if (rxCancel && rxCancel->load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        continue;
+                    }
                     TransferOptions rxOpts;
                     rxOpts.autoRenameDuplicates = true;
                     rxOpts.closeChannelOnCompletion = false;
@@ -1032,7 +1102,7 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
                                 }
                             }, Qt::QueuedConnection);
                         },
-                        nullptr, // cancelFlag
+                        rxCancel.get(), // cancelFlag
                         &rxErr,  // outError
                         [this, coordinator](const std::string& tid, const std::string& fn, uint64_t fs, const std::string&) -> bool {
                             QMetaObject::invokeMethod(this, [this, coordinator, tid, fn, fs]() {
@@ -1062,7 +1132,13 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
                             }, Qt::QueuedConnection);
                         }
                     );
-                    if (!ok) break;
+                    if (!ok) {
+                        if (rxCancel && rxCancel->load()) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                            continue;
+                        }
+                        break;
+                    }
                 }
             });
         }
@@ -1100,6 +1176,20 @@ void QtDesktopApp::onJoinRoomRequested(const QString& roomCode) {
     }
 
     auto coordinator = std::make_shared<WebRtcSessionCoordinator>("gui-joiner", WebRtcConfig{}, opts);
+    {
+        std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+        m_pendingCoordinators["join:" + roomCode.toStdString()] = coordinator;
+    }
+
+    coordinator->onError = [this, roomCode](const std::string& err) {
+        {
+            std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+            m_pendingCoordinators.erase("join:" + roomCode.toStdString());
+        }
+        QMetaObject::invokeMethod(this, [this, roomCode, err]() {
+            statusBar()->showMessage(QString("✗ WebRTC Join Error (%1): %2").arg(roomCode).arg(QString::fromStdString(err)), 7000);
+        }, Qt::QueuedConnection);
+    };
 
     coordinator->onChannelOpened = [this, coordinator](std::shared_ptr<WebRtcDataChannel> channel) {
         std::string roomCode = coordinator->getRoomCode();
@@ -1107,6 +1197,8 @@ void QtDesktopApp::onJoinRoomRequested(const QString& roomCode) {
         {
             std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
             m_globalCoordinators[peerId] = coordinator;
+            m_pendingCoordinators.erase("join:" + roomCode);
+            m_activeRxCancelTokens[peerId] = std::make_shared<std::atomic<bool>>(false);
         }
         QMetaObject::invokeMethod(this, [this, peerId, roomCode]() {
             if (m_discoveryWidget) {
@@ -1122,8 +1214,18 @@ void QtDesktopApp::onJoinRoomRequested(const QString& roomCode) {
             statusBar()->showMessage(QString("✓ WebRTC Global P2P Peer Connected (%1)").arg(QString::fromStdString(roomCode)), 5000);
         }, Qt::QueuedConnection);
 
-        launchWorker([this, coordinator, channel]() {
+        launchWorker([this, coordinator, channel, peerId]() {
+            auto rxCancel = [this, peerId]() -> std::shared_ptr<std::atomic<bool>> {
+                std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+                auto it = m_activeRxCancelTokens.find(peerId);
+                return (it != m_activeRxCancelTokens.end()) ? it->second : nullptr;
+            }();
+
             while (coordinator->getState() == CoordinatorState::Connected && channel && channel->isConnected()) {
+                if (rxCancel && rxCancel->load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    continue;
+                }
                 TransferOptions rxOpts;
                 rxOpts.autoRenameDuplicates = true;
                 rxOpts.closeChannelOnCompletion = false;
@@ -1143,7 +1245,7 @@ void QtDesktopApp::onJoinRoomRequested(const QString& roomCode) {
                             }
                         }, Qt::QueuedConnection);
                     },
-                    nullptr, // cancelFlag
+                    rxCancel.get(), // cancelFlag
                     &rxErr,  // outError
                     [this, coordinator](const std::string& tid, const std::string& fn, uint64_t fs, const std::string&) -> bool {
                         QMetaObject::invokeMethod(this, [this, coordinator, tid, fn, fs]() {
@@ -1173,7 +1275,13 @@ void QtDesktopApp::onJoinRoomRequested(const QString& roomCode) {
                         }, Qt::QueuedConnection);
                     }
                 );
-                if (!ok) break;
+                if (!ok) {
+                    if (rxCancel && rxCancel->load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        continue;
+                    }
+                    break;
+                }
             }
         });
     };
@@ -1211,6 +1319,20 @@ void QtDesktopApp::onJoinRoomWithFileRequested(const QString& roomCode, const QS
     }
 
     auto coordinator = std::make_shared<WebRtcSessionCoordinator>("gui-joiner-sender", WebRtcConfig{}, opts);
+    {
+        std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+        m_pendingCoordinators["join-file:" + roomCode.toStdString()] = coordinator;
+    }
+
+    coordinator->onError = [this, roomCode](const std::string& err) {
+        {
+            std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+            m_pendingCoordinators.erase("join-file:" + roomCode.toStdString());
+        }
+        QMetaObject::invokeMethod(this, [this, roomCode, err]() {
+            statusBar()->showMessage(QString("✗ WebRTC Join Error (%1): %2").arg(roomCode).arg(QString::fromStdString(err)), 7000);
+        }, Qt::QueuedConnection);
+    };
 
     coordinator->onChannelOpened = [this, coordinator, filePath](std::shared_ptr<WebRtcDataChannel> channel) {
         std::string roomCode = coordinator->getRoomCode();
@@ -1218,6 +1340,8 @@ void QtDesktopApp::onJoinRoomWithFileRequested(const QString& roomCode, const QS
         {
             std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
             m_globalCoordinators[peerId] = coordinator;
+            m_pendingCoordinators.erase("join-file:" + roomCode);
+            m_activeRxCancelTokens[peerId] = std::make_shared<std::atomic<bool>>(false);
         }
         QMetaObject::invokeMethod(this, [this, peerId, roomCode]() {
             if (m_discoveryWidget) {
@@ -1282,8 +1406,18 @@ void QtDesktopApp::onJoinRoomWithFileRequested(const QString& roomCode, const QS
                 }
             }, Qt::QueuedConnection);
 
+            auto rxCancel = [this, peerId]() -> std::shared_ptr<std::atomic<bool>> {
+                std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
+                auto it = m_activeRxCancelTokens.find(peerId);
+                return (it != m_activeRxCancelTokens.end()) ? it->second : nullptr;
+            }();
+
             // Keep channel open in receive standby loop
             while (coordinator->getState() == CoordinatorState::Connected && channel && channel->isConnected()) {
+                if (rxCancel && rxCancel->load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    continue;
+                }
                 TransferOptions rxOpts;
                 rxOpts.autoRenameDuplicates = true;
                 rxOpts.closeChannelOnCompletion = false;
@@ -1303,7 +1437,7 @@ void QtDesktopApp::onJoinRoomWithFileRequested(const QString& roomCode, const QS
                             }
                         }, Qt::QueuedConnection);
                     },
-                    nullptr,
+                    rxCancel.get(),
                     &rxErr,
                     [this, coordinator](const std::string& tid, const std::string& fn, uint64_t fs, const std::string&) -> bool {
                         QMetaObject::invokeMethod(this, [this, coordinator, tid, fn, fs]() {
@@ -1333,7 +1467,13 @@ void QtDesktopApp::onJoinRoomWithFileRequested(const QString& roomCode, const QS
                         }, Qt::QueuedConnection);
                     }
                 );
-                if (!rxOk) break;
+                if (!rxOk) {
+                    if (rxCancel && rxCancel->load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        continue;
+                    }
+                    break;
+                }
             }
         });
     };
@@ -1351,8 +1491,10 @@ void QtDesktopApp::onJoinRoomWithFileRequested(const QString& roomCode, const QS
 }
 
 void QtDesktopApp::onCloseGlobalSessionRequested(const QString& roomCode) {
-    std::string peerId = "webrtc:" + roomCode.toStdString();
+    std::string codeStr = roomCode.toStdString();
+    std::string peerId = "webrtc:" + codeStr;
     std::shared_ptr<WebRtcSessionCoordinator> coordinator;
+    std::shared_ptr<std::atomic<bool>> rxCancel;
     {
         std::lock_guard<std::mutex> lock(m_coordinatorsMutex);
         auto it = m_globalCoordinators.find(peerId);
@@ -1360,6 +1502,17 @@ void QtDesktopApp::onCloseGlobalSessionRequested(const QString& roomCode) {
             coordinator = it->second;
             m_globalCoordinators.erase(it);
         }
+        m_pendingCoordinators.erase("host:" + codeStr);
+        m_pendingCoordinators.erase("join:" + codeStr);
+        m_pendingCoordinators.erase("join-file:" + codeStr);
+        auto itRx = m_activeRxCancelTokens.find(peerId);
+        if (itRx != m_activeRxCancelTokens.end()) {
+            rxCancel = itRx->second;
+            m_activeRxCancelTokens.erase(itRx);
+        }
+    }
+    if (rxCancel) {
+        rxCancel->store(true);
     }
     if (coordinator) {
         coordinator->close();

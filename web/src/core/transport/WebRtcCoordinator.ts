@@ -207,7 +207,7 @@ export class WebRtcCoordinator {
     }
   }
 
-  async startInitiator(timeoutMs: number = 25000): Promise<RTCDataChannel> {
+  async startInitiator(timeoutMs: number = 300000): Promise<RTCDataChannel> {
     this.isInitiator = true;
     const pc = await this.setupPeerConnection();
 

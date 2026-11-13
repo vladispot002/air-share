@@ -614,7 +614,8 @@ void QtDiscoveryWidget::onGlobalP2pClicked() {
                    "Передавайте файли між Desktop та Web у локальній мережі або через Інтернет без обов'язкової реєстрації.<br>"
                    "Оберіть дію:");
     auto* sendBtn = msgBox.addButton("📷 Створити кімнату (показати QR-код)", QMessageBox::ActionRole);
-    auto* receiveBtn = msgBox.addButton("⌨️ Приєднатися до кімнати (ввести код)", QMessageBox::ActionRole);
+    auto* joinWithFileBtn = msgBox.addButton("📤 Приєднатися та надіслати файл", QMessageBox::ActionRole);
+    auto* receiveBtn = msgBox.addButton("⌨️ Приєднатися (очікувати файл)", QMessageBox::ActionRole);
     auto* pairBtn = msgBox.addButton("🔗 Сполучити з Web-клієнтом", QMessageBox::ActionRole);
     msgBox.addButton("Скасувати", QMessageBox::RejectRole);
 
@@ -624,6 +625,27 @@ void QtDiscoveryWidget::onGlobalP2pClicked() {
         QString filePath = QFileDialog::getOpenFileName(this, "Оберіть файл для надсилання (Global P2P)");
         if (filePath.isEmpty()) return;
         emit hostRoomRequested(filePath);
+    } else if (msgBox.clickedButton() == joinWithFileBtn) {
+        bool ok = false;
+        QString input = QInputDialog::getText(
+            this,
+            "Надіслати файл у кімнату",
+            "Введіть 8-значний код кімнати від отримувача (наприклад, DROP-K8M4-P9X2 або посилання з браузера):",
+            QLineEdit::Normal,
+            "",
+            &ok
+        );
+        if (ok && !input.trimmed().isEmpty()) {
+            std::string err;
+            std::string norm = WebRtcSessionCoordinator::normalizeRoomCode(input.trimmed().toStdString(), &err);
+            if (norm.empty()) {
+                QMessageBox::warning(this, "Некоректний код кімнати", QString::fromStdString("Помилка: " + err));
+                return;
+            }
+            QString filePath = QFileDialog::getOpenFileName(this, "Оберіть файл для надсилання в кімнату");
+            if (filePath.isEmpty()) return;
+            emit joinRoomWithFileRequested(QString::fromStdString(norm), filePath);
+        }
     } else if (msgBox.clickedButton() == receiveBtn) {
         bool ok = false;
         QString input = QInputDialog::getText(

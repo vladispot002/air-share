@@ -32,10 +32,23 @@ func GenerateRoomCode() (string, error) {
 
 // NormalizeRoomCode cleanses, standardizes, and corrects common transcription confusions.
 func NormalizeRoomCode(input string) (string, error) {
-	raw := strings.ToUpper(strings.TrimSpace(input))
-	// Strip all hyphens and spaces first to normalize delimiters
+	str := strings.TrimSpace(input)
+	// Support URLs with hash fragments or paths (e.g. https://landrop-server.duckdns.org/#DROP-XXXX-XXXX)
+	if hashIdx := strings.Index(str, "#"); hashIdx != -1 {
+		str = str[hashIdx+1:]
+	} else if strings.HasPrefix(str, "http://") || strings.HasPrefix(str, "https://") {
+		if lastSlash := strings.LastIndex(str, "/"); lastSlash != -1 && lastSlash+1 < len(str) {
+			str = str[lastSlash+1:]
+		}
+	}
+
+	raw := strings.ToUpper(str)
+	// Strip all hyphens, spaces, tabs, and newlines
 	raw = strings.ReplaceAll(raw, "-", "")
 	raw = strings.ReplaceAll(raw, " ", "")
+	raw = strings.ReplaceAll(raw, "\t", "")
+	raw = strings.ReplaceAll(raw, "\r", "")
+	raw = strings.ReplaceAll(raw, "\n", "")
 
 	// If prefixed with DROP and length is 12 (4 for DROP + 8 code chars), strip prefix once
 	if strings.HasPrefix(raw, "DROP") && len(raw) == 12 {

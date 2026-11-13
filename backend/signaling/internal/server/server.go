@@ -482,6 +482,7 @@ func (s *Server) handleCreateRoom(client *room.Client) {
 		ExpiresAt: r.ExpiresAt.Unix(),
 	}
 
+	log.Printf("[Signaling] Room created: %s by client %s (IP %s)", r.Code, client.ID, client.IP)
 	resp, _ := protocol.NewEnvelope(protocol.ActionRoomCreated, r.Code, client.ID, payload)
 	_ = client.Send(resp)
 }
@@ -498,6 +499,7 @@ func (s *Server) handleJoinRoom(client *room.Client, targetCode string) {
 	}
 
 	if !s.limiter.Allow(client.IP) {
+		log.Printf("[Signaling] Join throttled (rate limited) for IP %s trying to join %q", client.IP, targetCode)
 		_ = client.Send(protocol.NewErrorEnvelope(
 			protocol.ErrCodeRateLimited,
 			"maximum failed join attempts exceeded; temporarily throttled",
@@ -516,11 +518,13 @@ func (s *Server) handleJoinRoom(client *room.Client, targetCode string) {
 		} else if err == room.ErrCannotJoinOwn {
 			code = "ERR_CANNOT_JOIN_OWN_ROOM"
 		}
+		log.Printf("[Signaling] Join failed for code %q from client %s (IP %s): %v", targetCode, client.ID, client.IP, err)
 		_ = client.Send(protocol.NewErrorEnvelope(code, err.Error(), targetCode, client.ID))
 		return
 	}
 
 	s.limiter.RecordSuccess(client.IP)
+	log.Printf("[Signaling] Client %s (IP %s) joined room %s (Initiator: %s)", client.ID, client.IP, r.Code, r.Initiator.ID)
 
 	// Notify Joiner (supplying room token for TURN access)
 	joinerPayload := protocol.PeerJoinedPayload{

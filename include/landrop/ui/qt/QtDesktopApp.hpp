@@ -88,6 +88,8 @@ private:
 
     mutable std::mutex m_coordinatorsMutex;
     std::map<std::string, std::shared_ptr<WebRtcSessionCoordinator>> m_globalCoordinators;
+    std::map<std::string, std::shared_ptr<WebRtcSessionCoordinator>> m_pendingCoordinators;
+    std::map<std::string, std::shared_ptr<std::atomic<bool>>> m_activeRxCancelTokens;
     QListWidget* m_sidebar{nullptr};
     QStackedWidget* m_stackedWidget{nullptr};
 
