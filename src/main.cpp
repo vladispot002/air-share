@@ -38,6 +38,10 @@
 
 #include "landrop/mobile/NfcPairingSession.hpp"
 #include "landrop/mobile/AirDropProtocolBridge.hpp"
+
+#if defined(LANDROP_HAVE_WEBRTC)
+#include <rtc/global.hpp>
+#endif
 #include "landrop/mobile/LandropMobileBridge.h"
 
 using namespace landrop;
@@ -215,6 +219,11 @@ static int runReceiver(uint16_t port, const std::string& saveDir, bool useTls = 
 
     std::cout << "\n";
     coordinator->close();
+#if defined(LANDROP_HAVE_WEBRTC)
+    try {
+        rtc::Cleanup().wait_for(std::chrono::milliseconds(500));
+    } catch (...) {}
+#endif
 
     if (!ok) {
         std::cerr << "Error: Transfer failed: " << sendErr << "\n";
@@ -299,6 +308,11 @@ static int runReceiver(uint16_t port, const std::string& saveDir, bool useTls = 
 
     std::cout << "\n";
     coordinator->close();
+#if defined(LANDROP_HAVE_WEBRTC)
+    try {
+        rtc::Cleanup().wait_for(std::chrono::milliseconds(500));
+    } catch (...) {}
+#endif
 
     if (!ok) {
         std::cerr << "Error: Transfer failed: " << recvErr << "\n";
