@@ -61,10 +61,12 @@ Every transmission in Protocol v2 consists of a **16-byte fixed frame header** i
 | `0x0001` | `HANDSHAKE` | Bidirectional | Device exchange of capabilities, IDs, and app versions. |
 | `0x0002` | `FILE_HEADER` | Sender -> Receiver | Initiates a file transfer with metadata and SHA-256 hash. |
 | `0x0003` | `CHUNK_DATA` | Sender -> Receiver | Transmits a sliced chunk of file data. |
-| `0x0004` | `TRANSFER_ACK` | Receiver -> Sender | Signals transfer acceptance, chunk receipt, or completion. |
+| `0x0004` | `TRANSFER_ACK` | Receiver -> Sender | Signals transfer acceptance, chunk receipt, resume decision, or completion. |
 | `0x0005` | `TRANSFER_CANCEL` | Either | Aborts an in-progress transfer with an error code and reason. |
 | `0x0006` | `PING` | Either | Keep-alive heartbeat probe. |
 | `0x0007` | `PONG` | Either | Response to keep-alive heartbeat probe. |
+| `0x0008` | `RESUME_REQUEST` | Receiver -> Sender | Requests resumption of an interrupted transfer from a verified byte offset. |
+| `0x0009` | `BATCH_MANIFEST` | Sender -> Receiver | Transmits multi-file / directory tree metadata before file sequence streaming. |
 
 ---
 
@@ -83,7 +85,9 @@ Exchanged upon channel establishment:
 Sent by initiator before streaming data:
 - `fileSize` (`uint64_t`, BE): Total byte size of the target file.
 - `chunkSize` (`uint32_t`, BE): Recommended chunk size (typically 64KB - 1MB).
-- `flags` (`uint16_t`, BE): Optional transfer flags (e.g., encryption, compression).
+- `flags` (`uint16_t`, BE): Optional transfer flags:
+  - `0x0000` = `NONE`
+  - `0x0001` = `RESUME_SUPPORTED` (signals that sender supports byte-offset seeking and resumption)
 - `fileNameLen` (`uint16_t`, BE) + `fileName` (UTF-8 string, max 255 bytes).
 - `sha256Hex` (64 bytes ASCII): Expected SHA-256 digest of the entire file.
 
@@ -99,12 +103,14 @@ Streams file pieces sequentially or out-of-order:
 
 Sent by receiver to confirm status or completion:
 - `status` (`uint8_t`):
-  - `0x00` = `Success` (File accepted and verified).
+  - `0x00` = `Success` (File accepted, verified, or completed).
   - `0x01` = `HashMismatch` (Integrity check failed).
   - `0x02` = `DiskFull` (Insufficient storage).
   - `0x03` = `Rejected` (User declined file).
   - `0x04` = `PathUnsafe` (Security filter rejected filename).
   - `0x05` = `GenericError`.
+  - `0x06` = `ResumeAccepted` (Sender accepts resume request and will seek to requested offset).
+  - `0x07` = `ResumeRejected` (Sender rejected resume request; fallback to full restart at offset 0).
 - `receivedBytes` (`uint64_t`, BE): Cumulative bytes received so far.
 - `msgLen` (`uint16_t`, BE) + `message` (UTF-8 status/error description).
 
@@ -113,6 +119,25 @@ Sent by receiver to confirm status or completion:
 Immediate termination of session:
 - `errorCode` (`uint32_t`, BE): Numeric error identifier.
 - `reasonLen` (`uint16_t`, BE) + `reason` (UTF-8 cancellation cause).
+
+### 4.6 RESUME_REQUEST (`0x0008`)
+
+Sent by receiver after receiving a `FILE_HEADER` when a valid `.part` file exists with matching partial SHA-256 digest (fixed 136-byte payload):
+- `fileHash` (64 bytes ASCII): Expected complete SHA-256 digest of the target file.
+- `bytesReceivedSoFar` (`uint64_t`, BE): Byte offset already persisted to disk and verified.
+- `partialSha256` (64 bytes ASCII): Cumulative SHA-256 hash of bytes in range `[0 .. bytesReceivedSoFar)`.
+
+### 4.7 BATCH_MANIFEST (`0x0009`)
+
+Sent by initiator when transferring multiple files or recursive directory structures:
+- `batchIdLen` (`uint16_t`, BE) + `batchId` (UTF-8 unique batch identifier).
+- `totalFiles` (`uint32_t`, BE): Total number of files included in the batch.
+- `totalBytes` (`uint64_t`, BE): Aggregate byte size across all files in the batch.
+- Followed by `totalFiles` serialized entries:
+  - `fileIndex` (`uint32_t`, BE): Zero-based sequential file index.
+  - `fileSize` (`uint64_t`, BE): Size of this file in bytes.
+  - `relativePathLen` (`uint16_t`, BE) + `relativePath` (UTF-8 normalized relative path, e.g. `docs/manual.pdf`).
+  - `sha256Hex` (64 bytes ASCII): SHA-256 digest of this individual file.
 
 ---
 

@@ -1,175 +1,453 @@
+<div align="center">
+
 # LAN-Drop
-### Cross-Platform P2P & Hybrid Cloud Data Transfer System
 
-LAN-Drop — це кросплатформна система швидкої та безпечної передачі файлів між пристроями в локальних мережах (LAN/Wi-Fi) з можливістю гібридного хмарного релею (Cloud Relay) та мобільної інтеграції.
+### Unified Peer-to-Peer & Cross-Network File Transfer Ecosystem
 
----
+[![Version](https://img.shields.io/badge/version-1.0.2-blue.svg)](https://github.com/vladispot002/air-share)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![C++20](https://img.shields.io/badge/standard-C%2B%2B20-blue.svg)](https://en.cppreference.com/w/cpp/20)
+[![Qt 6](https://img.shields.io/badge/GUI-Qt%206-green.svg)](https://www.qt.io/)
+[![Go](https://img.shields.io/badge/signaling-Go%201.23-00ADD8.svg)](https://go.dev/)
+[![TypeScript](https://img.shields.io/badge/web-TypeScript%205.7-blue.svg)](https://www.typescriptlang.org/)
+[![WebRTC](https://img.shields.io/badge/transport-WebRTC%20DataChannel-orange.svg)](https://webrtc.org/)
 
-## Основні можливості
+**LAN-Drop** is an ultra-fast, secure, cross-platform file transfer system designed for seamless data exchange across local networks (LAN/Wi-Fi) and the public Internet. It bridges desktop applications and web browsers with zero external cloud file storage, end-to-end cryptographic integrity, and account-optional instant guest pairing.
 
-- **Подвійний графічний інтерфейс**:
-  - **Qt 6 Widgets (`lan_drop`)**: Сучасний десктопний інтерфейс (Радар виявлення вузлів, Моніторинг передач з живим стрімінгом через `TransferEngine`, прямим вибором IP:Port, Спільне сховище з криптостійким захистом PIN-кодом, Налаштування з підтримкою світлої/темної теми, вибором каталогу та експортом журналів).
-  - **GTK+ 3.0 (`lan_drop_gtk`)**: Альтернативний інтерфейс у стилі macOS HIG з десктопним і мобільним (390x812) режимами перегляду.
-- **Єдиний реальний рушій передачі (`TransferEngine`)**:
-  - Спільне ядро передачі для CLI (`send` / `receive`) та Qt GUI.
-  - Повноцінний клієнт-серверний потоковий обмін через POSIX TCP сокети з блоками 64 KB – 4 MB.
-  - Покращений захист TLS (OpenSSL 3) з верифікацією сертифікатів та перевіркою імен хостів.
-  - Безпечне збереження: запис у тимчасові файли `*.part`, атомарне перейменування після перевірки контрольної суми SHA-256 та автоматичне очищення при обриві з'єднання або скасуванні.
-  - Захист від Path Traversal та блокування символьних посилань, що виходять за межі каталогу.
-  - Вбудоване обмеження швидкості передачі (Speed Limit throttling).
-- **Спільне сховище (Shared Storage) та безпека PIN**:
-  - Індексація файлів, SHA-256 хешування блоків.
-  - Криптостійкий PIN-захист на базі **OpenSSL PBKDF2-HMAC-SHA256** (16-байтна сіль, 100,000 ітерацій, `CRYPTO_memcmp`, прогресивна затримка проти brute-force перебору, авто-міграція застарілих хешів).
-  - Ліміт максимального розміру файлу (за замовчуванням 10 ГБ) для запобігання переповненню диска.
-- **Стабільне збереження налаштувань**:
-  - Збереження у форматі JSON у стандартному каталозі конфігурації платформи (`QStandardPaths::AppConfigLocation` / XDG).
-  - Стійкість до пошкодженого JSON та сумісність із застарілими ключами (`speed_limit_kbps`, `auto_accept`, `airdrop_enabled`, строкові порти).
-  - Застосування обмеження швидкості передачі (Speed Limit).
+[Features](#-key-features) • [Architecture](#-architecture-overview) • [Installation](#-installation) • [Building from Source](#-building-from-source) • [Quick Start](#-quick-start--usage) • [Configuration](#-configuration) • [Testing](#-testing) • [Troubleshooting](#-troubleshooting)
+
+</div>
 
 ---
 
-## Збірка та тестування
+## 🚀 Overview
 
-### 1. Збірка через CMake (Рекомендовано)
+LAN-Drop follows a strict **Transfer-First, Account-Optional, and Zero File Content Storage** architectural model:
 
-Для повної збірки потрібні: `cmake`, `g++` (із підтримкою C++20), `Qt 6` (Widgets, Test), `GTK+ 3.0`, `OpenSSL` (libssl, libcrypto), `pkg-config`.
+1. **Direct Peer-to-Peer**: File data streams directly between sender and recipient over high-speed POSIX TCP sockets (on local networks) or encrypted WebRTC DataChannels (across the Internet).
+2. **Zero Cloud File Storage**: The signaling server and database never receive, buffer, or store file contents. Only ephemeral session coordination (SDP offer/answer and ICE candidate exchange) passes through the signaling service.
+3. **Account-Optional**: Instant guest transfers work out of the box with zero registration. Optional accounts provide persistent identity handles (`@username`), multi-device syncing, and transfer history.
+4. **Resilient Streaming**: Built on Wire Protocol v2 with 16-byte binary framing, CRC-32 transport validation, full-file SHA-256 cryptographic verification, and byte-offset resumption for interrupted transfers.
 
-```bash
-# Конфігурація проєкту
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+---
 
-# Збірка всіх цілей (ядро, Qt 6, GTK3, модульні та GUI-тести)
-cmake --build build
+## ✨ Key Features
 
-# Запуск повного набору тестів через ctest
-ctest --test-dir build --output-on-failure
+### Implemented and Verified (v1.0.2)
+
+- **Dual-Engine Desktop Application (Qt 6 & GTK3)**:
+  - **Qt 6 GUI (`lan_drop`)**: Primary desktop interface featuring Radar Discovery, Transfers Dashboard with live progress meters, Shared Storage with PIN protection, and Settings with Light/Dark themes.
+  - **GTK+ 3.0 GUI (`lan_drop_gtk`)**: Alternate interface adhering to macOS Human Interface Guidelines (HIG) with desktop and mobile (390×812) viewports.
+- **Modern Web Client SPA (TypeScript & Vite)**:
+  - Zero-install web application running in any modern browser (Chrome, Firefox, Safari, Brave, Edge).
+  - WebRTC DataChannel streaming with backpressure flow control.
+  - Interactive HTML5 camera QR scanner (`jsQR`) for instant mobile-to-desktop pairing.
+- **Universal Transport Layer**:
+  - **Local LAN**: Direct TCP/TLS socket streaming with 64 KB – 4 MB chunking and zero cloud reliance.
+  - **Global P2P**: WebRTC DataChannels with STUN NAT traversal (`stun.l.google.com` or self-hosted Coturn).
+  - **Symmetric NAT Traversal**: Automated TURN relay fallback with ephemeral HMAC credentials.
+- **Optical & Room Code Pairing**:
+  - Zero-dependency native ISO/IEC 18004 QR code generation in both C++ and TypeScript.
+  - Human-friendly 8-character Crockford Base32 room codes (`DROP-XXXX-XXXX`) with optical confusion disambiguation (`O` → `0`, `I`/`L` → `1`).
+- **Resilient Wire Protocol v2**:
+  - 16-byte fixed binary header (`LNDP` magic, version, message type, payload length, CRC-32).
+  - Byte-offset resumption (`ResumeRequest` opcode `0x0008`) for interrupted transfers.
+  - In-flight `.part` file assembly with atomic rename only after complete SHA-256 checksum match.
+  - Path traversal protection (`isSafeFileName`), symlink boundary validation, and disk quota enforcement.
+- **Optional Identity & Device Subsystem**:
+  - Go 1.23 signaling server backed by PostgreSQL 16.
+  - Secure password registration with bcrypt (salt cost 10).
+  - JWT bearer token authentication and device management.
+- **Built-in System Diagnostics (`lan_drop doctor`)**:
+  - Headless network audit inspecting local interfaces, multicast readiness, port availability, signaling health (`/healthz`), and STUN reflexive endpoints.
+
+### Developer Preview / Simulated
+
+- **AirDrop Protocol Bridge (`AirDropProtocolBridge`)**: Formats Bonjour/HTTP `/Discover` and `/Ask` protocol payloads in memory; hardware AWDL/BLE integration requires native OS kernel extensions.
+- **NFC Fast Pairing (`NfcPairingSession`)**: Formats and parses NDEF text payloads (`LANDROP:NFC:v1;...`); physical NFC exchange requires external hardware controller integration.
+
+### Planned Capabilities (Roadmap)
+
+- **Native Mobile Applications**: Dedicated Flutter/Swift/Kotlin apps utilizing the C-ABI FFI bridge (`LandropMobileBridge`).
+- **OPFS Direct-to-Disk Web Streaming**: Utilizing the Origin Private File System API for multi-gigabyte browser transfers without RAM buffering.
+
+---
+
+## 🏗 Architecture Overview
+
+The system strictly decouples the signaling control plane from the actual peer-to-peer data plane:
+
+```mermaid
+graph TD
+    subgraph Clients["LAN-Drop Clients"]
+        Desktop["Desktop Application (C++20 / Qt 6)<br/>• TransferEngine<br/>• WebRtcSessionCoordinator<br/>• IdentityClient"]
+        Web["Web Client (TypeScript / Vite)<br/>• WebRtcCoordinator<br/>• FileStreamSender / Receiver<br/>• Camera QR Scanner"]
+    end
+
+    subgraph Infrastructure["Production Cloud Infrastructure (Oracle Cloud VPS)"]
+        Caddy["Caddy Reverse Proxy<br/>• Automatic TLS (Let's Encrypt)<br/>• HTTPS / WSS :443<br/>• Static Asset Serving"]
+        Signaling["Go 1.23 Signaling Service (:8080)<br/>• Ephemeral Base32 Rooms<br/>• IP Rate Limiting (Token Bucket)<br/>• REST Auth & TurnConfig API"]
+        Postgres["PostgreSQL 16 Database<br/>• Users & Passwords (bcrypt)<br/>• Linked Devices<br/>• Transfer Metadata"]
+        Coturn["Coturn TURN/STUN Server<br/>• STUN :3478 UDP/TCP<br/>• TURN Relay :49160-49200 UDP<br/>• Ephemeral HMAC Auth"]
+    end
+
+    %% Signaling Connections
+    Desktop -.->|"WSS Signaling & Auth"| Caddy
+    Web -.->|"WSS Signaling & Auth"| Caddy
+    Caddy -->|"/ws/signaling & /api/*"| Signaling
+    Signaling -->|"TCP :5432"| Postgres
+
+    %% Direct Peer-to-Peer Data Paths
+    Desktop ===|"Direct LAN (TCP/TLS :8848)<br/>Zero Server Reliance"| Desktop
+    Desktop ===|"Direct Internet P2P<br/>(WebRTC DataChannel / DTLS 1.3)"| Web
+    Web ===|"Direct Web-to-Web P2P<br/>(WebRTC DataChannel / DTLS 1.3)"| Web
+    Desktop ===|"Direct Desktop-to-Desktop P2P<br/>(WebRTC DataChannel / DTLS 1.3)"| Desktop
+
+    %% TURN Relay Fallback
+    Desktop -.-|"Symmetric NAT Relay"| Coturn
+    Web -.-|"Symmetric NAT Relay"| Coturn
 ```
 
-### 2. Збірка через Makefile (GTK3 + тести)
+### Protocol & Data Path Highlights
 
+- **Control Path (Signaling)**: Ephemeral WebSocket communication to register rooms, exchange SDP offers/answers, and trickle ICE candidates. Once connected, signaling activity ceases.
+- **Data Path (P2P)**: Encrypted file chunk transmission directly between endpoints over DTLS 1.3/SCTP or TLS 1.3/TCP. The signaling server never touches file data.
+
+---
+
+## 📦 Installation
+
+### 1. Fedora Linux (Tested & Verified RPM)
+
+LAN-Drop provides an official RPM package for Fedora Linux (tested on Fedora 40, 41, and 44):
+
+#### Install via DNF
 ```bash
-# Збірка GTK3-версії
-make all
-
-# Запуск консольних юніт-тестів (31 тестовий набір, 1087 assertions)
-make test
-
-# Запуск тестів мобільної підсистеми
-make mobile-test
-
-# Інтеграція іконки та .desktop ярлика для поточного користувача
-make desktop
-```
-
-### 3. Пакування та інсталяція
-
-#### Fedora Linux (RPM та Portable Tarball):
-```bash
-# Автоматичне створення RPM та портативного архіву:
-./scripts/package-fedora.sh
-
-# Встановлення створеного RPM:
+# Install the official release RPM (resolves all Qt 6 and OpenSSL dependencies automatically)
 sudo dnf install ./dist/rpm/landrop-1.0.2-1.fc44.x86_64.rpm
-
-# Або пряме системне встановлення через CMake:
-sudo cmake --install build
 ```
 
-#### Windows 10/11 x64 (Inno Setup EXE Installer):
-```powershell
-# Збирання, розгортання бібліотек Qt через windeployqt та генерація EXE інсталятора:
-pwsh .\scripts\package-windows.ps1
-# Результат: dist\windows\LAN-Drop-Setup-1.0.2-x64.exe
+#### What Gets Installed
+- **Binary**: `/usr/bin/lan_drop`
+- **Desktop Entry**: `/usr/share/applications/lan-drop.desktop`
+- **Application Icon**: `/usr/share/icons/hicolor/scalable/apps/lan-drop.svg`
+- **Theme Stylesheet**: `/usr/share/landrop/styles.qss`
+- **AppStream Metadata**: `/usr/share/metainfo/io.landrop.LAN-Drop.metainfo.xml`
+
+#### Run the Application
+Launch from your application menu or directly from terminal:
+```bash
+lan_drop
+```
+
+#### Uninstall
+```bash
+sudo dnf remove landrop
 ```
 
 ---
 
-## Запуск додатків
+### 2. Universal Linux (AppImage)
 
-### Графічний інтерфейс Qt 6:
+The AppImage is a self-contained bundle containing the Qt 6 application, plugins, and bundled WebRTC/SCTP libraries (`libdatachannel`, `libusrsctp`). It runs on virtually any modern 64-bit Linux distribution (Fedora, Ubuntu, Debian, Arch, openSUSE, Mint).
+
+#### Step 1: Set Executable Permissions
 ```bash
-./build/lan_drop gui
+chmod +x dist/LAN-Drop-1.0.2-x86_64.AppImage
 ```
 
-### Графічний інтерфейс GTK3:
+#### Step 2: Run the AppImage
 ```bash
-./build/lan_drop_gtk gui
-# або мобільний режим:
-./build/lan_drop_gtk mobile-gui
+# If your distribution has FUSE 2 installed:
+./dist/LAN-Drop-1.0.2-x86_64.AppImage
+
+# On modern distributions without legacy FUSE 2 (e.g., Fedora 40+, Ubuntu 24.04):
+./dist/LAN-Drop-1.0.2-x86_64.AppImage --appimage-extract-and-run
 ```
 
-### Консольна передача файлів (CLI):
-```bash
-# На стороні отримувача:
-./build/lan_drop receive 8848 ./downloads --tls
+> [!TIP]
+> A convenient wrapper launcher script is provided. It automatically detects whether `libfuse.so.2` is present on your system and transparently applies `--appimage-extract-and-run` if necessary.
 
-# На стороні відправника:
-./build/lan_drop send document.pdf 192.168.1.50 8848 --tls
+---
+
+### 3. Ubuntu & Debian Linux
+
+- **Recommended**: Use the Universal **[AppImage](#2-universal-linux-appimage)** or **[Build from Source](#-building-from-source)**.
+- **Debian Package (`.deb`)**: A native `.deb` package (`dist/release-v1.0.2/landrop_1.0.2_amd64.deb`) is generated via CPack. Note that builds with `-DLANDROP_ENABLE_WEBRTC=ON` require `libdatachannel` and `libusrsctp`, which must be present on the host or installed via AppImage.
+
+```bash
+# Install required runtime dependencies for Qt 6 Desktop
+sudo apt-get update
+sudo apt-get install -y libqt6widgets6 libqt6network6 libqt6concurrent6t64 libssl3 hicolor-icon-theme
 ```
 
 ---
 
-## Статус реалізації функцій
+### 4. Windows & macOS
 
-Нижче наведено фактичний стан підсистем проєкту за підсумками комплексного аудиту та тестування:
+- **Web Client**: Access the fully featured Web client instantly without installation at **`https://landrop-server.duckdns.org/`**.
+- **Windows Desktop**: An Inno Setup installer script is provided at `packaging/windows/landrop.iss`. It can be compiled using PowerShell on Windows (`.\scripts\package-windows.ps1`).
 
-| Функціональний модуль | Статус реалізації | Деталі та примітки |
+---
+
+## 🛠 Building from Source
+
+### Prerequisites
+
+| Component | Minimum Version | Package Name (Fedora) | Package Name (Ubuntu/Debian) |
+|---|---|---|---|
+| **C++ Compiler** | GCC 11+ or Clang 13+ | `gcc-c++` | `g++` |
+| **CMake** | 3.20+ | `cmake` | `cmake` |
+| **Qt 6** | 6.4+ (Widgets, Network, Concurrent, Test) | `qt6-qtbase-devel` | `qt6-base-dev` |
+| **OpenSSL** | 3.0+ | `openssl-devel` | `libssl-dev` |
+| **Go** (Signaling) | 1.23+ | `golang` | `golang-go` |
+| **Node.js** (Web) | 22+ (LTS) & npm | `nodejs` `npm` | `nodejs` `npm` |
+
+---
+
+### 1. Build the Desktop Application (C++20 / Qt 6)
+
+```bash
+# 1. Clone repository
+git clone https://github.com/vladispot002/air-share.git lan-drop
+cd lan-drop
+
+# 2. Configure build with testing enabled
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+
+# 3. Compile all targets
+cmake --build build --parallel $(nproc)
+
+# 4. Run automated test suites
+ctest --test-dir build --output-on-failure
+
+# 5. Launch the desktop GUI
+./build/lan_drop
+```
+
+---
+
+### 2. Build the Web Client SPA (TypeScript & Vite)
+
+```bash
+cd web
+
+# Install dependencies
+npm ci
+
+# Run test suite (86 unit and integration tests)
+npm test
+
+# Build production bundle (outputs to web/dist)
+npm run build
+
+# Run local development server
+npm run dev
+```
+
+---
+
+### 3. Build the Go Signaling Server
+
+```bash
+cd backend/signaling
+
+# Run unit and integration tests
+go test -v ./...
+
+# Compile standalone static binary
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/signaling-server ./cmd/server
+
+# Run signaling server locally
+./bin/signaling-server
+```
+
+---
+
+## 📖 Quick Start & Usage
+
+### 1. Launching the Desktop Application
+Run `lan_drop` from the terminal or application launcher. The main window opens with the **Radar Discovery** view:
+
+```bash
+# Launch Qt 6 GUI
+lan_drop
+
+# Or run system diagnostics
+lan_drop doctor
+```
+
+### 2. Guest Mode vs. Registered Account
+- **Guest Mode (Default)**: Click `"📷 Створити кімнату"` or `"⌨️ Приєднатися до кімнати"` to start sharing files instantly with zero account setup.
+- **Account Mode**: Switch to the **Settings** tab to register or sign in. Once signed in, your device handle is registered and paired across your ecosystem.
+
+### 3. Cross-Platform Transfer Scenarios
+
+#### Scenario A: Desktop Host → Web Receiver
+1. On Desktop: Click **"🔗 Підключити пристрій (Web / Desktop)"** → **"📷 Створити кімнату"**.
+2. Select the file you want to send. A dialog displays the 8-character code (e.g. `DROP-VGY4-FHA6`) and an optical QR code.
+3. On Web (`https://landrop-server.duckdns.org`): Either scan the QR code with your camera or enter the room code in the **Room Code** input and click **Join Room**.
+4. The WebRTC DataChannel connects instantly, streams the file, validates the SHA-256 hash, and saves the file.
+
+#### Scenario B: Web Host → Desktop Receiver
+1. On Web: Click **Choose File** to stage a file, then click **Host Room**. The web client displays the room code (e.g. `DROP-5X1H-9TEA`).
+2. On Desktop: Click **"🔗 Підключити пристрій"** → **"⌨️ Приєднатися (очікувати файл)"** and enter the code.
+3. The desktop connects, receives the stream, validates the file, and stores it in your `Downloads` directory.
+
+#### Scenario C: Desktop → Desktop
+1. On Device 1: Host a room with a file or in standby receive mode.
+2. On Device 2: Enter the room code or click **"📤 Приєднатися та надіслати файл"** to stream directly.
+3. Transfers execute peer-to-peer at full line rate with progress updates.
+
+#### Scenario D: Web → Web
+1. Open `https://landrop-server.duckdns.org` on both devices.
+2. Device 1 clicks **Host Room**. Device 2 enters the code and clicks **Join Room**.
+3. Files stream directly between the two browser tabs.
+
+#### Scenario E: Local LAN Offline Transfers (CLI)
+When operating in completely air-gapped or offline networks:
+```bash
+# On Receiver (listening on port 8848):
+lan_drop receive 8848 /path/to/downloads --tls
+
+# On Sender:
+lan_drop send document.pdf 192.168.1.50 8848 --tls
+```
+
+---
+
+## ⚙️ Configuration
+
+LAN-Drop supports environment variables for configuring signaling endpoints, networking, and security.
+
+### Desktop & CLI Environment Variables
+
+| Variable | Description | Default Value | Required? |
+|---|---|---|---|
+| `LANDROP_SIGNALING_URL` | WebSocket URL of the signaling service | `wss://landrop-server.duckdns.org/ws/signaling` | Optional |
+| `QT_QPA_PLATFORM` | Qt platform plugin (set to `offscreen` for headless/CI runs) | System default (e.g., `xcb`, `wayland`) | Optional |
+| `LD_LIBRARY_PATH` | Path to shared libraries (`libdatachannel`, `libusrsctp`) | System default / `~/.local/lib` | Optional |
+
+### Production Server Configuration (`.env`)
+
+A reference template is available in [`.env.example`](.env.example):
+
+| Variable | Description | Example Format |
 |---|---|---|
-| **Єдиний рушій передачі (`TransferEngine`)** | **Реалізовано та перевірено** | Спільний для CLI та Qt GUI, потоковий сокетний TCP-протокол, чанки 64 КБ–4 МБ, атомарне перейменування `.part`, SHA-256. |
-| **Qt 6 Десктопний GUI** | **Реалізовано та перевірено** | 4 вкладки (Discovery, Transfers, Storage, Settings), теми Dark/Light, діалог вибору вузла або прямого IP:Port, PIN-код, скасування передачі, 15/15 GUI тестів пройдено. |
-| **GTK3 Десктопний & Мобільний GUI** | **Реалізовано та перевірено** | Збережено повну функціональність macOS HIG та адаптивного мобільного вікна 390x812. |
-| **MVP Архітектура Presenter/View** | **Реалізовано та перевірено** | Повна ізоляція бізнес-логіки від UI; спільні Presenter для Qt та GTK. |
-| **Мережева передача TCP (CLI `send`/`receive`)** | **Реалізовано та перевірено** | Переведено на `TransferEngine`; перевірено передачу 1 МБ та 10 МБ між процесами з побітовим збігом SHA-256. |
-| **Безпека TLS/HTTPS (OpenSSL 3)** | **Реалізовано та перевірено** | За замовчуванням перевірка CA та імені хоста; відхилення truncated відповідей; опціональний `allowInsecureTls`. |
-| **Криптостійкий PIN (PBKDF2-HMAC-SHA256)** | **Реалізовано та перевірено** | 16-байтна сіль, 100,000 ітерацій, `CRYPTO_memcmp`, прогресивна затримка проти перебору, авто-міграція застарілих хешів. |
-| **Безпека сховища (Shared Storage)** | **Реалізовано та перевірено** | Блокування виходу за межі каталогу (Path Traversal), валідація цільових шляхів симлінків, ліміт 10 ГБ. |
-| **Стійке збереження налаштувань** | **Реалізовано та перевірено** | Збереження в `AppConfigLocation`/XDG, парсинг застарілих ключів, збереження цілісності при пошкодженому JSON, синхронізація Speed Limit. |
-| **Шаблонний буфер чанків `ChunkBuffer<T>`** | **Реалізовано та перевірено** | Потокобезпечний буфер FIFO, покритий тестами. |
-| **Хешування SHA-256 (`FileChunkHasher`)** | **Реалізовано та перевірено** | Повна перевірка цілісності файлів і блоків, покритий тестами. |
-| **Wire Protocol v2** | **Реалізовано та уніфіковано** | 16-байтний бінарний заголовок `LNDP`, IEEE 802.3 CRC-32, захист від переповнення буфера (16 МБ), поблочна та наскрізна перевірка SHA-256. |
-| **Стійке відновлення передачі (Resumption)** | **Реалізовано в Wire Protocol v2** | Передача `ResumeRequest` (opcode 0x0008), узгодження 64-бітного байтового зміщення та валідація часткового SHA-256. |
-| **Web Client SPA (TypeScript/Vite)** | **Реалізовано та перевірено** | Повноцінний веб-клієнт для передачі та прийому файлів через WebRTC DataChannels без сторонніх залежностей runtime. |
-| **Сервіс сигналізації та TURN-релей** | **Реалізовано та контейнеризовано** | Go 1.22 демон сигналізації, кімнати Crockford Base32, Coturn TURN/STUN для подолання симетричних NAT. |
-| **Мережева діагностика (`doctor`)** | **Реалізовано та перевірено** | Консольна команда `lan_drop doctor` для аудиту локальних інтерфейсів, мультикасту, DNS та STUN/TURN доступності (Suite 30). |
-| **C-ABI / FFI Bridge (`LandropMobileBridge`)** | **Реалізовано та перевірено** | Експорт C-ABI для зв'язку з Flutter/Kotlin/Swift, м'ютекс життєвого циклу без дедлоків. |
-| **AirDrop сумісність (`AirDropProtocolBridge`)** | **Developer Preview (Стуб)** | Формування протокольних структур Bonjour/HTTP у пам'яті; без зв'язку з демоном Avahi та апаратним AWDL/BLE. |
-| **NFC Fast Pairing (`NfcPairingSession`)** | **Developer Preview (Стуб)** | Формування та парсинг текстового NDEF payload `LANDROP:NFC:v1`; без взаємодії з апаратним NFC контролером. |
-| **Автоматичне мультикаст-виявлення в LAN** | **Реалізовано та протестовано** | Логіка `MulticastBeacon` реалізована на сокетах UDP 239.255.88.48:8848; вимагає мережевого обладнання без блокування мультикасту. |
+| `DOMAIN_NAME` | Fully Qualified Domain Name for Caddy HTTPS/WSS | `landrop.example.com` |
+| `EXTERNAL_IP` | Public IPv4/IPv6 for Coturn WebRTC relay | `203.0.113.10` |
+| `TURN_SECRET` | Cryptographic shared secret for ephemeral TURN credentials | `64-character random hex string` |
+| `STUN_SERVERS` | Comma-separated public STUN endpoints | `stun:landrop.example.com:3478,stun:stun.l.google.com:19302` |
+| `TURN_SERVERS` | Comma-separated TURN relay endpoints | `turn:landrop.example.com:3478?transport=udp` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgres://user:password@postgres:5432/landrop?sslmode=disable` |
+| `ENV` | Operational environment mode | `production` |
+| `TRUST_PROXY` | Trust reverse proxy headers (`X-Forwarded-For`) | `true` |
+| `TRUSTED_PROXIES` | CIDR blocks of trusted reverse proxies | `127.0.0.1/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16` |
 
 ---
 
-## Особливості сумісності та експлуатаційні обмеження v1.0.2
+## 🧪 Testing
 
-1. **Асиметрична зворотна сумісність**:
-   - Клієнт v1.0.2 **може приймати** файли від legacy-клієнтів v1.0.x через автоматичний механізм fallback.
-   - Клієнт v1.0.2 **передає виключно** кадри Wire Protocol v2 (з магічними байтами `LNDP`); старі клієнти v1.0.x відхиляють такі підключення. Для повноцінної двосторонньої передачі обидві сторони мають бути оновлені до v1.0.2 або новіше.
-2. **Проходження NAT (NAT Traversal)**:
-   - Прямий P2P hole-punching між двома симетричними NAT (наприклад, мобільні оператори 4G/5G або суворі корпоративні фаєрволи) неможливий згідно з RFC 8445. У таких умовах передача обов'язково вимагає наявності доступного сервера Coturn TURN.
-3. **Обмеження пам'яті браузерного клієнта**:
-   - Веб-клієнт накопичує отримані чанки в пам'яті перед ініціалізацією збереження через `Blob`. На мобільних пристроях із невеликим обсягом оперативної пам'яті рекомендований розмір одного файлу становить до 1.5 ГБ (прямий запис на диск через OPFS заплановано у версії v1.1.0).
-4. **Розмежування локальної інтеграції та WAN**:
-   - Тестові набори Suite 31 (WebRTC DataChannel та зондування Coturn) верифіковані в локальному контейнерному середовищі. Робота у глобальній мережі інтернет залежить від коректного налаштування DNS, сертифікатів TLS та зовнішнього релею TURN.
+LAN-Drop includes exhaustive automated test suites across all layers of the stack:
+
+```bash
+# 1. C++ Desktop Core & Network Suites (34 suites, 1232 assertions)
+ctest --test-dir build --output-on-failure
+
+# 2. C++ Qt 6 GUI Suites (20 automated GUI tests)
+./build/lan_drop_gui_tests
+
+# 3. Web Client Unit & Integration Tests (86 tests)
+cd web && npm test
+
+# 4. Go Signaling Backend Tests (All packages)
+cd backend/signaling && go test -v ./...
+
+# 5. Live Network Diagnostics (probes interfaces, multicast, signaling, and STUN)
+lan_drop doctor --json
+```
+
+### What the Test Suites Verify
+- **Protocol Framing & CRC-32**: Byte-exact validation of 16-byte `LNDP` framing and Big-Endian integer conversions.
+- **Resilient Resumption**: Verification of `ResumeRequest` (opcode `0x0008`) and byte-offset seeking.
+- **Security & Path Traversal**: Rejection of directory traversal (`../../`), null bytes, and malicious filenames.
+- **PIN Cryptography**: Validation of PBKDF2-HMAC-SHA256 hashing (100,000 iterations) and `CRYPTO_memcmp`.
+- **E2E WebRTC Transfers**: Verification of DataChannel streaming, in-flight backpressure, and SHA-256 verification.
 
 ---
 
-## Вимоги до середовища для повної перевірки
+## 🔧 Troubleshooting
 
-Для повного тестування всіх мережевих можливостей LAN-Drop (поза межами loopback сокетів) необхідно:
-1. **Два фізичні або віртуальні пристрої** під керуванням Linux/macOS/Windows, підключені до спільної локальної мережі (L2/L3 комутатор або єдина точка доступу Wi-Fi).
-2. **Маршрутизація Multicast / UDP**: Мережеве обладнання повинно пропускати UDP мультикаст пакети на адресу `239.255.88.48` (або широкомовні пакети на порт `8848`) без ізоляції клієнтів (Client Isolation / AP Isolation повинно бути вимкнено).
-3. **Відкриті порти файрволу**: Дозвіл вхідних підключень TCP (за замовчуванням порт `8848` або динамічний діапазон) та UDP порту `8848` у `iptables`, `nftables` чи `ufw`.
-4. **Сертифікати TLS**: Для перевірки TLS у виробничому режимі потрібні валідні сертифікати, підписані спільним локальним CA, або використання відбитку сертифіката (fingerprint pinning).
+### 1. AppImage Fails with `dlopen(): error loading libfuse.so.2`
+- **Cause**: Modern Linux distributions (Fedora 40+, Ubuntu 24.04+) default to `fuse3` and omit legacy `libfuse.so.2`.
+- **Solution A (No installation needed)**: Run with the extract-and-run flag:
+  ```bash
+  ./LAN-Drop-1.0.2-x86_64.AppImage --appimage-extract-and-run
+  ```
+- **Solution B (Install FUSE 2 library)**:
+  - Fedora: `sudo dnf install fuse-libs`
+  - Ubuntu/Debian: `sudo apt install libfuse2t64` (or `libfuse2`)
+
+### 2. Missing Shared Library `libusrsctp.so.2` or `libdatachannel.so`
+- **Cause**: Running unbundled native binaries directly outside of the AppImage environment.
+- **Solution**: Set `LD_LIBRARY_PATH` to include the library install location:
+  ```bash
+  export LD_LIBRARY_PATH="${HOME}/.local/lib64:${HOME}/.local/lib:${LD_LIBRARY_PATH}"
+  lan_drop
+  ```
+
+### 3. Signaling Error `ERR_RATE_LIMITED`
+- **Cause**: Too many failed join attempts within a short interval.
+- **Solution**: The rate limiter enforces a short 30-second cooldown period. Verify your room code format (`DROP-XXXX-XXXX`) and ensure the hosting client has not closed the session.
+
+### 4. Room Not Found (`ERR_ROOM_NOT_FOUND`)
+- **Cause**: The host closed the room or the initiator session timed out (rooms automatically expire after 5 minutes of inactivity).
+- **Solution**: Generate a fresh room code on the hosting client and join within 5 minutes.
+
+### 5. Web Camera QR Scanner Not Starting
+- **Cause**: Browser permissions or non-HTTPS environment.
+- **Solution**: Modern browsers require a secure origin (`https://` or `localhost`) to access camera devices. Ensure you grant camera permissions when prompted, or use the file upload fallback to scan a saved QR code image.
 
 ---
 
-## Штучний інтелект у процесі розробки / Artificial Intelligence in the Development Process
+## 👥 Development & Contribution
 
-У процесі створення, вдосконалення та тестування LAN-Drop використовувалися передові технології інженерії програмного забезпечення з використанням штучного інтелекту (AI-assisted engineering) у межах автономної мультиагентної платформи Google Antigravity за підтримки великих мовних моделей (LLM).
+### Repository Structure
 
-### Ключові принципи та архітектурне розмежування:
-- **Відсутність ШІ в runtime**: Сам застосунок LAN-Drop (десктопні клієнти, веб-клієнт, демон сигналізації, Docker-контейнери) **не містить жодних моделей штучного інтелекту, нейромереж чи сторонніх викликів до AI API**. Це виключно детермінований системний мережевий стек (C++20, Qt 6, GTK3, OpenSSL 3, libdatachannel, Go 1.22).
-- **ШІ як допоміжний інструмент розробки**: Мультиагентна система (ролі Orchestrator, Architect, Developer, Reviewer, Tester, UI Designer, описані в каталозі `.agents/`) допомагала в декомпозиції завдань, формуванні архітектурних рішень (ADR), оптимізації алгоритмів, синтезі 31 тестового набору (1,065 assertions в автономному режимі / до 1,087 assertions з увімкненим WebRTC) та діагностиці збоїв у CI/CD.
-- **Принцип обов'язкової верифікації та людська відповідальність**: Жоден згенерований фрагмент не приймався без валідації. Усі зміни підлягали суворій компіляції (`-std=c++20 -Wall -Wextra -Wpedantic` з 0 попереджень), 100% успішному проходженню модульних і GUI-тестів та людському інженерному нагляду. Усі рішення щодо злиття гілок, створення релізних тегів та публікації артефактів належать виключно людині-керівнику проєкту.
+```
+lan-drop/
+├── backend/signaling/    # Go 1.23 WebSocket signaling daemon & REST API
+├── docs/                 # Architectural specifications, decisions (ADR), and audits
+├── include/landrop/      # C++20 header files organized by subsystem
+│   ├── core/             # TransferEngine, WireProtocolV2, SessionCoordinator
+│   ├── identity/         # IdentityClient and authentication models
+│   ├── mobile/           # C-ABI FFI bridge and protocol stubs
+│   ├── peers/            # LocalPeer, CloudPeer, NetworkPeer abstractions
+│   ├── tasks/            # P2PTransferTask, HttpWebTransferTask
+│   └── ui/               # MVP Presenters and Qt 6 Widget interfaces
+├── packaging/            # Packaging specifications (Fedora .spec, Windows Inno Setup)
+├── resources/            # Icons, stylesheets (QSS), desktop files, and AppStream XML
+├── scripts/              # Build automation (build-appimage.sh, package-fedora.sh)
+├── src/                  # C++20 implementation files
+├── tests/                # CTest unit tests and Qt GUI tests
+├── tools/diagnostics/    # Production network probing scripts
+└── web/                  # TypeScript / Vite Web Client SPA
+```
 
-Детальний звіт, ролі агентів, розмежування стеків та посилання на доказову базу репозиторію наведено в офіційному документі:
-📄 **[Disclosure: Artificial Intelligence in the Software Development Process](docs/AI_DEVELOPMENT_DISCLOSURE.md)**
+### Contribution Guidelines
+1. Branch from `feature/unified-transfer-ecosystem` or create a descriptive feature branch (`feature/<feature-name>`).
+2. Maintain strict `-std=c++20` standard compliance with zero compiler warnings (`-Wall -Wextra -Wpedantic`).
+3. Ensure all tests pass (`ctest`, `npm test`, `go test ./...`) before submitting changes.
+4. Open a pull request against `vladispot002/air-share`.
+
+---
+
+## 📄 License & Metadata
+
+LAN-Drop is open-source software licensed under the **[MIT License](LICENSE)**.
+
+```
+Copyright (c) 2026 LAN-Drop Team
+```
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software.
