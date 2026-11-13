@@ -247,9 +247,13 @@ void WebRtcSessionCoordinator::setupPeerConnection() {
 
     pc->onLocalDescription([this](rtc::Description desc) {
         if (desc.type() == rtc::Description::Type::Offer) {
-            m_signaling->sendSdpOffer(std::string(desc));
+            if (m_role == SessionRole::Initiator) {
+                m_signaling->sendSdpOffer(std::string(desc));
+            }
         } else if (desc.type() == rtc::Description::Type::Answer) {
-            m_signaling->sendSdpAnswer(std::string(desc));
+            if (m_role == SessionRole::Joiner) {
+                m_signaling->sendSdpAnswer(std::string(desc));
+            }
         }
     });
 

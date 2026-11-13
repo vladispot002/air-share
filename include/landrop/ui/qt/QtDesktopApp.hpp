@@ -75,6 +75,8 @@ public slots:
     void applyTheme(const QString& themeName);
     void onHostRoomRequested(const QString& filePath = QString());
     void onJoinRoomRequested(const QString& roomCode);
+    void onJoinRoomWithFileRequested(const QString& roomCode, const QString& filePath);
+    void onCloseGlobalSessionRequested(const QString& roomCode);
 
 private slots:
     void onNavigationItemChanged(int row);

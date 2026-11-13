@@ -365,10 +365,25 @@ function setupDataChannel(channel: RTCDataChannel, roomCode: string) {
   }
   closeQrModal();
 
+  const dropText = dropzone?.querySelector('.dropzone-text');
+  const dropSubtext = dropzone?.querySelector('.dropzone-subtext');
+  if (dropText) {
+    dropText.textContent = `🟢 Connected to Peer (${roomCode})! Drop files to send`;
+  }
+  if (dropSubtext) {
+    dropSubtext.textContent = 'Files dropped here or selected will stream directly to the peer.';
+  }
+
   channel.onclose = () => {
     setStatus('Peer disconnected', 'ready');
     activeChannel = null;
     coordinator?.close();
+    if (dropText) {
+      dropText.textContent = 'Drag & drop files here, or click to browse';
+    }
+    if (dropSubtext) {
+      dropSubtext.textContent = 'Zero-cloud transfer directly between devices (multiple files supported)';
+    }
     renderOutgoingFiles();
   };
 

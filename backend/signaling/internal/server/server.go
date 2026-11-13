@@ -73,13 +73,13 @@ func NewServer(cfg Config) *Server {
 		cfg.RoomTTL = 10 * time.Minute
 	}
 	if cfg.MaxFailures == 0 {
-		cfg.MaxFailures = 5
+		cfg.MaxFailures = 20
 	}
 	if cfg.RateWindow == 0 {
-		cfg.RateWindow = 10 * time.Minute
+		cfg.RateWindow = 1 * time.Minute
 	}
 	if cfg.BlockTime == 0 {
-		cfg.BlockTime = 10 * time.Minute
+		cfg.BlockTime = 30 * time.Second
 	}
 	if len(cfg.StunURLs) == 0 {
 		cfg.StunURLs = []string{"stun:stun.l.google.com:19302"}

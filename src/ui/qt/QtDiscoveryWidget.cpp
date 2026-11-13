@@ -209,6 +209,33 @@ void QtDiscoveryWidget::setupGlobalPage() {
     heroLayout->addWidget(m_globalServerStatusLabel);
     globalLayout->addWidget(heroFrame);
 
+    // Active Global Session Card (shown when WebRTC peer is connected)
+    m_activeSessionCard = new QFrame(container);
+    m_activeSessionCard->setObjectName("card");
+    m_activeSessionCard->setStyleSheet("background: #0f241d; border: 1px solid #238636; border-radius: 12px; padding: 12px 16px;");
+    m_activeSessionCard->setVisible(false);
+
+    auto* activeLayout = new QHBoxLayout(m_activeSessionCard);
+    activeLayout->setContentsMargins(12, 10, 12, 10);
+    activeLayout->setSpacing(12);
+
+    m_activeSessionLabel = new QLabel(m_activeSessionCard);
+    m_activeSessionLabel->setStyleSheet("color: #3fb950; font-weight: bold; font-size: 13px;");
+
+    m_activeSessionSendBtn = new QPushButton("📁 Надіслати файл", m_activeSessionCard);
+    m_activeSessionSendBtn->setObjectName("primaryBtn");
+    m_activeSessionSendBtn->setCursor(Qt::PointingHandCursor);
+    connect(m_activeSessionSendBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onActiveSessionSendClicked);
+
+    m_activeSessionCloseBtn = new QPushButton("✕ Закрити", m_activeSessionCard);
+    m_activeSessionCloseBtn->setCursor(Qt::PointingHandCursor);
+    connect(m_activeSessionCloseBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onActiveSessionCloseClicked);
+
+    activeLayout->addWidget(m_activeSessionLabel, 1);
+    activeLayout->addWidget(m_activeSessionSendBtn);
+    activeLayout->addWidget(m_activeSessionCloseBtn);
+    globalLayout->addWidget(m_activeSessionCard);
+
     // 2. Action Cards Layout (Side by Side)
     auto* cardsLayout = new QHBoxLayout();
     cardsLayout->setSpacing(14);
@@ -253,13 +280,13 @@ void QtDiscoveryWidget::setupGlobalPage() {
     joinLayout->setContentsMargins(18, 16, 18, 16);
     joinLayout->setSpacing(12);
 
-    auto* joinTitle = new QLabel("📥 Отримати файл (Ввести код кімнати)", joinCard);
+    auto* joinTitle = new QLabel("📥 Приєднатися до кімнати (Ввести код)", joinCard);
     QFont jtf = joinTitle->font();
     jtf.setPointSize(14);
     jtf.setBold(true);
     joinTitle->setFont(jtf);
 
-    auto* joinDesc = new QLabel("Введіть 8-значний код від відправника з іншої мережі (наприклад, DROP-K8M4-P9X2 або K8M4P9X2) для прямого завантаження:", joinCard);
+    auto* joinDesc = new QLabel("Введіть 8-значний код від іншого пристрою (наприклад, DROP-K8M4-P9X2 або посилання з браузера):", joinCard);
     joinDesc->setWordWrap(true);
     joinDesc->setObjectName("secondaryLabel");
 
@@ -267,17 +294,23 @@ void QtDiscoveryWidget::setupGlobalPage() {
     m_globalRoomInput->setPlaceholderText("наприклад: DROP-K8M4-P9X2");
     m_globalRoomInput->setStyleSheet("font-size: 14px; font-weight: bold; letter-spacing: 1px; padding: 8px 10px;");
 
-    auto* joinBtn = new QPushButton("🔗 Приєднатися та завантажити файл", joinCard);
-    joinBtn->setObjectName("primaryBtn");
+    auto* joinBtn = new QPushButton("📥 Приєднатися (Очікувати файл)", joinCard);
+    joinBtn->setObjectName("secondaryBtn");
     joinBtn->setCursor(Qt::PointingHandCursor);
     connect(joinBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onGlobalJoinClicked);
     connect(m_globalRoomInput, &QLineEdit::returnPressed, this, &QtDiscoveryWidget::onGlobalJoinClicked);
+
+    auto* joinSendBtn = new QPushButton("📤 Приєднатися та надіслати файл...", joinCard);
+    joinSendBtn->setObjectName("primaryBtn");
+    joinSendBtn->setCursor(Qt::PointingHandCursor);
+    connect(joinSendBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onGlobalJoinWithFileClicked);
 
     joinLayout->addWidget(joinTitle);
     joinLayout->addWidget(joinDesc);
     joinLayout->addWidget(m_globalRoomInput);
     joinLayout->addStretch();
     joinLayout->addWidget(joinBtn);
+    joinLayout->addWidget(joinSendBtn);
     cardsLayout->addWidget(joinCard, 1);
 
     globalLayout->addLayout(cardsLayout);
@@ -690,6 +723,53 @@ void QtDiscoveryWidget::onGlobalDirectConnectClicked() {
     if (m_presenter) {
         m_presenter->onDirectConnectRequested(ip.toStdString(), static_cast<uint16_t>(port));
     }
+}
+
+void QtDiscoveryWidget::updateGlobalSession(const QString& roomCode, bool connected) {
+    if (!m_activeSessionCard || !m_activeSessionLabel) return;
+    if (connected && !roomCode.isEmpty()) {
+        m_currentActiveRoomCode = roomCode;
+        m_activeSessionLabel->setText(QString("🟢 Активне WebRTC P2P з'єднання: <b>%1</b>").arg(roomCode));
+        m_activeSessionCard->setVisible(true);
+    } else {
+        m_currentActiveRoomCode.clear();
+        m_activeSessionCard->setVisible(false);
+    }
+}
+
+void QtDiscoveryWidget::onGlobalJoinWithFileClicked() {
+    if (!m_globalRoomInput) return;
+    QString input = m_globalRoomInput->text().trimmed();
+    if (input.isEmpty()) {
+        QMessageBox::information(this, "Введіть код кімнати", "Будь ласка, введіть 8-символьний код кімнати від отримувача (наприклад: DROP-K8M4-P9X2 або посилання з браузера).");
+        return;
+    }
+
+    std::string err;
+    std::string norm = WebRtcSessionCoordinator::normalizeRoomCode(input.toStdString(), &err);
+    if (norm.empty()) {
+        QMessageBox::warning(this, "Некоректний код кімнати", QString::fromStdString("Помилка валідації коду: " + err));
+        return;
+    }
+
+    QString filePath = QFileDialog::getOpenFileName(this, "Оберіть файл для надсилання в кімнату");
+    if (filePath.isEmpty()) return;
+
+    emit joinRoomWithFileRequested(QString::fromStdString(norm), filePath);
+}
+
+void QtDiscoveryWidget::onActiveSessionSendClicked() {
+    if (m_currentActiveRoomCode.isEmpty()) return;
+    QString filePath = QFileDialog::getOpenFileName(this, "Оберіть файл для надсилання підключеному пристрою");
+    if (filePath.isEmpty()) return;
+    emit sendFileRequested("webrtc:" + m_currentActiveRoomCode, filePath);
+}
+
+void QtDiscoveryWidget::onActiveSessionCloseClicked() {
+    if (m_currentActiveRoomCode.isEmpty()) return;
+    QString code = m_currentActiveRoomCode;
+    updateGlobalSession(QString(), false);
+    emit closeGlobalSessionRequested(code);
 }
 
 void QtDiscoveryWidget::onDeviceRemoveClicked(const QString& peerId) {

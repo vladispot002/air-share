@@ -41,6 +41,7 @@ private slots:
     void testDirectoryValidationLogic();
     void testDownloadsPathGuiSelectionAndSync();
     void testAccountTransferHistoryAndUrlNormalization();
+    void testGlobalP2pUiAndActiveSession();
 };
 
 void TestQtGui::testAppInitialization() {
@@ -616,6 +617,30 @@ void TestQtGui::testAccountTransferHistoryAndUrlNormalization() {
     accountWidget->updateView();
     QVERIFY(presenter->isGuest());
     QCOMPARE(accountWidget->getHistoryList()->count(), 0);
+}
+
+void TestQtGui::testGlobalP2pUiAndActiveSession() {
+    QtDiscoveryWidget discovery;
+    discovery.show();
+    discovery.switchToGlobalMode();
+
+    QSignalSpy spyJoinWithFile(&discovery, &QtDiscoveryWidget::joinRoomWithFileRequested);
+    QSignalSpy spyCloseSession(&discovery, &QtDiscoveryWidget::closeGlobalSessionRequested);
+
+    // Verify initial active session card is hidden
+    discovery.updateGlobalSession("", false);
+    QVERIFY(!discovery.getActiveSessionCard()->isVisible());
+
+    // Activate global session
+    discovery.updateGlobalSession("DROP-7K2M-9P4X", true);
+    QVERIFY(discovery.getActiveSessionCard()->isVisible());
+
+    // Trigger close global session via button
+    QVERIFY(discovery.getActiveSessionCloseBtn() != nullptr);
+    discovery.getActiveSessionCloseBtn()->click();
+    QCOMPARE(spyCloseSession.count(), 1);
+    QCOMPARE(spyCloseSession.takeFirst().at(0).toString(), QString("DROP-7K2M-9P4X"));
+    QVERIFY(!discovery.getActiveSessionCard()->isVisible());
 }
 
 int main(int argc, char* argv[]) {
