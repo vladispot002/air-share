@@ -114,6 +114,21 @@ public:
         const std::string& platform,
         std::string* outError = nullptr
     );
+    bool registerWithPassword(
+        const std::string& email,
+        const std::string& password,
+        const std::string& displayName,
+        const std::string& deviceName = "LAN-Drop Desktop",
+        const std::string& platform = "linux",
+        std::string* outError = nullptr
+    );
+    bool loginWithPassword(
+        const std::string& email,
+        const std::string& password,
+        const std::string& deviceName = "LAN-Drop Desktop",
+        const std::string& platform = "linux",
+        std::string* outError = nullptr
+    );
     bool requestMagicLink(const std::string& email, std::string* outToken = nullptr, std::string* outError = nullptr);
     bool verifyMagicLink(const std::string& token, const std::string& deviceName = "LAN-Drop Desktop", const std::string& platform = "linux", std::string* outError = nullptr);
     void logout();

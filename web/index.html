@@ -540,9 +540,12 @@
       </p>
 
       <!-- Action Row: Host & Join -->
-      <div class="action-row">
+      <div class="action-row" style="display: flex; gap: 0.5rem; width: 100%;">
         <button id="hostBtn" class="btn-primary" style="flex: 1;">
           📷 Host Room (Show QR)
+        </button>
+        <button id="scanCameraBtn" class="btn-secondary" style="flex: 1;">
+          📸 Scan QR Code
         </button>
       </div>
 
@@ -617,27 +620,54 @@
       </div>
     </div>
 
-    <!-- Auth Modal -->
+    <!-- Camera QR Scanner Modal -->
+    <div id="qrScannerModal" class="modal-backdrop">
+      <div class="modal" style="max-width: 380px;">
+        <h3 class="modal-title">📸 Scan QR Code</h3>
+        <p class="modal-desc">Point your camera at a LAN-Drop QR code to connect instantly.</p>
+        <div id="cameraContainer" style="position: relative; width: 100%; aspect-ratio: 1; background: #000; border-radius: 12px; overflow: hidden; display: flex; align-items: center; justify-content: center;">
+          <video id="qrVideo" playsinline autoplay muted style="width: 100%; height: 100%; object-fit: cover;"></video>
+          <canvas id="qrCanvas" style="display: none;"></canvas>
+          <div id="cameraStatus" style="position: absolute; color: #fff; font-size: 0.85rem; background: rgba(0,0,0,0.65); padding: 6px 12px; border-radius: 6px; text-align: center;">Starting camera...</div>
+        </div>
+        <div style="display: flex; gap: 0.5rem; width: 100%;">
+          <label class="btn-secondary" style="flex: 1; text-align: center; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0.6rem;">
+            📁 Upload QR Image
+            <input type="file" id="qrFileInput" accept="image/*" style="display: none;" />
+          </label>
+        </div>
+        <button id="closeScannerBtn" class="btn-secondary" style="width: 100%;">Close Scanner</button>
+      </div>
+    </div>
+
+    <!-- Auth Modal: Dedicated Tabbed Sign In & Register -->
     <div id="authModal" class="modal-backdrop">
-      <div class="modal">
-        <h3 class="modal-title">Sign In or Create Account</h3>
-        <p class="modal-desc">
-          Accounts are 100% optional. Signing in unlocks persistent identity, cross-device contacts, and multi-device transfer routing.
+      <div class="modal" style="max-width: 400px;">
+        <div class="auth-tabs" style="display: flex; width: 100%; border-bottom: 1px solid var(--card-border); margin-bottom: 0.5rem;">
+          <button id="authTabLogin" class="auth-tab active" style="flex: 1; padding: 0.6rem; background: none; border: none; border-bottom: 2px solid var(--accent); color: var(--accent); font-weight: 600; cursor: pointer; font-size: 0.95rem;">Sign In</button>
+          <button id="authTabRegister" class="auth-tab" style="flex: 1; padding: 0.6rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-secondary); font-weight: 600; cursor: pointer; font-size: 0.95rem;">Register</button>
+        </div>
+
+        <p id="authSubtitle" class="modal-desc">
+          Sign in to access your persistent ID, devices, and contacts.
         </p>
 
+        <!-- Inline Error Banner -->
+        <div id="authErrorBanner" style="display: none; width: 100%; padding: 0.6rem 0.8rem; border-radius: 8px; background: rgba(248, 81, 73, 0.15); border: 1px solid var(--danger); color: var(--danger); font-size: 0.85rem; text-align: left;"></div>
+
         <div style="display: flex; flex-direction: column; gap: 0.75rem; width: 100%;">
+          <input type="text" id="authEmailInput" placeholder="Email (e.g. name@example.com)" style="width: 100%; text-transform: none;" />
+          <input type="text" id="authNameInput" placeholder="Display Name (optional)" style="display: none; width: 100%; text-transform: none;" />
+          <input type="password" id="authPasswordInput" placeholder="Password (min 6 characters)" style="width: 100%; text-transform: none;" />
+          <input type="password" id="authConfirmPasswordInput" placeholder="Confirm Password" style="display: none; width: 100%; text-transform: none;" />
+          <button id="authSubmitBtn" class="btn-primary" style="width: 100%; padding: 0.75rem; font-weight: 600;">Sign In</button>
+
+          <div style="border-top: 1px solid var(--card-border); margin: 0.25rem 0;"></div>
+          <div style="font-size: 0.8rem; color: var(--text-secondary); text-align: center;">or continue with provider</div>
           <div style="display: flex; gap: 0.5rem;">
             <button id="oauthGoogleBtn" class="btn-secondary" style="flex: 1;">Google</button>
             <button id="oauthGithubBtn" class="btn-secondary" style="flex: 1;">GitHub</button>
           </div>
-          <div style="display: flex; gap: 0.5rem;">
-            <button id="oauthAppleBtn" class="btn-secondary" style="flex: 1;">Apple</button>
-            <button id="oauthMicrosoftBtn" class="btn-secondary" style="flex: 1;">Microsoft</button>
-          </div>
-          <div style="border-top: 1px solid var(--card-border); margin: 0.5rem 0;"></div>
-          <input type="text" id="authEmailInput" placeholder="Email or @landrop_id" style="width: 100%; text-transform: none;" />
-          <input type="text" id="authNameInput" placeholder="Display Name (optional)" style="width: 100%; text-transform: none;" />
-          <button id="authSubmitBtn" class="btn-primary" style="width: 100%;">Continue</button>
         </div>
 
         <button id="closeAuthModalBtn" class="btn-secondary" style="width: 100%;">Continue as Guest</button>

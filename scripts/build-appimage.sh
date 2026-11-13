@@ -13,10 +13,12 @@ echo "  [LAN-Drop] Building Linux AppImage & AppDir     "
 echo "=================================================="
 
 # 1. Compile LAN-Drop release binary
-echo "==> [1/4] Building LAN-Drop in Release mode..."
+echo "==> [1/4] Building LAN-Drop in Release mode with WebRTC..."
 cmake -B "${BUILD_DIR}" -S "${ROOT_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr \
+    -DLANDROP_ENABLE_WEBRTC=ON \
+    -DCMAKE_PREFIX_PATH="${HOME}/.local" \
     -DBUILD_TESTING=ON
 
 cmake --build "${BUILD_DIR}" --parallel "$(nproc || echo 4)"
@@ -24,6 +26,7 @@ cmake --build "${BUILD_DIR}" --parallel "$(nproc || echo 4)"
 # Run quick verification
 echo "==> Running automated test suite before packaging..."
 export QT_QPA_PLATFORM=offscreen
+export LD_LIBRARY_PATH="${HOME}/.local/lib64:${HOME}/.local/lib:${LD_LIBRARY_PATH:-}"
 ctest --test-dir "${BUILD_DIR}" --output-on-failure
 
 # 2. Stage AppDir structure
@@ -57,11 +60,15 @@ fi
 
 for lib in $(ldd "${BUILD_DIR}/lan_drop" | grep "=> /" | awk '{print $3}'); do
     case "$(basename "${lib}")" in
-        libQt6*|libcrypto*|libssl*|libxkbcommon*|libxcb*)
+        libQt6*|libcrypto*|libssl*|libxkbcommon*|libxcb*|libdatachannel*|libusrsctp*)
             cp -n "${lib}" "${APPDIR}/usr/lib/" 2>/dev/null || true
             ;;
     esac
 done
+
+# Ensure 64-bit WebRTC & SCTP libraries are bundled
+cp -P "${HOME}/.local/lib64"/libusrsctp* "${APPDIR}/usr/lib/" 2>/dev/null || true
+cp -P "${HOME}/.local/lib64"/libdatachannel* "${APPDIR}/usr/lib/" 2>/dev/null || true
 
 # 3. Create hardened AppRun script
 echo "==> [3/4] Generating AppRun launcher..."

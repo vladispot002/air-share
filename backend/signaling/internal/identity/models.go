@@ -21,6 +21,9 @@ var (
 	ErrTransferAlreadyClaimed = errors.New("transfer already claimed by another device")
 	ErrTransferExpired        = errors.New("transfer request expired")
 	ErrUnauthorized           = errors.New("unauthorized operation")
+	ErrEmailAlreadyRegistered = errors.New("email is already registered")
+	ErrInvalidCredentials     = errors.New("invalid email or password")
+	ErrPasswordTooShort       = errors.New("password must be at least 6 characters")
 )
 
 var landropIDRegex = regexp.MustCompile(`^@[a-zA-Z0-9_-]{3,30}$`)
@@ -47,6 +50,7 @@ type UserAccount struct {
 	EmailVerified  bool           `json:"email_verified"`
 	CreatedAt      time.Time      `json:"created_at"`
 	Status         string         `json:"status"` // "active", "suspended"
+	PasswordHash   string         `json:"-"`
 	AuthIdentities []AuthIdentity `json:"auth_identities,omitempty"`
 }
 

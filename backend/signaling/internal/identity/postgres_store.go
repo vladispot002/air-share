@@ -55,10 +55,10 @@ func (s *PostgresStore) CreateUser(u *UserAccount) error {
 	}
 
 	query := `
-		INSERT INTO users (user_id, landrop_id, display_name, avatar_url, email, email_verified, created_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO users (user_id, landrop_id, display_name, avatar_url, email, email_verified, created_at, status, password_hash)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
-	_, err := s.db.Exec(query, u.UserID, u.LandropID, u.DisplayName, u.AvatarURL, u.Email, u.EmailVerified, u.CreatedAt, u.Status)
+	_, err := s.db.Exec(query, u.UserID, u.LandropID, u.DisplayName, u.AvatarURL, u.Email, u.EmailVerified, u.CreatedAt, u.Status, u.PasswordHash)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "duplicate key") {
 			return ErrLandropIDTaken
@@ -74,7 +74,7 @@ func (s *PostgresStore) CreateUser(u *UserAccount) error {
 
 func (s *PostgresStore) GetUserByID(userID string) (*UserAccount, error) {
 	query := `
-		SELECT user_id, landrop_id, display_name, avatar_url, email, email_verified, created_at, status
+		SELECT user_id, landrop_id, display_name, avatar_url, email, email_verified, created_at, status, password_hash
 		FROM users
 		WHERE user_id = $1
 	`
@@ -82,7 +82,8 @@ func (s *PostgresStore) GetUserByID(userID string) (*UserAccount, error) {
 	u := &UserAccount{}
 	var email sql.NullString
 	var avatar sql.NullString
-	err := row.Scan(&u.UserID, &u.LandropID, &u.DisplayName, &avatar, &email, &u.EmailVerified, &u.CreatedAt, &u.Status)
+	var passHash sql.NullString
+	err := row.Scan(&u.UserID, &u.LandropID, &u.DisplayName, &avatar, &email, &u.EmailVerified, &u.CreatedAt, &u.Status, &passHash)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrUserNotFound
@@ -91,6 +92,7 @@ func (s *PostgresStore) GetUserByID(userID string) (*UserAccount, error) {
 	}
 	u.Email = email.String
 	u.AvatarURL = avatar.String
+	u.PasswordHash = passHash.String
 
 	identities, _ := s.GetAuthIdentities(u.UserID)
 	u.AuthIdentities = identities
@@ -100,7 +102,7 @@ func (s *PostgresStore) GetUserByID(userID string) (*UserAccount, error) {
 func (s *PostgresStore) GetUserByLandropID(landropID string) (*UserAccount, error) {
 	norm := strings.ToLower(strings.TrimSpace(landropID))
 	query := `
-		SELECT user_id, landrop_id, display_name, avatar_url, email, email_verified, created_at, status
+		SELECT user_id, landrop_id, display_name, avatar_url, email, email_verified, created_at, status, password_hash
 		FROM users
 		WHERE LOWER(landrop_id) = $1
 	`
@@ -108,7 +110,8 @@ func (s *PostgresStore) GetUserByLandropID(landropID string) (*UserAccount, erro
 	u := &UserAccount{}
 	var email sql.NullString
 	var avatar sql.NullString
-	err := row.Scan(&u.UserID, &u.LandropID, &u.DisplayName, &avatar, &email, &u.EmailVerified, &u.CreatedAt, &u.Status)
+	var passHash sql.NullString
+	err := row.Scan(&u.UserID, &u.LandropID, &u.DisplayName, &avatar, &email, &u.EmailVerified, &u.CreatedAt, &u.Status, &passHash)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrUserNotFound
@@ -117,6 +120,35 @@ func (s *PostgresStore) GetUserByLandropID(landropID string) (*UserAccount, erro
 	}
 	u.Email = email.String
 	u.AvatarURL = avatar.String
+	u.PasswordHash = passHash.String
+
+	identities, _ := s.GetAuthIdentities(u.UserID)
+	u.AuthIdentities = identities
+	return u, nil
+}
+
+func (s *PostgresStore) GetUserByEmail(email string) (*UserAccount, error) {
+	norm := strings.ToLower(strings.TrimSpace(email))
+	query := `
+		SELECT user_id, landrop_id, display_name, avatar_url, email, email_verified, created_at, status, password_hash
+		FROM users
+		WHERE LOWER(email) = $1
+	`
+	row := s.db.QueryRow(query, norm)
+	u := &UserAccount{}
+	var dbEmail sql.NullString
+	var avatar sql.NullString
+	var passHash sql.NullString
+	err := row.Scan(&u.UserID, &u.LandropID, &u.DisplayName, &avatar, &dbEmail, &u.EmailVerified, &u.CreatedAt, &u.Status, &passHash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+	u.Email = dbEmail.String
+	u.AvatarURL = avatar.String
+	u.PasswordHash = passHash.String
 
 	identities, _ := s.GetAuthIdentities(u.UserID)
 	u.AuthIdentities = identities
@@ -125,7 +157,7 @@ func (s *PostgresStore) GetUserByLandropID(landropID string) (*UserAccount, erro
 
 func (s *PostgresStore) GetUserByAuthIdentity(provider, providerUserID string) (*UserAccount, error) {
 	query := `
-		SELECT u.user_id, u.landrop_id, u.display_name, u.avatar_url, u.email, u.email_verified, u.created_at, u.status
+		SELECT u.user_id, u.landrop_id, u.display_name, u.avatar_url, u.email, u.email_verified, u.created_at, u.status, u.password_hash
 		FROM users u
 		JOIN auth_identities a ON u.user_id = a.user_id
 		WHERE a.provider = $1 AND a.provider_user_id = $2
@@ -134,7 +166,8 @@ func (s *PostgresStore) GetUserByAuthIdentity(provider, providerUserID string) (
 	u := &UserAccount{}
 	var email sql.NullString
 	var avatar sql.NullString
-	err := row.Scan(&u.UserID, &u.LandropID, &u.DisplayName, &avatar, &email, &u.EmailVerified, &u.CreatedAt, &u.Status)
+	var passHash sql.NullString
+	err := row.Scan(&u.UserID, &u.LandropID, &u.DisplayName, &avatar, &email, &u.EmailVerified, &u.CreatedAt, &u.Status, &passHash)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrUserNotFound
@@ -143,6 +176,7 @@ func (s *PostgresStore) GetUserByAuthIdentity(provider, providerUserID string) (
 	}
 	u.Email = email.String
 	u.AvatarURL = avatar.String
+	u.PasswordHash = passHash.String
 
 	identities, _ := s.GetAuthIdentities(u.UserID)
 	u.AuthIdentities = identities
@@ -152,10 +186,10 @@ func (s *PostgresStore) GetUserByAuthIdentity(provider, providerUserID string) (
 func (s *PostgresStore) UpdateUser(u *UserAccount) error {
 	query := `
 		UPDATE users
-		SET display_name = $1, avatar_url = $2, email = $3, email_verified = $4, status = $5
-		WHERE user_id = $6
+		SET display_name = $1, avatar_url = $2, email = $3, email_verified = $4, status = $5, password_hash = COALESCE(NULLIF($6, ''), password_hash)
+		WHERE user_id = $7
 	`
-	res, err := s.db.Exec(query, u.DisplayName, u.AvatarURL, u.Email, u.EmailVerified, u.Status, u.UserID)
+	res, err := s.db.Exec(query, u.DisplayName, u.AvatarURL, u.Email, u.EmailVerified, u.Status, u.PasswordHash, u.UserID)
 	if err != nil {
 		return err
 	}

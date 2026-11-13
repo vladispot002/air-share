@@ -149,6 +149,96 @@ export class IdentityClient {
     return this.getState();
   }
 
+  public async registerWithPassword(payload: {
+    email: string;
+    password: string;
+    confirm_password?: string;
+    display_name?: string;
+    device_name?: string;
+    platform?: string;
+  }): Promise<IdentityState> {
+    const isMobile = typeof navigator !== "undefined" && navigator.userAgent.includes("Mobile");
+    const res = await fetch(`${this.baseUrl}/api/v1/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: payload.email,
+        password: payload.password,
+        confirm_password: payload.confirm_password || payload.password,
+        display_name: payload.display_name || payload.email.split("@")[0],
+        platform: payload.platform || (isMobile ? "mobile" : "web"),
+        device_name: payload.device_name || (isMobile ? "Web Mobile" : "Web Browser"),
+        app_version: "2.0.0",
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Registration failed" }));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    this.state = {
+      isGuest: false,
+      token: data.token,
+      user: data.user,
+      device: data.device,
+    };
+
+    const storage = this.getStorage();
+    storage.setItem("landrop_auth_token", data.token);
+    storage.setItem("landrop_user_profile", JSON.stringify(data.user));
+    if (data.device) {
+      storage.setItem("landrop_device_info", JSON.stringify(data.device));
+    }
+
+    this.notify();
+    return this.getState();
+  }
+
+  public async loginWithPassword(payload: {
+    email: string;
+    password: string;
+    device_name?: string;
+    platform?: string;
+  }): Promise<IdentityState> {
+    const isMobile = typeof navigator !== "undefined" && navigator.userAgent.includes("Mobile");
+    const res = await fetch(`${this.baseUrl}/api/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: payload.email,
+        password: payload.password,
+        platform: payload.platform || (isMobile ? "mobile" : "web"),
+        device_name: payload.device_name || (isMobile ? "Web Mobile" : "Web Browser"),
+        app_version: "2.0.0",
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Login failed" }));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    this.state = {
+      isGuest: false,
+      token: data.token,
+      user: data.user,
+      device: data.device,
+    };
+
+    const storage = this.getStorage();
+    storage.setItem("landrop_auth_token", data.token);
+    storage.setItem("landrop_user_profile", JSON.stringify(data.user));
+    if (data.device) {
+      storage.setItem("landrop_device_info", JSON.stringify(data.device));
+    }
+
+    this.notify();
+    return this.getState();
+  }
+
   public logout(): void {
     const storage = this.getStorage();
     storage.removeItem("landrop_auth_token");

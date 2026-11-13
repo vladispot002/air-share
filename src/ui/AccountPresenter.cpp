@@ -54,6 +54,30 @@ bool AccountPresenter::loginWithEmail(const std::string& email, const std::strin
     return loginWithProvider("email", email, email, displayName, outError);
 }
 
+bool AccountPresenter::registerAccount(const std::string& email, const std::string& password, const std::string& displayName, std::string* outError) {
+    if (!m_client) return false;
+    bool ok = m_client->registerWithPassword(email, password, displayName, "LAN-Drop Desktop", "linux", outError);
+    if (ok) {
+        refreshDevices();
+        refreshContacts();
+        refreshHistory();
+        notifyStateChanged();
+    }
+    return ok;
+}
+
+bool AccountPresenter::loginWithPassword(const std::string& email, const std::string& password, std::string* outError) {
+    if (!m_client) return false;
+    bool ok = m_client->loginWithPassword(email, password, "LAN-Drop Desktop", "linux", outError);
+    if (ok) {
+        refreshDevices();
+        refreshContacts();
+        refreshHistory();
+        notifyStateChanged();
+    }
+    return ok;
+}
+
 bool AccountPresenter::loginWithProvider(
     const std::string& provider,
     const std::string& providerUserId,

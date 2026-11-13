@@ -46,39 +46,148 @@ void QtAccountWidget::setupUi() {
     m_userDetailsLabel->setStyleSheet("color: #8b949e; font-size: 12px;");
     headerLayout->addWidget(m_userDetailsLabel);
 
-    // Login Form Box (shown when expanding sign in)
-    m_loginBox = new QGroupBox("Quick Sign In / Register", this);
-    auto* loginLayout = new QHBoxLayout(m_loginBox);
-    m_emailInput = new QLineEdit(m_loginBox);
-    m_emailInput->setPlaceholderText("Email or @username");
-    m_nameInput = new QLineEdit(m_loginBox);
-    m_nameInput->setPlaceholderText("Display Name (optional)");
-    auto* submitLoginBtn = new QPushButton("Continue", m_loginBox);
-    auto* magicBtn = new QPushButton("✉️ Magic Link", m_loginBox);
+    // Login & Registration Form Box (shown when expanding sign in)
+    m_loginBox = new QGroupBox("Обліковий запис / Account Authorization", this);
+    auto* loginMainLayout = new QVBoxLayout(m_loginBox);
+    loginMainLayout->setSpacing(10);
 
-    loginLayout->addWidget(new QLabel("Email / ID:", m_loginBox));
-    loginLayout->addWidget(m_emailInput, 1);
-    loginLayout->addWidget(new QLabel("Name:", m_loginBox));
-    loginLayout->addWidget(m_nameInput, 1);
-    loginLayout->addWidget(submitLoginBtn);
-    loginLayout->addWidget(magicBtn);
+    // Tab buttons for Sign In / Register
+    auto* tabLayout = new QHBoxLayout();
+    m_tabLoginBtn = new QPushButton("🔑 Увійти (Sign In)", m_loginBox);
+    m_tabRegisterBtn = new QPushButton("📝 Реєстрація (Register)", m_loginBox);
+    m_tabLoginBtn->setCheckable(true);
+    m_tabRegisterBtn->setCheckable(true);
+    m_tabLoginBtn->setChecked(true);
+    m_tabLoginBtn->setStyleSheet("font-weight: bold; padding: 6px;");
+    m_tabRegisterBtn->setStyleSheet("font-weight: bold; padding: 6px;");
+    tabLayout->addWidget(m_tabLoginBtn);
+    tabLayout->addWidget(m_tabRegisterBtn);
+    loginMainLayout->addLayout(tabLayout);
+
+    // Error banner label
+    m_errorLabel = new QLabel(m_loginBox);
+    m_errorLabel->setStyleSheet("color: #ff453a; font-size: 12px; font-weight: bold; padding: 4px;");
+    m_errorLabel->setVisible(false);
+    loginMainLayout->addWidget(m_errorLabel);
+
+    // Form inputs
+    auto* formLayout = new QVBoxLayout();
+    m_emailInput = new QLineEdit(m_loginBox);
+    m_emailInput->setPlaceholderText("Email (наприклад: name@example.com або @username)");
+
+    m_nameInput = new QLineEdit(m_loginBox);
+    m_nameInput->setPlaceholderText("Ім'я або нікнейм / Display Name (необов'язково)");
+    m_nameInput->setVisible(false);
+
+    m_passwordInput = new QLineEdit(m_loginBox);
+    m_passwordInput->setPlaceholderText("Пароль / Password (мінімум 6 символів)");
+    m_passwordInput->setEchoMode(QLineEdit::Password);
+
+    m_confirmPasswordInput = new QLineEdit(m_loginBox);
+    m_confirmPasswordInput->setPlaceholderText("Підтвердження пароля / Confirm Password");
+    m_confirmPasswordInput->setEchoMode(QLineEdit::Password);
+    m_confirmPasswordInput->setVisible(false);
+
+    formLayout->addWidget(m_emailInput);
+    formLayout->addWidget(m_nameInput);
+    formLayout->addWidget(m_passwordInput);
+    formLayout->addWidget(m_confirmPasswordInput);
+    loginMainLayout->addLayout(formLayout);
+
+    // Action button row
+    auto* btnRow = new QHBoxLayout();
+    m_submitAuthBtn = new QPushButton("Увійти / Sign In", m_loginBox);
+    m_submitAuthBtn->setObjectName("primaryBtn");
+    m_submitAuthBtn->setStyleSheet("font-weight: bold; padding: 8px;");
+    auto* magicBtn = new QPushButton("✉️ Magic Link", m_loginBox);
+    btnRow->addWidget(m_submitAuthBtn, 2);
+    btnRow->addWidget(magicBtn, 1);
+    loginMainLayout->addLayout(btnRow);
+
     m_loginBox->setVisible(false);
 
-    connect(submitLoginBtn, &QPushButton::clicked, this, [this]() {
+    connect(m_tabLoginBtn, &QPushButton::clicked, this, [this]() { setAuthMode(false); });
+    connect(m_tabRegisterBtn, &QPushButton::clicked, this, [this]() { setAuthMode(true); });
+
+    connect(m_submitAuthBtn, &QPushButton::clicked, this, [this]() {
+        if (m_errorLabel) m_errorLabel->setVisible(false);
+
         QString email = m_emailInput->text().trimmed();
+        QString pass = m_passwordInput->text();
+
         if (email.isEmpty()) {
-            QMessageBox::warning(this, "Input Required", "Please enter your email or username.");
+            if (m_errorLabel) {
+                m_errorLabel->setText("Будь ласка, введіть email або нікнейм.");
+                m_errorLabel->setVisible(true);
+            }
             return;
         }
-        QString name = m_nameInput->text().trimmed();
-        if (m_presenter) {
-            std::string err;
-            if (!m_presenter->loginWithEmail(email.toStdString(), name.toStdString(), &err)) {
-                QMessageBox::warning(this, "Sign In Error", QString::fromStdString(err));
-            } else {
-                m_loginBox->setVisible(false);
-                m_emailInput->clear();
-                m_nameInput->clear();
+
+        if (!m_isRegisterMode) {
+            // Sign in mode
+            if (pass.isEmpty()) {
+                if (m_errorLabel) {
+                    m_errorLabel->setText("Будь ласка, введіть пароль.");
+                    m_errorLabel->setVisible(true);
+                }
+                return;
+            }
+
+            if (m_presenter) {
+                std::string err;
+                if (!m_presenter->loginWithPassword(email.toStdString(), pass.toStdString(), &err)) {
+                    if (m_errorLabel) {
+                        m_errorLabel->setText(QString::fromStdString("Помилка входу: " + err));
+                        m_errorLabel->setVisible(true);
+                    }
+                } else {
+                    m_loginBox->setVisible(false);
+                    m_passwordInput->clear();
+                    m_confirmPasswordInput->clear();
+                }
+            }
+        } else {
+            // Registration mode
+            QString confirmPass = m_confirmPasswordInput->text();
+            QString name = m_nameInput->text().trimmed();
+
+            if (!email.contains('@')) {
+                if (m_errorLabel) {
+                    m_errorLabel->setText("Введіть коректну адресу email для реєстрації.");
+                    m_errorLabel->setVisible(true);
+                }
+                return;
+            }
+            if (pass.length() < 6) {
+                if (m_errorLabel) {
+                    m_errorLabel->setText("Пароль повинен містити не менше 6 символів.");
+                    m_errorLabel->setVisible(true);
+                }
+                return;
+            }
+            if (pass != confirmPass) {
+                if (m_errorLabel) {
+                    m_errorLabel->setText("Введені паролі не збігаються.");
+                    m_errorLabel->setVisible(true);
+                }
+                return;
+            }
+
+            if (m_presenter) {
+                std::string err;
+                if (!m_presenter->registerAccount(email.toStdString(), pass.toStdString(), name.toStdString(), &err)) {
+                    if (m_errorLabel) {
+                        m_errorLabel->setText(QString::fromStdString("Помилка реєстрації: " + err));
+                        m_errorLabel->setVisible(true);
+                    }
+                } else {
+                    m_loginBox->setVisible(false);
+                    m_emailInput->clear();
+                    m_nameInput->clear();
+                    m_passwordInput->clear();
+                    m_confirmPasswordInput->clear();
+                    QMessageBox::information(this, "Успіх", "Обліковий запис успішно зареєстровано!");
+                }
             }
         }
     });
@@ -86,7 +195,7 @@ void QtAccountWidget::setupUi() {
     connect(magicBtn, &QPushButton::clicked, this, [this]() {
         QString email = m_emailInput->text().trimmed();
         if (email.isEmpty()) {
-            QMessageBox::warning(this, "Input Required", "Please enter your email to receive a magic link.");
+            QMessageBox::warning(this, "Введіть Email", "Введіть вашу email адресу для отримання magic link.");
             return;
         }
         if (m_presenter) {
@@ -94,21 +203,21 @@ void QtAccountWidget::setupUi() {
             if (m_presenter->requestMagicLink(email.toStdString(), &token, &err)) {
                 bool ok = false;
                 QString enteredToken = QInputDialog::getText(this, "Magic Link Verification",
-                    "A verification link has been sent.\nEnter token or confirm below:",
+                    "Посилання підтвердження надіслано.\nВведіть токен або підтвердіть нижче:",
                     QLineEdit::Normal, QString::fromStdString(token), &ok);
                 if (ok && !enteredToken.trimmed().isEmpty()) {
                     std::string verifyErr;
                     if (m_presenter->verifyMagicLink(enteredToken.trimmed().toStdString(), &verifyErr)) {
                         m_loginBox->setVisible(false);
                         m_emailInput->clear();
-                        m_nameInput->clear();
-                        QMessageBox::information(this, "Success", "Authenticated via Magic Link!");
+                        m_passwordInput->clear();
+                        QMessageBox::information(this, "Успіх", "Авторизовано через Magic Link!");
                     } else {
-                        QMessageBox::warning(this, "Verification Failed", QString::fromStdString(verifyErr));
+                        QMessageBox::warning(this, "Помилка", QString::fromStdString(verifyErr));
                     }
                 }
             } else {
-                QMessageBox::warning(this, "Magic Link Error", QString::fromStdString(err));
+                QMessageBox::warning(this, "Помилка Magic Link", QString::fromStdString(err));
             }
         }
     });
@@ -333,6 +442,21 @@ void QtAccountWidget::onClearHistoryClicked() {
         if (!m_presenter->clearHistory(&err)) {
             QMessageBox::warning(this, "Clear History Failed", QString::fromStdString(err));
         }
+    }
+}
+
+void QtAccountWidget::setAuthMode(bool isRegister) {
+    m_isRegisterMode = isRegister;
+    if (m_tabLoginBtn) m_tabLoginBtn->setChecked(!isRegister);
+    if (m_tabRegisterBtn) m_tabRegisterBtn->setChecked(isRegister);
+    if (m_nameInput) m_nameInput->setVisible(isRegister);
+    if (m_confirmPasswordInput) m_confirmPasswordInput->setVisible(isRegister);
+    if (m_submitAuthBtn) {
+        m_submitAuthBtn->setText(isRegister ? "Створити акаунт / Create Account" : "Увійти / Sign In");
+    }
+    if (m_errorLabel) {
+        m_errorLabel->setVisible(false);
+        m_errorLabel->clear();
     }
 }
 

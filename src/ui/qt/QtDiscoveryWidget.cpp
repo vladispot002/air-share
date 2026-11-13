@@ -79,8 +79,8 @@ void QtDiscoveryWidget::setupUi() {
     m_directConnectBtn = new QPushButton("🌐 Direct IP Connect", this);
     connect(m_directConnectBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onDirectConnectClicked);
 
-    m_globalP2pBtn = new QPushButton("🌍 Global P2P Room", this);
-    m_globalP2pBtn->setToolTip("Establish global P2P transfer over WebRTC via 8-character Crockford room code");
+    m_globalP2pBtn = new QPushButton("🔗 Підключити пристрій (Web / Desktop)", this);
+    m_globalP2pBtn->setToolTip("Підключити пристрій через WebRTC / QR-код або 8-символьний Crockford код");
     connect(m_globalP2pBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onGlobalP2pClicked);
 
     actionsLayout->addWidget(m_refreshBtn);
@@ -187,26 +187,30 @@ void QtDiscoveryWidget::renderEmptyState() {
     iconLabel->setFont(iconFont);
     iconLabel->setAlignment(Qt::AlignCenter);
 
-    auto* header = new QLabel("Scanning for LAN-Drop Devices", m_emptyStateWidget);
+    auto* header = new QLabel("Пошук пристроїв LAN-Drop...", m_emptyStateWidget);
     QFont hFont = header->font();
     hFont.setPointSize(16);
     hFont.setBold(true);
     header->setFont(hFont);
     header->setAlignment(Qt::AlignCenter);
 
-    auto* desc = new QLabel("Open LAN-Drop on another Mac, PC, or mobile device connected to this Wi-Fi network.\nOr add a loopback address below to perform local self-testing.", m_emptyStateWidget);
+    auto* desc = new QLabel("Відкрийте LAN-Drop у браузері або на іншому комп'ютері чи смартфоні.\nТакож ви можете миттєво підключитися через QR-код або спільний код кімнати.", m_emptyStateWidget);
     desc->setAlignment(Qt::AlignCenter);
     desc->setObjectName("secondaryLabel");
 
     auto* btnLayout = new QHBoxLayout();
     btnLayout->setAlignment(Qt::AlignCenter);
-    auto* scanBtn = new QPushButton("↺ Broadcast Scan", m_emptyStateWidget);
-    scanBtn->setObjectName("primaryBtn");
+    auto* pairBtn = new QPushButton("🔗 Підключити пристрій (Web / QR-код)", m_emptyStateWidget);
+    pairBtn->setObjectName("primaryBtn");
+    connect(pairBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onGlobalP2pClicked);
+
+    auto* scanBtn = new QPushButton("↺ Оновити пошук", m_emptyStateWidget);
     connect(scanBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onRefreshClicked);
 
     auto* loopBtn = new QPushButton("💻 Add Loopback (127.0.0.1)", m_emptyStateWidget);
     connect(loopBtn, &QPushButton::clicked, this, &QtDiscoveryWidget::onAddLoopbackClicked);
 
+    btnLayout->addWidget(pairBtn);
     btnLayout->addWidget(scanBtn);
     btnLayout->addWidget(loopBtn);
 
@@ -353,27 +357,27 @@ void QtDiscoveryWidget::onAddLoopbackClicked() {
 
 void QtDiscoveryWidget::onGlobalP2pClicked() {
     QMessageBox msgBox(this);
-    msgBox.setWindowTitle("Global P2P File Transfer (WebRTC)");
-    msgBox.setText("<b>Global P2P File Transfer (Zero-Config)</b><br><br>"
-                   "Transfer files across NATs and firewalls anywhere in the world without registration.<br>"
-                   "Choose an action:");
-    auto* sendBtn = msgBox.addButton("📷 Host Room (Show QR)", QMessageBox::ActionRole);
-    auto* receiveBtn = msgBox.addButton("⌨️ Join Room (Enter Code)", QMessageBox::ActionRole);
-    auto* pairBtn = msgBox.addButton("🔗 Pair Devices", QMessageBox::ActionRole);
-    msgBox.addButton(QMessageBox::Cancel);
+    msgBox.setWindowTitle("Підключення пристрою (Web / Global P2P)");
+    msgBox.setText("<b>Підключення пристроїв (Zero-Config WebRTC)</b><br><br>"
+                   "Передавайте файли між Desktop та Web у локальній мережі або через Інтернет без обов'язкової реєстрації.<br>"
+                   "Оберіть дію:");
+    auto* sendBtn = msgBox.addButton("📷 Створити кімнату (показати QR-код)", QMessageBox::ActionRole);
+    auto* receiveBtn = msgBox.addButton("⌨️ Приєднатися до кімнати (ввести код)", QMessageBox::ActionRole);
+    auto* pairBtn = msgBox.addButton("🔗 Сполучити з Web-клієнтом", QMessageBox::ActionRole);
+    msgBox.addButton("Скасувати", QMessageBox::RejectRole);
 
     msgBox.exec();
 
     if (msgBox.clickedButton() == sendBtn) {
-        QString filePath = QFileDialog::getOpenFileName(this, "Select File to Send via Global P2P");
+        QString filePath = QFileDialog::getOpenFileName(this, "Оберіть файл для надсилання (Global P2P)");
         if (filePath.isEmpty()) return;
         emit hostRoomRequested(filePath);
     } else if (msgBox.clickedButton() == receiveBtn) {
         bool ok = false;
         QString input = QInputDialog::getText(
             this,
-            "Receive File (Join Global P2P Room)",
-            "Enter 8-Character Room Code from Sender (e.g. DROP-K8M4-P9X2):",
+            "Отримати файл (Приєднатися до кімнати)",
+            "Введіть 8-значний код кімнати від відправника (наприклад, DROP-K8M4-P9X2 або K8M4P9X2):",
             QLineEdit::Normal,
             "",
             &ok
@@ -382,7 +386,7 @@ void QtDiscoveryWidget::onGlobalP2pClicked() {
             std::string err;
             std::string norm = WebRtcSessionCoordinator::normalizeRoomCode(input.trimmed().toStdString(), &err);
             if (norm.empty()) {
-                QMessageBox::warning(this, "Invalid Room Code", QString::fromStdString("Error: " + err));
+                QMessageBox::warning(this, "Некоректний код кімнати", QString::fromStdString("Помилка: " + err));
                 return;
             }
             emit joinRoomRequested(QString::fromStdString(norm));

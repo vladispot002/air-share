@@ -32,6 +32,8 @@ public:
     void setHistory(const std::vector<TransferHistoryItem>& history);
 
     bool loginWithEmail(const std::string& email, const std::string& displayName, std::string* outError = nullptr);
+    bool registerAccount(const std::string& email, const std::string& password, const std::string& displayName, std::string* outError = nullptr);
+    bool loginWithPassword(const std::string& email, const std::string& password, std::string* outError = nullptr);
     bool loginWithProvider(const std::string& provider, const std::string& providerUserId, const std::string& email, const std::string& displayName, std::string* outError = nullptr);
     bool requestMagicLink(const std::string& email, std::string* outToken = nullptr, std::string* outError = nullptr);
     bool verifyMagicLink(const std::string& token, std::string* outError = nullptr);

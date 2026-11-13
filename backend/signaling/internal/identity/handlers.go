@@ -28,6 +28,7 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux) {
 	// Auth
 	mux.HandleFunc("/api/v1/auth/guest", h.handleAuthGuest)
 	mux.HandleFunc("/api/v1/auth/login", h.handleAuthLogin)
+	mux.HandleFunc("/api/v1/auth/register", h.handleAuthRegister)
 	mux.HandleFunc("/api/v1/auth/magic-link/request", h.handleMagicLinkRequest)
 	mux.HandleFunc("/api/v1/auth/magic-link/verify", h.handleMagicLinkVerify)
 	mux.HandleFunc("/api/v1/auth/oauth/verify", h.handleOAuthVerify)
@@ -100,6 +101,67 @@ func (h *Handlers) handleAuthGuest(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, sess)
 }
 
+// /api/v1/auth/register (POST)
+func (h *Handlers) handleAuthRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		Email           string `json:"email"`
+		Password        string `json:"password"`
+		ConfirmPassword string `json:"confirm_password"`
+		DisplayName     string `json:"display_name"`
+		DeviceName      string `json:"device_name"`
+		Platform        string `json:"platform"`
+		AppVersion      string `json:"app_version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Email == "" || !strings.Contains(req.Email, "@") {
+		jsonError(w, http.StatusBadRequest, "valid email address is required")
+		return
+	}
+
+	if req.Password == "" || len(req.Password) < 6 {
+		jsonError(w, http.StatusBadRequest, "password must be at least 6 characters")
+		return
+	}
+
+	if req.ConfirmPassword != "" && req.Password != req.ConfirmPassword {
+		jsonError(w, http.StatusBadRequest, "passwords do not match")
+		return
+	}
+
+	res, err := h.service.RegisterWithPassword(
+		req.Email,
+		req.Password,
+		req.DisplayName,
+		req.DeviceName,
+		req.Platform,
+		req.AppVersion,
+	)
+	if err != nil {
+		if errors.Is(err, ErrEmailAlreadyRegistered) {
+			jsonError(w, http.StatusConflict, "Email already registered")
+			return
+		}
+		if errors.Is(err, ErrPasswordTooShort) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusCreated, res)
+}
+
 // /api/v1/auth/login (POST)
 func (h *Handlers) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -111,6 +173,7 @@ func (h *Handlers) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		Provider       string `json:"provider"`
 		ProviderUserID string `json:"provider_user_id"`
 		Email          string `json:"email"`
+		Password       string `json:"password"`
 		DisplayName    string `json:"display_name"`
 		AvatarURL      string `json:"avatar_url"`
 		DeviceName     string `json:"device_name"`
@@ -119,6 +182,25 @@ func (h *Handlers) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Password authentication
+	if req.Password != "" {
+		identifier := req.Email
+		if identifier == "" {
+			identifier = req.ProviderUserID
+		}
+		res, err := h.service.LoginWithPassword(identifier, req.Password, req.DeviceName, req.Platform, req.AppVersion)
+		if err != nil {
+			if errors.Is(err, ErrInvalidCredentials) {
+				jsonError(w, http.StatusUnauthorized, "invalid email or password")
+				return
+			}
+			jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		jsonResponse(w, http.StatusOK, res)
 		return
 	}
 

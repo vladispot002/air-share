@@ -12,6 +12,7 @@ type Store interface {
 	CreateUser(u *UserAccount) error
 	GetUserByID(userID string) (*UserAccount, error)
 	GetUserByLandropID(landropID string) (*UserAccount, error)
+	GetUserByEmail(email string) (*UserAccount, error)
 	GetUserByAuthIdentity(provider, providerUserID string) (*UserAccount, error)
 	UpdateUser(u *UserAccount) error
 	DeleteUser(userID string) error
@@ -64,6 +65,7 @@ type MemoryStore struct {
 	mu           sync.RWMutex
 	users        map[string]*UserAccount            // userID -> UserAccount
 	byLandropID  map[string]string                  // landropID -> userID
+	byEmail      map[string]string                  // lower(email) -> userID
 	byAuthId     map[string]string                  // "provider:providerUserID" -> userID
 	devices      map[string]*Device                 // deviceID -> Device
 	pairings     map[string]*DevicePairingSession   // sessionID -> DevicePairingSession
@@ -78,6 +80,7 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		users:       make(map[string]*UserAccount),
 		byLandropID: make(map[string]string),
+		byEmail:     make(map[string]string),
 		byAuthId:    make(map[string]string),
 		devices:     make(map[string]*Device),
 		pairings:    make(map[string]*DevicePairingSession),
@@ -111,12 +114,29 @@ func (m *MemoryStore) CreateUser(u *UserAccount) error {
 	copyU := *u
 	m.users[u.UserID] = &copyU
 	m.byLandropID[normID] = u.UserID
+	if u.Email != "" {
+		m.byEmail[strings.ToLower(strings.TrimSpace(u.Email))] = u.UserID
+	}
 
 	for _, id := range u.AuthIdentities {
 		key := id.Provider + ":" + id.ProviderUserID
 		m.byAuthId[key] = u.UserID
 	}
 	return nil
+}
+
+func (m *MemoryStore) GetUserByEmail(email string) (*UserAccount, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	norm := strings.ToLower(strings.TrimSpace(email))
+	uid, exists := m.byEmail[norm]
+	if !exists {
+		return nil, ErrUserNotFound
+	}
+	u := m.users[uid]
+	copyU := *u
+	return &copyU, nil
 }
 
 func (m *MemoryStore) GetUserByID(userID string) (*UserAccount, error) {
@@ -179,6 +199,12 @@ func (m *MemoryStore) UpdateUser(u *UserAccount) error {
 
 	copyU := *u
 	copyU.LandropID = normID
+	if existing.Email != "" {
+		delete(m.byEmail, strings.ToLower(strings.TrimSpace(existing.Email)))
+	}
+	if u.Email != "" {
+		m.byEmail[strings.ToLower(strings.TrimSpace(u.Email))] = u.UserID
+	}
 	m.users[u.UserID] = &copyU
 	return nil
 }
@@ -193,6 +219,9 @@ func (m *MemoryStore) DeleteUser(userID string) error {
 	}
 
 	delete(m.byLandropID, u.LandropID)
+	if u.Email != "" {
+		delete(m.byEmail, strings.ToLower(strings.TrimSpace(u.Email)))
+	}
 	for _, id := range u.AuthIdentities {
 		delete(m.byAuthId, id.Provider+":"+id.ProviderUserID)
 	}

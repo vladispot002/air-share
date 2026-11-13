@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 var (
@@ -228,6 +230,179 @@ func (s *Service) AuthenticateWithProvider(provider, providerUserID, email, disp
 
 	token := s.CreateSession(user.UserID, deviceID, 30*24*time.Hour)
 
+	return &AuthResult{
+		User:    user,
+		Device:  registeredDevice,
+		Token:   token,
+		Expires: time.Now().Add(30 * 24 * time.Hour).Unix(),
+	}, nil
+}
+
+// RegisterWithPassword creates a new account with email, password, and display name.
+func (s *Service) RegisterWithPassword(email, password, displayName, deviceName, platform, appVersion string) (*AuthResult, error) {
+	email = strings.TrimSpace(email)
+	if email == "" || !strings.Contains(email, "@") {
+		return nil, errors.New("invalid email address")
+	}
+	if len(password) < 6 {
+		return nil, ErrPasswordTooShort
+	}
+
+	// Check if email already registered
+	existing, err := s.store.GetUserByEmail(email)
+	if err == nil && existing != nil {
+		return nil, ErrEmailAlreadyRegistered
+	}
+
+	hashedBytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash password: %w", err)
+	}
+
+	if displayName == "" {
+		parts := strings.Split(email, "@")
+		displayName = parts[0]
+	}
+
+	// Derive default @landrop_id from email or displayName
+	baseID := "user"
+	parts := strings.Split(email, "@")
+	if len(parts) > 0 && parts[0] != "" {
+		baseID = strings.ToLower(parts[0])
+	}
+	baseID = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			return r
+		}
+		return -1
+	}, baseID)
+	if len(baseID) < 3 {
+		baseID = "user_" + GenerateRandomHex(3)
+	}
+	if len(baseID) > 24 {
+		baseID = baseID[:24]
+	}
+
+	targetID := "@" + baseID
+	for i := 0; i < 100; i++ {
+		if _, lookupErr := s.store.GetUserByLandropID(targetID); errors.Is(lookupErr, ErrUserNotFound) {
+			break
+		}
+		targetID = fmt.Sprintf("@%s_%s", baseID, GenerateRandomHex(2))
+	}
+
+	user := &UserAccount{
+		UserID:        GenerateUUID(),
+		LandropID:     targetID,
+		DisplayName:   displayName,
+		Email:         email,
+		EmailVerified: false,
+		CreatedAt:     time.Now().UTC(),
+		Status:        "active",
+		PasswordHash:  string(hashedBytes),
+	}
+
+	if err := s.store.CreateUser(user); err != nil {
+		return nil, err
+	}
+
+	// Register device if provided
+	var registeredDevice *Device
+	deviceID := ""
+	if deviceName != "" {
+		dev := &Device{
+			DeviceID:     GenerateUUID(),
+			UserID:       user.UserID,
+			DeviceName:   deviceName,
+			DeviceType:   "desktop",
+			Platform:     platform,
+			AppVersion:   appVersion,
+			RegisteredAt: time.Now().UTC(),
+			LastSeenAt:   time.Now().UTC(),
+			Status:       DeviceStatusActive,
+			Presence:     PresenceOnline,
+		}
+		if platform == "android" || platform == "ios" {
+			dev.DeviceType = "mobile"
+		} else if platform == "web" {
+			dev.DeviceType = "browser"
+		}
+		if regErr := s.store.RegisterDevice(dev); regErr == nil {
+			registeredDevice = dev
+			deviceID = dev.DeviceID
+		}
+	}
+
+	token := s.CreateSession(user.UserID, deviceID, 30*24*time.Hour)
+	return &AuthResult{
+		User:    user,
+		Device:  registeredDevice,
+		Token:   token,
+		Expires: time.Now().Add(30 * 24 * time.Hour).Unix(),
+	}, nil
+}
+
+// LoginWithPassword authenticates an existing user using email (or @landrop_id) and password.
+func (s *Service) LoginWithPassword(identifier, password, deviceName, platform, appVersion string) (*AuthResult, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" || password == "" {
+		return nil, ErrInvalidCredentials
+	}
+
+	var user *UserAccount
+	var err error
+	if strings.HasPrefix(identifier, "@") {
+		user, err = s.store.GetUserByLandropID(identifier)
+	} else if strings.Contains(identifier, "@") {
+		user, err = s.store.GetUserByEmail(identifier)
+	} else {
+		// Try as landrop_id without '@', then as email
+		user, err = s.store.GetUserByLandropID("@" + identifier)
+		if err != nil {
+			user, err = s.store.GetUserByEmail(identifier)
+		}
+	}
+
+	if err != nil || user == nil {
+		return nil, ErrInvalidCredentials
+	}
+
+	if user.PasswordHash == "" {
+		return nil, ErrInvalidCredentials
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		return nil, ErrInvalidCredentials
+	}
+
+	// Register or reuse device if provided
+	var registeredDevice *Device
+	deviceID := ""
+	if deviceName != "" {
+		dev := &Device{
+			DeviceID:     GenerateUUID(),
+			UserID:       user.UserID,
+			DeviceName:   deviceName,
+			DeviceType:   "desktop",
+			Platform:     platform,
+			AppVersion:   appVersion,
+			RegisteredAt: time.Now().UTC(),
+			LastSeenAt:   time.Now().UTC(),
+			Status:       DeviceStatusActive,
+			Presence:     PresenceOnline,
+		}
+		if platform == "android" || platform == "ios" {
+			dev.DeviceType = "mobile"
+		} else if platform == "web" {
+			dev.DeviceType = "browser"
+		}
+		if regErr := s.store.RegisterDevice(dev); regErr == nil {
+			registeredDevice = dev
+			deviceID = dev.DeviceID
+		}
+	}
+
+	token := s.CreateSession(user.UserID, deviceID, 30*24*time.Hour)
 	return &AuthResult{
 		User:    user,
 		Device:  registeredDevice,

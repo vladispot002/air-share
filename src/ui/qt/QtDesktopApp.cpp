@@ -906,7 +906,7 @@ void QtDesktopApp::onHostRoomRequested(const QString& filePath) {
         if (!filePath.isEmpty()) {
             std::string pathStd = filePath.toStdString();
             std::string taskId = "rtc-tx-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-            launchWorker([this, channel, taskId, pathStd, peerId]() {
+            launchWorker([this, channel, taskId, pathStd, peerId, filePath]() {
                 TransferOptions opts;
                 opts.closeChannelOnCompletion = false;
                 if (m_settingsPresenter) {

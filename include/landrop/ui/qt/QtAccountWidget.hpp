@@ -58,6 +58,14 @@ private:
 
     QLineEdit* m_emailInput{nullptr};
     QLineEdit* m_nameInput{nullptr};
+    QLineEdit* m_passwordInput{nullptr};
+    QLineEdit* m_confirmPasswordInput{nullptr};
+    QLabel* m_errorLabel{nullptr};
+    QPushButton* m_submitAuthBtn{nullptr};
+    QPushButton* m_tabLoginBtn{nullptr};
+    QPushButton* m_tabRegisterBtn{nullptr};
+    bool m_isRegisterMode{false};
+    void setAuthMode(bool isRegister);
     QGroupBox* m_loginBox{nullptr};
 
     QLineEdit* m_addContactInput{nullptr};

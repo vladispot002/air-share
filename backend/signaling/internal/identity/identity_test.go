@@ -451,3 +451,82 @@ func TestRESTHandlersIntegration(t *testing.T) {
 		t.Fatalf("expected 200 OK for pairing confirm, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestPasswordRegistrationAndLogin(t *testing.T) {
+	store := NewMemoryStore()
+	svc := NewService(store)
+	coord := NewCoordinator(svc, nil)
+	handlers := NewHandlers(svc, coord)
+
+	mux := http.NewServeMux()
+	handlers.RegisterRoutes(mux)
+
+	// 1. Register new user
+	regPayload := map[string]string{
+		"email":            "testuser@example.com",
+		"password":         "secret123",
+		"confirm_password": "secret123",
+		"display_name":     "Test User",
+		"device_name":      "My Linux Rig",
+		"platform":         "linux",
+	}
+	bodyBytes, _ := json.Marshal(regPayload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(bodyBytes))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created on register, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var res AuthResult
+	if err := json.NewDecoder(rec.Body).Decode(&res); err != nil {
+		t.Fatalf("failed to decode register response: %v", err)
+	}
+	if res.User == nil || res.User.Email != "testuser@example.com" {
+		t.Fatalf("expected user with email, got %+v", res.User)
+	}
+	if res.Token == "" {
+		t.Fatalf("expected non-empty token")
+	}
+
+	// 2. Register duplicate email -> Expect 409 Conflict
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(bodyBytes))
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict on duplicate email, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 3. Login with correct password
+	loginPayload := map[string]string{
+		"email":    "testuser@example.com",
+		"password": "secret123",
+	}
+	bodyBytes, _ = json.Marshal(loginPayload)
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(bodyBytes))
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on login, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var loginRes AuthResult
+	_ = json.NewDecoder(rec.Body).Decode(&loginRes)
+	if loginRes.Token == "" {
+		t.Fatalf("expected token on login")
+	}
+
+	// 4. Login with wrong password -> Expect 401 Unauthorized
+	loginPayload["password"] = "wrongpassword"
+	bodyBytes, _ = json.Marshal(loginPayload)
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(bodyBytes))
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized on wrong password, got %d", rec.Code)
+	}
+}
+

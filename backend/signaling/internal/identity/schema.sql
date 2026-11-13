@@ -9,8 +9,11 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(255),
     email_verified BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    status VARCHAR(32) NOT NULL DEFAULT 'active'
+    status VARCHAR(32) NOT NULL DEFAULT 'active',
+    password_hash VARCHAR(255)
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
 
 CREATE INDEX IF NOT EXISTS idx_users_landrop_id ON users (landrop_id);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);

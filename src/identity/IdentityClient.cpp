@@ -294,6 +294,147 @@ bool IdentityClient::authenticateWithProvider(
     }
 }
 
+bool IdentityClient::registerWithPassword(
+    const std::string& email,
+    const std::string& password,
+    const std::string& displayName,
+    const std::string& deviceName,
+    const std::string& platform,
+    std::string* outError
+) {
+    json payload;
+    payload["email"] = email;
+    payload["password"] = password;
+    payload["confirm_password"] = password;
+    payload["display_name"] = displayName.empty() ? email.substr(0, email.find('@')) : displayName;
+    payload["device_name"] = deviceName.empty() ? "LAN-Drop Desktop" : deviceName;
+    payload["platform"] = platform.empty() ? "linux" : platform;
+    payload["app_version"] = "2.0.0";
+
+    std::string url;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        url = m_apiBaseUrl + "/api/v1/auth/register";
+    }
+
+    HttpResponse res = m_httpClient->post(url, payload.dump(), "", 5);
+    if (!res.isOk()) {
+        try {
+            json errJ = json::parse(res.body);
+            if (errJ.contains("error")) {
+                if (outError) *outError = errJ["error"].get<std::string>();
+                return false;
+            }
+        } catch (...) {}
+        if (outError) *outError = res.errorMessage.empty() ? ("HTTP " + std::to_string(res.statusCode)) : res.errorMessage;
+        return false;
+    }
+
+    try {
+        json j = json::parse(res.body);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_token = j.value("token", "");
+            m_isGuest = false;
+
+            if (j.contains("user") && j["user"].is_object()) {
+                auto ju = j["user"];
+                m_user.userId = ju.value("user_id", ju.value("id", ""));
+                m_user.landropId = ju.value("landrop_id", "");
+                m_user.displayName = ju.value("display_name", "");
+                m_user.email = ju.value("email", "");
+                m_user.avatarUrl = ju.value("avatar_url", "");
+                m_user.status = ju.value("status", "active");
+            }
+
+            if (j.contains("device") && j["device"].is_object()) {
+                auto jd = j["device"];
+                m_device.deviceId = jd.value("device_id", jd.value("id", ""));
+                m_device.userId = jd.value("user_id", "");
+                m_device.deviceName = jd.value("device_name", jd.value("name", ""));
+                m_device.deviceType = jd.value("device_type", "desktop");
+                m_device.platform = jd.value("platform", "linux");
+                m_device.status = jd.value("status", "active");
+                m_device.presence = jd.value("presence", "online");
+            }
+        }
+        saveSession();
+        return true;
+    } catch (const std::exception& e) {
+        if (outError) *outError = std::string("JSON parse error: ") + e.what();
+        return false;
+    }
+}
+
+bool IdentityClient::loginWithPassword(
+    const std::string& email,
+    const std::string& password,
+    const std::string& deviceName,
+    const std::string& platform,
+    std::string* outError
+) {
+    json payload;
+    payload["email"] = email;
+    payload["password"] = password;
+    payload["device_name"] = deviceName.empty() ? "LAN-Drop Desktop" : deviceName;
+    payload["platform"] = platform.empty() ? "linux" : platform;
+    payload["app_version"] = "2.0.0";
+
+    std::string url;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        url = m_apiBaseUrl + "/api/v1/auth/login";
+    }
+
+    HttpResponse res = m_httpClient->post(url, payload.dump(), "", 5);
+    if (!res.isOk()) {
+        try {
+            json errJ = json::parse(res.body);
+            if (errJ.contains("error")) {
+                if (outError) *outError = errJ["error"].get<std::string>();
+                return false;
+            }
+        } catch (...) {}
+        if (outError) *outError = res.errorMessage.empty() ? ("HTTP " + std::to_string(res.statusCode)) : res.errorMessage;
+        return false;
+    }
+
+    try {
+        json j = json::parse(res.body);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_token = j.value("token", "");
+            m_isGuest = false;
+
+            if (j.contains("user") && j["user"].is_object()) {
+                auto ju = j["user"];
+                m_user.userId = ju.value("user_id", ju.value("id", ""));
+                m_user.landropId = ju.value("landrop_id", "");
+                m_user.displayName = ju.value("display_name", "");
+                m_user.email = ju.value("email", "");
+                m_user.avatarUrl = ju.value("avatar_url", "");
+                m_user.status = ju.value("status", "active");
+            }
+
+            if (j.contains("device") && j["device"].is_object()) {
+                auto jd = j["device"];
+                m_device.deviceId = jd.value("device_id", jd.value("id", ""));
+                m_device.userId = jd.value("user_id", "");
+                m_device.deviceName = jd.value("device_name", jd.value("name", ""));
+                m_device.deviceType = jd.value("device_type", "desktop");
+                m_device.platform = jd.value("platform", "linux");
+                m_device.status = jd.value("status", "active");
+                m_device.presence = jd.value("presence", "online");
+            }
+        }
+        saveSession();
+        return true;
+    } catch (const std::exception& e) {
+        if (outError) *outError = std::string("JSON parse error: ") + e.what();
+        return false;
+    }
+}
+
 bool IdentityClient::requestMagicLink(const std::string& email, std::string* outToken, std::string* outError) {
     json payload;
     payload["email"] = email;

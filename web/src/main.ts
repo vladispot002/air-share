@@ -9,6 +9,7 @@ import { ContactManager } from './core/identity/ContactManager';
 import { DeviceManager } from './core/identity/DeviceManager';
 import { TransferCoordinatorClient } from './core/identity/TransferCoordinatorClient';
 import { TransferRequest } from './core/identity/types';
+import jsQR from 'jsqr';
 
 console.log('LAN-Drop Web Client initialized with Wire Protocol v2 & Identity Ecosystem');
 
@@ -75,6 +76,15 @@ const qrStatus = document.getElementById('qrStatus');
 const copyCodeBtn = document.getElementById('copyCodeBtn') as HTMLButtonElement | null;
 const copyLinkBtn = document.getElementById('copyLinkBtn') as HTMLButtonElement | null;
 const closeModalBtn = document.getElementById('closeModalBtn') as HTMLButtonElement | null;
+
+// Camera QR Scanner Elements
+const scanCameraBtn = document.getElementById('scanCameraBtn') as HTMLButtonElement | null;
+const qrScannerModal = document.getElementById('qrScannerModal');
+const qrVideo = document.getElementById('qrVideo') as HTMLVideoElement | null;
+const qrCanvas = document.getElementById('qrCanvas') as HTMLCanvasElement | null;
+const cameraStatus = document.getElementById('cameraStatus');
+const qrFileInput = document.getElementById('qrFileInput') as HTMLInputElement | null;
+const closeScannerBtn = document.getElementById('closeScannerBtn') as HTMLButtonElement | null;
 
 // Session State
 let signalingClient: SignalingClient | null = null;
@@ -675,12 +685,16 @@ const openDevicesBtn = document.getElementById('openDevicesBtn') as HTMLButtonEl
 const signOutBtn = document.getElementById('signOutBtn') as HTMLButtonElement | null;
 
 const authModal = document.getElementById('authModal');
+const authTabLogin = document.getElementById('authTabLogin') as HTMLButtonElement | null;
+const authTabRegister = document.getElementById('authTabRegister') as HTMLButtonElement | null;
+const authSubtitle = document.getElementById('authSubtitle');
+const authErrorBanner = document.getElementById('authErrorBanner');
 const oauthGoogleBtn = document.getElementById('oauthGoogleBtn') as HTMLButtonElement | null;
 const oauthGithubBtn = document.getElementById('oauthGithubBtn') as HTMLButtonElement | null;
-const oauthAppleBtn = document.getElementById('oauthAppleBtn') as HTMLButtonElement | null;
-const oauthMicrosoftBtn = document.getElementById('oauthMicrosoftBtn') as HTMLButtonElement | null;
 const authEmailInput = document.getElementById('authEmailInput') as HTMLInputElement | null;
 const authNameInput = document.getElementById('authNameInput') as HTMLInputElement | null;
+const authPasswordInput = document.getElementById('authPasswordInput') as HTMLInputElement | null;
+const authConfirmPasswordInput = document.getElementById('authConfirmPasswordInput') as HTMLInputElement | null;
 const authSubmitBtn = document.getElementById('authSubmitBtn') as HTMLButtonElement | null;
 const closeAuthModalBtn = document.getElementById('closeAuthModalBtn') as HTMLButtonElement | null;
 
@@ -782,7 +796,62 @@ function toggleModal(el: HTMLElement | null, show: boolean) {
   else el.classList.remove('visible');
 }
 
-if (openAuthBtn) openAuthBtn.onclick = () => toggleModal(authModal, true);
+// Auth Tab Toggle & Mode Management
+let authMode: 'login' | 'register' = 'login';
+
+function setAuthMode(mode: 'login' | 'register') {
+  authMode = mode;
+  if (authErrorBanner) {
+    authErrorBanner.style.display = 'none';
+    authErrorBanner.textContent = '';
+  }
+  if (mode === 'login') {
+    if (authTabLogin) {
+      authTabLogin.style.borderBottom = '2px solid var(--accent)';
+      authTabLogin.style.color = 'var(--accent)';
+    }
+    if (authTabRegister) {
+      authTabRegister.style.borderBottom = '2px solid transparent';
+      authTabRegister.style.color = 'var(--text-secondary)';
+    }
+    if (authSubtitle) authSubtitle.textContent = 'Sign in to access your persistent ID, devices, and contacts.';
+    if (authNameInput) authNameInput.style.display = 'none';
+    if (authConfirmPasswordInput) authConfirmPasswordInput.style.display = 'none';
+    if (authSubmitBtn) authSubmitBtn.textContent = 'Sign In';
+  } else {
+    if (authTabLogin) {
+      authTabLogin.style.borderBottom = '2px solid transparent';
+      authTabLogin.style.color = 'var(--text-secondary)';
+    }
+    if (authTabRegister) {
+      authTabRegister.style.borderBottom = '2px solid var(--accent)';
+      authTabRegister.style.color = 'var(--accent)';
+    }
+    if (authSubtitle) authSubtitle.textContent = 'Create your account to enable cross-device sync & pairing.';
+    if (authNameInput) authNameInput.style.display = 'block';
+    if (authConfirmPasswordInput) authConfirmPasswordInput.style.display = 'block';
+    if (authSubmitBtn) authSubmitBtn.textContent = 'Create Account';
+  }
+}
+
+if (authTabLogin) authTabLogin.onclick = () => setAuthMode('login');
+if (authTabRegister) authTabRegister.onclick = () => setAuthMode('register');
+
+function showAuthError(msg: string) {
+  if (authErrorBanner) {
+    authErrorBanner.textContent = msg;
+    authErrorBanner.style.display = 'block';
+  } else {
+    alert(msg);
+  }
+}
+
+if (openAuthBtn) {
+  openAuthBtn.onclick = () => {
+    setAuthMode('login');
+    toggleModal(authModal, true);
+  };
+}
 if (closeAuthModalBtn) closeAuthModalBtn.onclick = () => toggleModal(authModal, false);
 
 if (signOutBtn) {
@@ -803,25 +872,191 @@ async function handleLogin(provider: string, email?: string, displayName?: strin
     toggleModal(authModal, false);
     setStatus(`Signed in as ${identityClient.getState().user?.landrop_id}`, 'connected');
   } catch (err) {
-    alert(`Sign in failed: ${(err as Error).message}`);
+    showAuthError(`Sign in failed: ${(err as Error).message}`);
     setStatus(`Sign in failed`, 'error');
   }
 }
 
 if (oauthGoogleBtn) oauthGoogleBtn.onclick = () => handleLogin('google');
 if (oauthGithubBtn) oauthGithubBtn.onclick = () => handleLogin('github');
-if (oauthAppleBtn) oauthAppleBtn.onclick = () => handleLogin('apple');
-if (oauthMicrosoftBtn) oauthMicrosoftBtn.onclick = () => handleLogin('microsoft');
 
-if (authSubmitBtn && authEmailInput) {
-  authSubmitBtn.onclick = () => {
-    const val = authEmailInput.value.trim();
-    if (!val) {
-      alert('Please enter an email or username');
+if (authSubmitBtn) {
+  authSubmitBtn.onclick = async () => {
+    if (authErrorBanner) authErrorBanner.style.display = 'none';
+    const email = authEmailInput?.value.trim() || '';
+    const password = authPasswordInput?.value || '';
+
+    if (!email) {
+      showAuthError('Please enter your email or username.');
       return;
     }
-    const name = authNameInput?.value.trim() || val.split('@')[0];
-    handleLogin('email', val, name);
+
+    if (authMode === 'login') {
+      if (!password) {
+        showAuthError('Please enter your password.');
+        return;
+      }
+      try {
+        authSubmitBtn.disabled = true;
+        authSubmitBtn.textContent = 'Signing in...';
+        await identityClient.loginWithPassword({ email, password });
+        toggleModal(authModal, false);
+        setStatus(`Signed in as ${identityClient.getState().user?.landrop_id}`, 'connected');
+      } catch (err) {
+        showAuthError((err as Error).message);
+      } finally {
+        authSubmitBtn.disabled = false;
+        authSubmitBtn.textContent = 'Sign In';
+      }
+    } else {
+      // Register Mode
+      const confirmPassword = authConfirmPasswordInput?.value || '';
+      const displayName = authNameInput?.value.trim() || email.split('@')[0];
+
+      if (!email.includes('@')) {
+        showAuthError('Please enter a valid email address.');
+        return;
+      }
+      if (password.length < 6) {
+        showAuthError('Password must be at least 6 characters.');
+        return;
+      }
+      if (password !== confirmPassword) {
+        showAuthError('Passwords do not match.');
+        return;
+      }
+
+      try {
+        authSubmitBtn.disabled = true;
+        authSubmitBtn.textContent = 'Creating account...';
+        await identityClient.registerWithPassword({
+          email,
+          password,
+          confirm_password: confirmPassword,
+          display_name: displayName,
+        });
+        toggleModal(authModal, false);
+        setStatus(`Welcome! Registered as ${identityClient.getState().user?.landrop_id}`, 'connected');
+      } catch (err) {
+        showAuthError((err as Error).message);
+      } finally {
+        authSubmitBtn.disabled = false;
+        authSubmitBtn.textContent = 'Create Account';
+      }
+    }
+  };
+}
+
+// Camera QR Scanner Lifecycle & Scanning Loop
+let cameraStream: MediaStream | null = null;
+let scanningAnimationId: number | null = null;
+
+function stopCameraScanner() {
+  if (scanningAnimationId) {
+    cancelAnimationFrame(scanningAnimationId);
+    scanningAnimationId = null;
+  }
+  if (cameraStream) {
+    cameraStream.getTracks().forEach((track) => track.stop());
+    cameraStream = null;
+  }
+  if (qrVideo) {
+    qrVideo.srcObject = null;
+  }
+  toggleModal(qrScannerModal, false);
+}
+
+function processScannedCode(rawText: string) {
+  let code = rawText.trim();
+  if (code.includes('#')) {
+    code = code.split('#')[1].trim();
+  }
+  if (code.startsWith('landrop:')) {
+    code = code.replace(/^landrop:\/?\/?/, '');
+  }
+
+  stopCameraScanner();
+  if (roomInput) {
+    roomInput.value = code;
+  }
+  setStatus(`QR code detected: ${code}. Connecting...`, 'active');
+  if (joinBtn) {
+    joinBtn.click();
+  }
+}
+
+async function startCameraScanner() {
+  toggleModal(qrScannerModal, true);
+  if (cameraStatus) cameraStatus.textContent = 'Requesting camera access...';
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } },
+      audio: false,
+    });
+    cameraStream = stream;
+    if (qrVideo) {
+      qrVideo.srcObject = stream;
+      await qrVideo.play();
+      if (cameraStatus) cameraStatus.textContent = 'Scanning for QR code...';
+      scanLoop();
+    }
+  } catch (err) {
+    console.warn('Camera access failed:', err);
+    if (cameraStatus) {
+      cameraStatus.textContent = 'Camera unavailable. Please upload a QR image.';
+    }
+  }
+}
+
+function scanLoop() {
+  if (!cameraStream || !qrVideo || !qrCanvas) return;
+  if (qrVideo.readyState === qrVideo.HAVE_ENOUGH_DATA) {
+    qrCanvas.width = qrVideo.videoWidth;
+    qrCanvas.height = qrVideo.videoHeight;
+    const ctx = qrCanvas.getContext('2d', { willReadFrequently: true });
+    if (ctx) {
+      ctx.drawImage(qrVideo, 0, 0, qrCanvas.width, qrCanvas.height);
+      const imgData = ctx.getImageData(0, 0, qrCanvas.width, qrCanvas.height);
+      const qrResult = jsQR(imgData.data, imgData.width, imgData.height);
+      if (qrResult && qrResult.data) {
+        processScannedCode(qrResult.data);
+        return;
+      }
+    }
+  }
+  scanningAnimationId = requestAnimationFrame(scanLoop);
+}
+
+if (scanCameraBtn) scanCameraBtn.onclick = () => startCameraScanner();
+if (closeScannerBtn) closeScannerBtn.onclick = () => stopCameraScanner();
+
+if (qrFileInput) {
+  qrFileInput.onchange = (e) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        if (!qrCanvas) return;
+        qrCanvas.width = img.width;
+        qrCanvas.height = img.height;
+        const ctx = qrCanvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0);
+          const imgData = ctx.getImageData(0, 0, img.width, img.height);
+          const qrResult = jsQR(imgData.data, imgData.width, imgData.height);
+          if (qrResult && qrResult.data) {
+            processScannedCode(qrResult.data);
+          } else {
+            alert('No valid QR code found in this image.');
+          }
+        }
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
   };
 }
 
