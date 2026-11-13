@@ -170,6 +170,26 @@ bool WebRtcDataChannel::receiveExact(
     return true;
 }
 
+bool WebRtcDataChannel::waitForReadable(int timeoutMs, std::atomic<bool>* cancelToken) {
+    std::unique_lock<std::mutex> lock(m_rxMutex);
+    if ((m_rxBuffer.size() - m_rxOffset) > 0) {
+        return true;
+    }
+    if (timeoutMs <= 0) return false;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while ((m_rxBuffer.size() - m_rxOffset) == 0) {
+        if (!m_connected.load()) return false;
+        if (cancelToken && cancelToken->load()) return false;
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+
+        auto waitSlice = std::chrono::milliseconds(25);
+        m_rxCv.wait_for(lock, waitSlice, [&]() {
+            return (m_rxBuffer.size() - m_rxOffset) > 0 || !m_connected.load() || (cancelToken && cancelToken->load());
+        });
+    }
+    return (m_rxBuffer.size() - m_rxOffset) > 0;
+}
+
 void WebRtcDataChannel::injectIncomingBytes(const uint8_t* data, size_t length) {
     if (!data || length == 0) return;
     {

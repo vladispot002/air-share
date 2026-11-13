@@ -14,6 +14,8 @@
 #include "landrop/ui/qt/QtTransferWidget.hpp"
 #include "landrop/ui/qt/QtStorageWidget.hpp"
 #include "landrop/ui/qt/QtSettingsWidget.hpp"
+#include "landrop/ui/qt/QtAccountWidget.hpp"
+#include "landrop/core/WebRtcSessionCoordinator.hpp"
 #include "landrop/utils/SocketCompat.hpp"
 
 using namespace landrop;
@@ -24,6 +26,7 @@ class TestQtGui : public QObject {
 private slots:
     void testAppInitialization();
     void testNavigationBetweenSections();
+    void testAccountWidgetState();
     void testDirectConnectInputValidation();
     void testButtonsAndDeviceDiscovery();
     void testThemeSwitching();
@@ -37,6 +40,8 @@ private slots:
     void testPeerProviderIntegration();
     void testDirectoryValidationLogic();
     void testDownloadsPathGuiSelectionAndSync();
+    void testAccountTransferHistoryAndUrlNormalization();
+    void testGlobalP2pUiAndActiveSession();
 };
 
 void TestQtGui::testAppInitialization() {
@@ -44,20 +49,22 @@ void TestQtGui::testAppInitialization() {
     app.initialize();
 
     QVERIFY(app.getSidebar() != nullptr);
-    QCOMPARE(app.getSidebar()->count(), 4);
+    QCOMPARE(app.getSidebar()->count(), 5);
     QCOMPARE(app.getSidebar()->item(0)->text(), "📡  Radar");
     QCOMPARE(app.getSidebar()->item(1)->text(), "⇄  Transfers");
     QCOMPARE(app.getSidebar()->item(2)->text(), "📁  Storage");
     QCOMPARE(app.getSidebar()->item(3)->text(), "⚙️  Settings");
+    QCOMPARE(app.getSidebar()->item(4)->text(), "👤  Account");
 
     QVERIFY(app.getStackedWidget() != nullptr);
-    QCOMPARE(app.getStackedWidget()->count(), 4);
+    QCOMPARE(app.getStackedWidget()->count(), 5);
     QCOMPARE(app.getStackedWidget()->currentIndex(), 0);
 
     QVERIFY(app.getDiscoveryWidget() != nullptr);
     QVERIFY(app.getTransferWidget() != nullptr);
     QVERIFY(app.getStorageWidget() != nullptr);
     QVERIFY(app.getSettingsWidget() != nullptr);
+    QVERIFY(app.getAccountWidget() != nullptr);
 }
 
 void TestQtGui::testNavigationBetweenSections() {
@@ -79,9 +86,67 @@ void TestQtGui::testNavigationBetweenSections() {
     sidebar->setCurrentRow(3);
     QCOMPARE(stacked->currentIndex(), 3);
 
+    // Navigate to Account (index 4)
+    sidebar->setCurrentRow(4);
+    QCOMPARE(stacked->currentIndex(), 4);
+
     // Navigate back to Radar (index 0)
     sidebar->setCurrentRow(0);
     QCOMPARE(stacked->currentIndex(), 0);
+}
+
+void TestQtGui::testAccountWidgetState() {
+    QtDesktopApp app;
+    app.initialize();
+
+    auto* accountWidget = app.getAccountWidget();
+    QVERIFY(accountWidget != nullptr);
+
+    auto* presenter = app.getAccountPresenter();
+    QVERIFY(presenter != nullptr);
+
+    // Initial state: Guest mode
+    QVERIFY(presenter->isGuest());
+    QVERIFY(accountWidget->getStatusLabel()->text().contains("Guest"));
+    QCOMPARE(accountWidget->getAuthActionBtn()->text(), QString("Sign In / Register"));
+
+    // Simulate authenticated state
+    landrop::UserProfile profile;
+    profile.userId = "user-test-123";
+    profile.landropId = "alice_test";
+    profile.displayName = "Alice Wonder";
+    profile.email = "alice@example.com";
+    profile.status = "active";
+    presenter->getClient()->setCurrentUser(profile);
+    presenter->getClient()->setAuthToken("tok-xyz");
+    accountWidget->updateView();
+
+    QVERIFY(!presenter->isGuest());
+    QVERIFY(accountWidget->getStatusLabel()->text().contains("alice_test"));
+    QCOMPARE(accountWidget->getAuthActionBtn()->text(), QString("Sign Out"));
+
+    // Add contacts and check display
+    std::vector<landrop::ContactInfo> contacts;
+    landrop::ContactInfo c1;
+    c1.userId = "user-bob";
+    c1.landropId = "bob_builder";
+    c1.displayName = "Bob Builder";
+    c1.state = "ACCEPTED";
+    contacts.push_back(c1);
+
+    presenter->setContacts(contacts);
+    accountWidget->updateView();
+
+    QCOMPARE(accountWidget->getContactsList()->count(), 1);
+    QVERIFY(accountWidget->getContactsList()->item(0)->text().contains("Bob Builder"));
+    QVERIFY(accountWidget->getContactsList()->item(0)->text().contains("bob_builder"));
+
+    // Reset to guest
+    presenter->logout();
+    accountWidget->updateView();
+    QVERIFY(presenter->isGuest());
+    QVERIFY(accountWidget->getStatusLabel()->text().contains("Guest"));
+    QCOMPARE(accountWidget->getAuthActionBtn()->text(), QString("Sign In / Register"));
 }
 
 void TestQtGui::testDirectConnectInputValidation() {
@@ -226,9 +291,8 @@ void TestQtGui::testTransferButtonStatesAndActiveCount() {
     emit table->cellClicked(0, 0);
     QCoreApplication::processEvents();
 
-    // Direct TCP streaming does not fake pause/resume; buttons remain disabled with explanatory tooltips
-    QVERIFY(!pauseBtn->isEnabled());
-    QVERIFY(pauseBtn->toolTip().contains("does not support pause"));
+    // Active transfer: pause and cancel are enabled, resume is disabled until paused
+    QVERIFY(pauseBtn->isEnabled());
     QVERIFY(!resumeBtn->isEnabled());
     QVERIFY(cancelBtn->isEnabled());
 
@@ -460,6 +524,123 @@ void TestQtGui::testDownloadsPathGuiSelectionAndSync() {
     // Clean up
     QDir(customDir).removeRecursively();
     QDir(anotherDir).removeRecursively();
+}
+
+void TestQtGui::testAccountTransferHistoryAndUrlNormalization() {
+    QtDesktopApp app;
+    app.initialize();
+
+    auto* accountWidget = app.getAccountWidget();
+    auto* presenter = app.getAccountPresenter();
+    QVERIFY(accountWidget != nullptr);
+    QVERIFY(presenter != nullptr);
+
+    // 1. Initial State: Guest mode history list is empty
+    QVERIFY(presenter->isGuest());
+    QVERIFY(accountWidget->getHistoryList() != nullptr);
+    QCOMPARE(accountWidget->getHistoryList()->count(), 0);
+
+    // 2. Authenticated user receives populated history
+    landrop::UserProfile profile;
+    profile.userId = "usr-qt-test";
+    profile.landropId = "qt_tester";
+    profile.displayName = "Qt Tester";
+    profile.email = "qt@landrop.local";
+    profile.status = "active";
+    presenter->getClient()->setCurrentUser(profile);
+    presenter->getClient()->setAuthToken("jwt-token-qt");
+
+    std::vector<landrop::TransferHistoryItem> testHistory;
+    landrop::TransferHistoryItem item1;
+    item1.transferId = "xfer-101";
+    item1.direction = "upload";
+    item1.peerUserId = "peer-web-01";
+    item1.peerDeviceName = "Chrome Web Client";
+    item1.totalBytes = 10485760; // 10 MB
+    item1.status = "completed";
+    item1.startedAt = "2026-11-11T20:00:00Z";
+    item1.completedAt = "2026-11-11T20:00:02Z";
+
+    landrop::TransferFileMetadata f1;
+    f1.fileName = "report.pdf";
+    f1.fileSize = 4194304;
+    f1.sha256Hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    item1.files.push_back(f1);
+
+    landrop::TransferFileMetadata f2;
+    f2.fileName = "presentation.pptx";
+    f2.fileSize = 6291456;
+    f2.sha256Hex = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+    item1.files.push_back(f2);
+
+    testHistory.push_back(item1);
+    presenter->setHistory(testHistory);
+    accountWidget->updateView();
+
+    // Verify history widget display
+    QCOMPARE(accountWidget->getHistoryList()->count(), 1);
+    QString itemText = accountWidget->getHistoryList()->item(0)->text();
+    QVERIFY(itemText.contains("⬆️ Sent"));
+    QVERIFY(itemText.contains("report.pdf"));
+    QVERIFY(itemText.contains("(+1 more)"));
+    QVERIFY(itemText.contains("Chrome Web Client"));
+
+    // 3. Test Room Code & Pairing URL Normalization in Coordinator
+    // Standard 8-char code
+    std::string err;
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("06ZS-6PT1", &err)), QString("DROP-06ZS-6PT1"));
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("06zs6pt1", &err)), QString("DROP-06ZS-6PT1"));
+
+    // DROP- prefix
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("DROP-06ZS-6PT1", &err)), QString("DROP-06ZS-6PT1"));
+
+    // Crockford substitutions (O -> 0, I/L -> 1)
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("DROP-O6ZS-6PTL", &err)), QString("DROP-06ZS-6PT1"));
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("DROP-o6zs-6pti", &err)), QString("DROP-06ZS-6PT1"));
+
+    // Full URL with hash fragment
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("https://landrop-server.duckdns.org/#DROP-06ZS-6PT1", &err)), QString("DROP-06ZS-6PT1"));
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("http://localhost:5173/#06ZS-6PT1", &err)), QString("DROP-06ZS-6PT1"));
+
+    // Full URL with join path
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("https://landrop-server.duckdns.org/join/DROP-06ZS-6PT1", &err)), QString("DROP-06ZS-6PT1"));
+
+    // Whitespace handling
+    QCOMPARE(QString::fromStdString(WebRtcSessionCoordinator::normalizeRoomCode("   DROP-06ZS-6PT1   \n", &err)), QString("DROP-06ZS-6PT1"));
+
+    // Invalid codes
+    QVERIFY(WebRtcSessionCoordinator::normalizeRoomCode("", &err).empty());
+    QVERIFY(WebRtcSessionCoordinator::normalizeRoomCode("TOO-SHORT", &err).empty() || WebRtcSessionCoordinator::normalizeRoomCode("abc", &err).empty());
+
+    // 4. Logout clears history in UI
+    presenter->logout();
+    accountWidget->updateView();
+    QVERIFY(presenter->isGuest());
+    QCOMPARE(accountWidget->getHistoryList()->count(), 0);
+}
+
+void TestQtGui::testGlobalP2pUiAndActiveSession() {
+    QtDiscoveryWidget discovery;
+    discovery.show();
+    discovery.switchToGlobalMode();
+
+    QSignalSpy spyJoinWithFile(&discovery, &QtDiscoveryWidget::joinRoomWithFileRequested);
+    QSignalSpy spyCloseSession(&discovery, &QtDiscoveryWidget::closeGlobalSessionRequested);
+
+    // Verify initial active session card is hidden
+    discovery.updateGlobalSession("", false);
+    QVERIFY(!discovery.getActiveSessionCard()->isVisible());
+
+    // Activate global session
+    discovery.updateGlobalSession("DROP-7K2M-9P4X", true);
+    QVERIFY(discovery.getActiveSessionCard()->isVisible());
+
+    // Trigger close global session via button
+    QVERIFY(discovery.getActiveSessionCloseBtn() != nullptr);
+    discovery.getActiveSessionCloseBtn()->click();
+    QCOMPARE(spyCloseSession.count(), 1);
+    QCOMPARE(spyCloseSession.takeFirst().at(0).toString(), QString("DROP-7K2M-9P4X"));
+    QVERIFY(!discovery.getActiveSessionCard()->isVisible());
 }
 
 int main(int argc, char* argv[]) {

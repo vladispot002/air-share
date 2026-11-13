@@ -38,6 +38,10 @@
 
 #include "landrop/mobile/NfcPairingSession.hpp"
 #include "landrop/mobile/AirDropProtocolBridge.hpp"
+
+#if defined(LANDROP_HAVE_WEBRTC)
+#include <rtc/global.hpp>
+#endif
 #include "landrop/mobile/LandropMobileBridge.h"
 
 using namespace landrop;
@@ -215,6 +219,11 @@ static int runReceiver(uint16_t port, const std::string& saveDir, bool useTls = 
 
     std::cout << "\n";
     coordinator->close();
+#if defined(LANDROP_HAVE_WEBRTC)
+    try {
+        rtc::Cleanup().wait_for(std::chrono::milliseconds(500));
+    } catch (...) {}
+#endif
 
     if (!ok) {
         std::cerr << "Error: Transfer failed: " << sendErr << "\n";
@@ -299,6 +308,11 @@ static int runReceiver(uint16_t port, const std::string& saveDir, bool useTls = 
 
     std::cout << "\n";
     coordinator->close();
+#if defined(LANDROP_HAVE_WEBRTC)
+    try {
+        rtc::Cleanup().wait_for(std::chrono::milliseconds(500));
+    } catch (...) {}
+#endif
 
     if (!ok) {
         std::cerr << "Error: Transfer failed: " << recvErr << "\n";
@@ -622,7 +636,7 @@ int main(int argc, char* argv[]) {
             } else {
                 std::string filePath = argv[2];
                 const char* envSignaling = std::getenv("LANDROP_SIGNALING_URL");
-                std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "ws://127.0.0.1:8080/ws/signaling";
+                std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "wss://landrop-server.duckdns.org/ws/signaling";
                 for (int i = 3; i < argc; ++i) {
                     std::string arg = argv[i];
                     if (arg == "--signaling" && i + 1 < argc) {
@@ -645,7 +659,7 @@ int main(int argc, char* argv[]) {
                 std::string roomCode = argv[2];
                 std::string saveDir = "./downloads";
                 const char* envSignaling = std::getenv("LANDROP_SIGNALING_URL");
-                std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "ws://127.0.0.1:8080/ws/signaling";
+                std::string signalingWsUrl = (envSignaling && envSignaling[0] != '\0') ? envSignaling : "wss://landrop-server.duckdns.org/ws/signaling";
                 for (int i = 3; i < argc; ++i) {
                     std::string arg = argv[i];
                     if (arg == "--signaling" && i + 1 < argc) {

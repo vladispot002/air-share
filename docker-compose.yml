@@ -21,6 +21,10 @@ services:
       - STUN_SERVERS=${STUN_SERVERS}
       - TURN_SERVERS=${TURN_SERVERS}
       - WEB_DIR=/app/web/dist
+      - DATABASE_URL=${DATABASE_URL:-postgres://landrop:landrop_secret@postgres:5432/landrop?sslmode=disable}
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8080:8080"
     healthcheck:
@@ -28,6 +32,24 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
+    networks:
+      - landrop-internal
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: landrop-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-landrop}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-landrop_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-landrop}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-landrop} -d $${POSTGRES_DB:-landrop}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     networks:
       - landrop-internal
 
@@ -55,7 +77,9 @@ services:
       - --lt-cred-mech
       - --no-cli
       - --no-multicast-peers
-      - --no-loopback-peers
+      # Explicitly allow hairpinning to Coturn's own relay allocations
+      - --allowed-peer-ip=172.18.0.2
+      - --allowed-peer-ip=${EXTERNAL_IP}
       # Anti-SSRF internal network isolation (IPv4 + IPv6)
       - --denied-peer-ip=10.0.0.0-10.255.255.255
       - --denied-peer-ip=172.16.0.0-172.31.255.255
@@ -71,7 +95,8 @@ services:
       - "3478:3478/udp"
       - "49160-49200:49160-49200/udp"
     networks:
-      - landrop-internal
+      landrop-internal:
+        ipv4_address: 172.18.0.2
 
   caddy:
     image: caddy:2.8-alpine
@@ -96,7 +121,11 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  postgres_data:
 
 networks:
   landrop-internal:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16

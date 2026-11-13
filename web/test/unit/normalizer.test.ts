@@ -47,4 +47,11 @@ describe('TC-ROOM-NORMALIZATION: Crockford Base32 Room Code Normalizer', () => {
     expect(failure.success).toBe(false);
     expect(failure.error).toBeDefined();
   });
+
+  it('normalizes full URLs with hash fragments and pairing links', () => {
+    expect(normalizeRoomCode('https://landrop-server.duckdns.org/#DROP-K8M4-P9X2')).toBe('DROP-K8M4-P9X2');
+    expect(normalizeRoomCode('http://localhost:5173/#k8m4p9x2')).toBe('DROP-K8M4-P9X2');
+    expect(normalizeRoomCode('https://domain.com/pair#K8M4P9X2')).toBe('DROP-K8M4-P9X2');
+    expect(isValidRoomCode('https://landrop-server.duckdns.org/#DROP-K8M4-P9X2')).toBe(true);
+  });
 });

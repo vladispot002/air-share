@@ -41,6 +41,7 @@ public:
     QPushButton* getCancelBtn() const { return m_cancelBtn; }
     QPushButton* getClearBtn() const { return m_clearBtn; }
     QPushButton* getSendFileBtn() const { return m_sendFileBtn; }
+    QPushButton* getSendFolderBtn() const { return m_sendFolderBtn; }
     QPushButton* getSelectFolderBtn() const { return m_selectFolderBtn; }
     QPushButton* getOpenFolderBtn() const { return m_openFolderBtn; }
     QLabel* getDownloadsPathDisplay() const { return m_downloadsPathDisplay; }
@@ -56,6 +57,7 @@ private slots:
     void onCancelClicked();
     void onClearClicked();
     void onSendFileClicked();
+    void onSendFolderClicked();
     void onSelectFolderClicked();
     void onOpenFolderClicked();
     void onTableRowSelected(int row, int column);
@@ -72,6 +74,7 @@ private:
     QPushButton* m_cancelBtn{nullptr};
     QPushButton* m_clearBtn{nullptr};
     QPushButton* m_sendFileBtn{nullptr};
+    QPushButton* m_sendFolderBtn{nullptr};
     QPushButton* m_selectFolderBtn{nullptr};
     QPushButton* m_openFolderBtn{nullptr};
 
@@ -83,6 +86,7 @@ private:
     void setupUi();
     void updateActionButtons();
     void updateLocationBar();
+    std::string promptTargetPeer();
 };
 
 }

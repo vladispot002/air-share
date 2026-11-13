@@ -54,6 +54,11 @@ func TestNormalizeRoomCode(t *testing.T) {
 		{"DROP-K8M4-P9XL", "DROP-K8M4-P9X1", true}, // 'L' corrected to '1'
 		{"DROP-K8M4-P9XI", "DROP-K8M4-P9X1", true}, // 'I' corrected to '1'
 		{"DROP-DROP-K8M4", "DROP-DR0P-K8M4", true}, // 'O' in code suffix converted to '0'
+		{"https://landrop-server.duckdns.org/#DROP-K8M4-P9X2", "DROP-K8M4-P9X2", true},
+		{"https://landrop-server.duckdns.org/#k8m4p9x2", "DROP-K8M4-P9X2", true},
+		{"#DROP-K8M4-P9X2", "DROP-K8M4-P9X2", true},
+		{"https://landrop-server.duckdns.org/DROP-K8M4-P9X2", "DROP-K8M4-P9X2", true},
+		{"  \nDROP-K8M4-P9X2\t\r", "DROP-K8M4-P9X2", true},
 		{"DROP-SHORT", "", false},                  // Invalid length
 		{"DROP-INVALID-CODE-TOO-LONG", "", false},  // Invalid length
 	}

@@ -16,6 +16,7 @@ export enum MessageType {
   Ping = 0x0006,
   Pong = 0x0007,
   ResumeRequest = 0x0008,
+  BatchManifest = 0x0009,
 }
 
 export enum AckStatus {
@@ -456,6 +457,145 @@ export class ResumeRequestMessage {
     msg.fileHash = dec.decode(data.subarray(0, 64));
     msg.bytesReceivedSoFar = view.getBigUint64(64, false);
     msg.partialSha256 = dec.decode(data.subarray(72, 136));
+    return msg;
+  }
+}
+
+// Batch File Entry for multi-file and directory transfer
+export interface BatchFileEntry {
+  fileIndex: number;
+  fileSize: bigint;
+  relativePath: string;
+  sha256Hex: string;
+}
+
+// Batch Manifest payload (0x0009)
+export class BatchManifestMessage {
+  batchId: string = '';
+  totalFiles: number = 0;
+  totalBytes: bigint = 0n;
+  files: BatchFileEntry[] = [];
+
+  serialize(): Uint8Array {
+    const enc = new TextEncoder();
+    const batchIdBytes = enc.encode(this.batchId);
+    let totalLen = 2 + batchIdBytes.length + 4 + 8;
+
+    const encodedFiles: {
+      idx: number;
+      size: bigint;
+      pathBytes: Uint8Array;
+      shaBytes: Uint8Array;
+    }[] = [];
+
+    for (const f of this.files) {
+      const pathBytes = enc.encode(f.relativePath);
+      const shaBytes = enc.encode(f.sha256Hex.padEnd(64, '0').slice(0, 64));
+      encodedFiles.push({
+        idx: f.fileIndex,
+        size: f.fileSize,
+        pathBytes,
+        shaBytes,
+      });
+      totalLen += 4 + 8 + 2 + pathBytes.length + 64;
+    }
+
+    const buf = new Uint8Array(totalLen);
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    let offset = 0;
+
+    view.setUint16(offset, batchIdBytes.length, false);
+    offset += 2;
+    if (batchIdBytes.length > 0) {
+      buf.set(batchIdBytes, offset);
+      offset += batchIdBytes.length;
+    }
+
+    view.setUint32(offset, this.files.length, false);
+    offset += 4;
+
+    view.setBigUint64(offset, this.totalBytes, false);
+    offset += 8;
+
+    for (const ef of encodedFiles) {
+      view.setUint32(offset, ef.idx, false);
+      offset += 4;
+      view.setBigUint64(offset, ef.size, false);
+      offset += 8;
+      view.setUint16(offset, ef.pathBytes.length, false);
+      offset += 2;
+      if (ef.pathBytes.length > 0) {
+        buf.set(ef.pathBytes, offset);
+        offset += ef.pathBytes.length;
+      }
+      buf.set(ef.shaBytes, offset);
+      offset += 64;
+    }
+
+    return buf;
+  }
+
+  static deserialize(data: Uint8Array): BatchManifestMessage {
+    if (!data || data.length < 2 + 4 + 8) {
+      throw new Error(`Buffer underflow parsing BatchManifestMessage: expected at least 14 bytes, got ${data ? data.length : 0}`);
+    }
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const dec = new TextDecoder();
+    let offset = 0;
+
+    const idLen = view.getUint16(offset, false);
+    offset += 2;
+    if (offset + idLen + 4 + 8 > data.length) {
+      throw new Error('Truncated header in BatchManifestMessage');
+    }
+    const batchId = dec.decode(data.subarray(offset, offset + idLen));
+    offset += idLen;
+
+    const totalFiles = view.getUint32(offset, false);
+    offset += 4;
+    if (totalFiles > 100000) {
+      throw new Error(`File count exceeds maximum allowed batch limit (${totalFiles})`);
+    }
+
+    const totalBytes = view.getBigUint64(offset, false);
+    offset += 8;
+
+    const files: BatchFileEntry[] = [];
+    for (let i = 0; i < totalFiles; i++) {
+      if (offset + 4 + 8 + 2 > data.length) {
+        throw new Error(`Truncated file entry at index ${i}`);
+      }
+      const fileIndex = view.getUint32(offset, false);
+      offset += 4;
+      const fileSize = view.getBigUint64(offset, false);
+      offset += 8;
+      const pathLen = view.getUint16(offset, false);
+      offset += 2;
+
+      if (offset + pathLen + 64 > data.length) {
+        throw new Error(`Truncated relativePath or sha256 at index ${i}`);
+      }
+      const relativePath = dec.decode(data.subarray(offset, offset + pathLen));
+      offset += pathLen;
+
+      // Validate relative path
+      if (!relativePath || relativePath.length > 1024 ||
+          relativePath.startsWith('/') || relativePath.startsWith('\\') ||
+          relativePath.includes('..') || relativePath.includes(':')) {
+        throw new Error(`Unsafe relative path in batch manifest: "${relativePath}"`);
+      }
+
+      const sha256Hex = dec.decode(data.subarray(offset, offset + 64));
+      offset += 64;
+
+      files.push({ fileIndex, fileSize, relativePath, sha256Hex });
+    }
+
+    const msg = new BatchManifestMessage();
+    msg.batchId = batchId;
+    msg.totalFiles = totalFiles;
+    msg.totalBytes = totalBytes;
+    msg.files = files;
     return msg;
   }
 }

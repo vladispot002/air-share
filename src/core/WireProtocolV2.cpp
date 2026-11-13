@@ -399,6 +399,139 @@ bool ResumeRequestMessage::deserialize(const uint8_t* data, size_t size, ResumeR
     return true;
 }
 
+// BatchManifestMessage
+std::vector<uint8_t> BatchManifestMessage::serialize() const {
+    size_t total = sizeof(uint16_t) + batchId.size() +
+                   sizeof(uint32_t) + sizeof(uint64_t);
+
+    for (const auto& file : files) {
+        total += sizeof(uint32_t) + sizeof(uint64_t) +
+                 sizeof(uint16_t) + file.relativePath.size() +
+                 64; // SHA-256 hex string
+    }
+
+    std::vector<uint8_t> buf(total);
+    uint8_t* ptr = buf.data();
+
+    uint16_t idLen = static_cast<uint16_t>(batchId.size());
+    uint16_t beIdLen = toBigEndian16(idLen);
+    std::memcpy(ptr, &beIdLen, sizeof(uint16_t)); ptr += sizeof(uint16_t);
+    if (idLen > 0) {
+        std::memcpy(ptr, batchId.data(), idLen); ptr += idLen;
+    }
+
+    uint32_t count = static_cast<uint32_t>(files.size());
+    uint32_t beCount = toBigEndian32(count);
+    std::memcpy(ptr, &beCount, sizeof(uint32_t)); ptr += sizeof(uint32_t);
+
+    uint64_t beTotalBytes = toBigEndian64(totalBytes);
+    std::memcpy(ptr, &beTotalBytes, sizeof(uint64_t)); ptr += sizeof(uint64_t);
+
+    for (const auto& file : files) {
+        uint32_t beIdx = toBigEndian32(file.fileIndex);
+        std::memcpy(ptr, &beIdx, sizeof(uint32_t)); ptr += sizeof(uint32_t);
+
+        uint64_t beFsz = toBigEndian64(file.fileSize);
+        std::memcpy(ptr, &beFsz, sizeof(uint64_t)); ptr += sizeof(uint64_t);
+
+        uint16_t pathLen = static_cast<uint16_t>(file.relativePath.size());
+        uint16_t bePathLen = toBigEndian16(pathLen);
+        std::memcpy(ptr, &bePathLen, sizeof(uint16_t)); ptr += sizeof(uint16_t);
+        if (pathLen > 0) {
+            std::memcpy(ptr, file.relativePath.data(), pathLen); ptr += pathLen;
+        }
+
+        std::string sha = file.sha256Hex;
+        sha.resize(64, '0');
+        std::memcpy(ptr, sha.data(), 64); ptr += 64;
+    }
+
+    return buf;
+}
+
+bool BatchManifestMessage::deserialize(const uint8_t* data, size_t size, BatchManifestMessage& outMsg, std::string* outError) {
+    if (!data || size < sizeof(uint16_t) + sizeof(uint32_t) + sizeof(uint64_t)) {
+        if (outError) *outError = "Buffer underflow parsing BatchManifestMessage";
+        return false;
+    }
+
+    const uint8_t* ptr = data;
+    const uint8_t* end = data + size;
+
+    uint16_t beIdLen = 0;
+    std::memcpy(&beIdLen, ptr, sizeof(uint16_t)); ptr += sizeof(uint16_t);
+    uint16_t idLen = fromBigEndian16(beIdLen);
+    if (ptr + idLen > end) {
+        if (outError) *outError = "Truncated batchId in BatchManifestMessage";
+        return false;
+    }
+    outMsg.batchId.assign(reinterpret_cast<const char*>(ptr), idLen);
+    ptr += idLen;
+
+    if (ptr + sizeof(uint32_t) + sizeof(uint64_t) > end) {
+        if (outError) *outError = "Truncated header fields in BatchManifestMessage";
+        return false;
+    }
+
+    uint32_t beCount = 0;
+    std::memcpy(&beCount, ptr, sizeof(uint32_t)); ptr += sizeof(uint32_t);
+    outMsg.totalFiles = fromBigEndian32(beCount);
+
+    constexpr uint32_t kMaxFilesPerBatch = 100000;
+    if (outMsg.totalFiles > kMaxFilesPerBatch) {
+        if (outError) *outError = "File count exceeds maximum allowed batch limit (" + std::to_string(outMsg.totalFiles) + ")";
+        return false;
+    }
+
+    uint64_t beTotalBytes = 0;
+    std::memcpy(&beTotalBytes, ptr, sizeof(uint64_t)); ptr += sizeof(uint64_t);
+    outMsg.totalBytes = fromBigEndian64(beTotalBytes);
+
+    outMsg.files.clear();
+    outMsg.files.reserve(outMsg.totalFiles);
+
+    for (uint32_t i = 0; i < outMsg.totalFiles; ++i) {
+        if (ptr + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint16_t) > end) {
+            if (outError) *outError = "Truncated file entry at index " + std::to_string(i);
+            return false;
+        }
+
+        BatchFileEntry entry;
+        uint32_t beIdx = 0;
+        std::memcpy(&beIdx, ptr, sizeof(uint32_t)); ptr += sizeof(uint32_t);
+        entry.fileIndex = fromBigEndian32(beIdx);
+
+        uint64_t beFsz = 0;
+        std::memcpy(&beFsz, ptr, sizeof(uint64_t)); ptr += sizeof(uint64_t);
+        entry.fileSize = fromBigEndian64(beFsz);
+
+        uint16_t bePathLen = 0;
+        std::memcpy(&bePathLen, ptr, sizeof(uint16_t)); ptr += sizeof(uint16_t);
+        uint16_t pathLen = fromBigEndian16(bePathLen);
+
+        if (ptr + pathLen + 64 > end) {
+            if (outError) *outError = "Truncated relativePath or sha256 at index " + std::to_string(i);
+            return false;
+        }
+
+        entry.relativePath.assign(reinterpret_cast<const char*>(ptr), pathLen);
+        ptr += pathLen;
+
+        // Path safety validation
+        if (!isSafeRelativePath(entry.relativePath)) {
+            if (outError) *outError = "Unsafe relative path detected in batch manifest: " + entry.relativePath;
+            return false;
+        }
+
+        entry.sha256Hex.assign(reinterpret_cast<const char*>(ptr), 64);
+        ptr += 64;
+
+        outMsg.files.push_back(std::move(entry));
+    }
+
+    return true;
+}
+
 std::vector<uint8_t> buildFrame(MessageType type, const std::vector<uint8_t>& payload, uint32_t crcOrSeq) {
     FrameHeader hdr;
     hdr.version = PROTOCOL_VERSION;

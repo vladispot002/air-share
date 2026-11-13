@@ -185,3 +185,19 @@
         return (r1 == 0 && r2 == 0) ? 0 : -1;
     }
 #endif
+
+inline bool isSocketReadable(socket_handle_t sock, int timeoutMs) {
+    if (!isValidSocket(sock)) return false;
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(sock, &rfds);
+    struct timeval tv{};
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+#if defined(_WIN32) || defined(_WIN64)
+    int ret = ::select(0, &rfds, nullptr, nullptr, timeoutMs >= 0 ? &tv : nullptr);
+#else
+    int ret = ::select(sock + 1, &rfds, nullptr, nullptr, timeoutMs >= 0 ? &tv : nullptr);
+#endif
+    return (ret > 0 && FD_ISSET(sock, &rfds));
+}

@@ -85,6 +85,7 @@ public:
     // Outgoing Protocol Actions
     bool createRoom();
     bool joinRoom(const std::string& roomCode);
+    bool bindClient(const std::string& token, const std::string& userId = "", const std::string& deviceId = "");
     bool sendSdpOffer(const std::string& sdp, const std::string& e2eeKey = "");
     bool sendSdpAnswer(const std::string& sdp, const std::string& e2eeKey = "");
     bool sendIceCandidate(const std::string& candidate, const std::string& sdpMid, int sdpMLineIndex);

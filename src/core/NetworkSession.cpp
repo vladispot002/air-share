@@ -426,4 +426,16 @@ double NetworkSession::getElapsedSeconds() const {
     return std::chrono::duration<double>(now - m_connectedAt).count();
 }
 
+bool NetworkSession::hasDataToRead(int timeoutMs) const {
+    if (!isValidSocket(m_socketFd) || m_state != ConnectionState::Connected) {
+        return false;
+    }
+    if (m_isEncrypted && m_ssl) {
+        if (SSL_pending(m_ssl) > 0) {
+            return true;
+        }
+    }
+    return isSocketReadable(m_socketFd, timeoutMs);
+}
+
 } // namespace landrop

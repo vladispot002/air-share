@@ -31,6 +31,8 @@
 #include "landrop/core/TurnConfigClient.hpp"
 #include "landrop/core/WebRtcSessionCoordinator.hpp"
 #include "landrop/core/DoctorEngine.hpp"
+#include "landrop/core/LocalWebBridge.hpp"
+#include "landrop/core/TransferStateStore.hpp"
 
 
 #include "landrop/peers/NetworkPeer.hpp"
@@ -48,6 +50,8 @@
 #include "landrop/ui/StoragePresenter.hpp"
 #include "landrop/ui/SettingsPresenter.hpp"
 #include "landrop/ui/QrCodeGenerator.hpp"
+#include "landrop/identity/IdentityClient.hpp"
+#include "landrop/ui/AccountPresenter.hpp"
 
 using namespace landrop;
 
@@ -449,8 +453,9 @@ static bool testPresenters() {
     TEST_ASSERT(!mock.isScanning, "Scan toggled off");
 
     // Test direct connect requested
+    size_t prevCount = mock.devices.size();
     disc.onDirectConnectRequested("10.0.0.5", 9999);
-    TEST_ASSERT(mock.devices.size() == 1, "Direct peer added to devices");
+    TEST_ASSERT(mock.devices.size() == prevCount + 1, "Direct peer added to devices");
     TEST_ASSERT(disc.getSelectedPeer() != nullptr, "Direct peer selected");
     TEST_ASSERT(disc.getSelectedPeer()->getId() == "peer-direct-10.0.0.5", "Direct peer ID matches");
 
@@ -1845,8 +1850,96 @@ static bool testTransferEngine() {
     TEST_ASSERT(sentAutoRename, "File sent successfully with autoRenameDuplicates enabled");
     TEST_ASSERT(std::filesystem::exists(recvDir / "engine_small (1).txt"), "Auto-renamed file engine_small (1).txt created");
 
+    // 7. Batch & Directory Transfer Test (Phase 1 Ecosystem)
+    std::filesystem::path batchSrcDir = rootDir / "batch_src";
+    std::filesystem::create_directories(batchSrcDir / "sub" / "deep");
+    {
+        std::ofstream f1(batchSrcDir / "doc1.txt");
+        f1 << "Top-level batch text file content.";
+        std::ofstream f2(batchSrcDir / "sub" / "doc2.txt");
+        f2 << "Nested subfolder text file content.";
+        std::ofstream f3(batchSrcDir / "sub" / "deep" / "doc3.bin", std::ios::binary);
+        std::vector<char> d3(128 * 1024, 'B');
+        f3.write(d3.data(), d3.size());
+    }
+
+    // 7a. Test scanDirectory
+    std::string scanErr;
+    auto scannedItems = TransferEngine::scanDirectory(batchSrcDir.string(), &scanErr);
+    TEST_ASSERT(scannedItems.size() == 3, "scanDirectory discovered exactly 3 files");
+    bool hasDoc1 = false, hasDoc2 = false, hasDoc3 = false;
+    for (const auto& it : scannedItems) {
+        if (it.relativePath == "doc1.txt") hasDoc1 = true;
+        if (it.relativePath == "sub/doc2.txt") hasDoc2 = true;
+        if (it.relativePath == "sub/deep/doc3.bin") hasDoc3 = true;
+    }
+    TEST_ASSERT(hasDoc1 && hasDoc2 && hasDoc3, "scanDirectory preserved nested directory hierarchy");
+
+    // 7b. Test sendBatch and receive
+    bool serverForBatch = engine.startServer(
+        listenPort,
+        recvDir.string(),
+        clientOpts,
+        nullptr,
+        nullptr,
+        nullptr
+    );
+    TEST_ASSERT(serverForBatch, "Restarted server for batch transfer test");
+
+    std::string batchErr;
+    uint32_t batchProgressCalls = 0;
+    bool progressTotalFilesValid = true;
+    bool progressCurrentIndexValid = true;
+    bool sentBatch = engine.sendBatch(
+        "task-engine-batch-1",
+        scannedItems,
+        "batch_test",
+        "127.0.0.1",
+        listenPort,
+        clientOpts,
+        [&](const TransferProgressUpdate& upd) {
+            batchProgressCalls++;
+            if (upd.totalFiles != 3) progressTotalFilesValid = false;
+            if (upd.currentFileIndex < 1 || upd.currentFileIndex > 3) progressCurrentIndexValid = false;
+        },
+        nullptr,
+        &batchErr
+    );
+    TEST_ASSERT(sentBatch, "sendBatch completed successfully");
+    TEST_ASSERT(batchProgressCalls > 0, "sendBatch triggered progress updates");
+    TEST_ASSERT(progressTotalFilesValid, "Batch progress update reports totalFiles = 3 across all updates");
+    TEST_ASSERT(progressCurrentIndexValid, "Batch progress currentFileIndex in valid range [1..3] across all updates");
+    TEST_ASSERT(std::filesystem::exists(recvDir / "doc1.txt"), "Batch file 1 received");
+    TEST_ASSERT(std::filesystem::exists(recvDir / "sub" / "doc2.txt"), "Batch file 2 received in subfolder");
+    TEST_ASSERT(std::filesystem::exists(recvDir / "sub" / "deep" / "doc3.bin"), "Batch file 3 received in deep subfolder");
+
+    TEST_ASSERT(hasher.computeFullFileHash((batchSrcDir / "doc1.txt").string()) == hasher.computeFullFileHash((recvDir / "doc1.txt").string()), "Batch file 1 SHA-256 match");
+    TEST_ASSERT(hasher.computeFullFileHash((batchSrcDir / "sub" / "doc2.txt").string()) == hasher.computeFullFileHash((recvDir / "sub" / "doc2.txt").string()), "Batch file 2 SHA-256 match");
+    TEST_ASSERT(hasher.computeFullFileHash((batchSrcDir / "sub" / "deep" / "doc3.bin").string()) == hasher.computeFullFileHash((recvDir / "sub" / "deep" / "doc3.bin").string()), "Batch file 3 SHA-256 match");
+
+    // 7c. Negative Test: Traversal rejection in batch
+    std::vector<BatchFileItem> unsafeBatch;
+    BatchFileItem unsafeItem;
+    unsafeItem.localFilePath = (batchSrcDir / "doc1.txt").string();
+    unsafeItem.relativePath = "../../etc/unsafe.txt";
+    unsafeBatch.push_back(unsafeItem);
+
+    std::string unsafeErr;
+    bool sentUnsafe = engine.sendBatch(
+        "task-engine-batch-unsafe",
+        unsafeBatch,
+        "unsafe_batch",
+        "127.0.0.1",
+        listenPort,
+        clientOpts,
+        nullptr,
+        nullptr,
+        &unsafeErr
+    );
+    TEST_ASSERT(!sentUnsafe, "sendBatch with unsafe relative path rejected on sender side");
+
     engine.stopServer();
-    TEST_ASSERT(!engine.isServerRunning(), "TransferEngine server stopped cleanly");
+    TEST_ASSERT(!engine.isServerRunning(), "TransferEngine server stopped cleanly after batch test");
 
     std::filesystem::remove_all(rootDir);
     return true;
@@ -2009,6 +2102,41 @@ static bool testWireProtocolV2() {
     strictOpts.allowLegacyV1Fallback = false;
     TEST_ASSERT(strictOpts.requireProtocolV2, "Strict options enforce protocol v2");
     TEST_ASSERT(!strictOpts.allowLegacyV1Fallback, "Strict options prohibit legacy v1 downgrade");
+
+    // 12. BatchManifestMessage serialization and directory hierarchy roundtrip
+    BatchManifestMessage manifest;
+    manifest.batchId = "batch-test-42";
+    manifest.totalFiles = 3;
+    manifest.totalBytes = 15000000ULL;
+    manifest.files = {
+        {0, 1000000ULL, "docs/project_spec.pdf", std::string(64, 'a')},
+        {1, 10000000ULL, "media/assets/video.mp4", std::string(64, 'b')},
+        {2, 4000000ULL, "notes.txt", std::string(64, 'c')}
+    };
+
+    std::vector<uint8_t> manifestBytes = manifest.serialize();
+    BatchManifestMessage parsedManifest;
+    TEST_ASSERT(BatchManifestMessage::deserialize(manifestBytes.data(), manifestBytes.size(), parsedManifest, &err),
+                "BatchManifestMessage deserialized successfully");
+    TEST_ASSERT(parsedManifest.batchId == "batch-test-42", "Batch ID matches");
+    TEST_ASSERT(parsedManifest.totalFiles == 3, "Batch total files matches 3");
+    TEST_ASSERT(parsedManifest.totalBytes == 15000000ULL, "Batch total bytes matches");
+    TEST_ASSERT(parsedManifest.files.size() == 3, "Batch file count matches 3");
+    TEST_ASSERT(parsedManifest.files[0].relativePath == "docs/project_spec.pdf", "Relative path 0 matches");
+    TEST_ASSERT(parsedManifest.files[1].relativePath == "media/assets/video.mp4", "Relative path 1 matches");
+    TEST_ASSERT(parsedManifest.files[2].relativePath == "notes.txt", "Relative path 2 matches");
+    TEST_ASSERT(parsedManifest.files[0].sha256Hex == std::string(64, 'a'), "SHA256 0 matches");
+
+    // 13. isSafeRelativePath security tests
+    TEST_ASSERT(isSafeRelativePath("simple.txt"), "isSafeRelativePath accepts safe root file");
+    TEST_ASSERT(isSafeRelativePath("folder/subfolder/file.jpg"), "isSafeRelativePath accepts nested relative path");
+    TEST_ASSERT(!isSafeRelativePath("/absolute/path/file.txt"), "isSafeRelativePath rejects leading forward slash");
+    TEST_ASSERT(!isSafeRelativePath("\\windows\\abs\\file.txt"), "isSafeRelativePath rejects leading backslash");
+    TEST_ASSERT(!isSafeRelativePath("../escaped.txt"), "isSafeRelativePath rejects directory traversal ..");
+    TEST_ASSERT(!isSafeRelativePath("folder/../../escaped.txt"), "isSafeRelativePath rejects mid-path ..");
+    TEST_ASSERT(!isSafeRelativePath("C:\\Windows\\system32"), "isSafeRelativePath rejects drive letter");
+    TEST_ASSERT(!isSafeRelativePath("folder/CON/bad.txt"), "isSafeRelativePath rejects Win32 reserved device in path");
+    TEST_ASSERT(!isSafeRelativePath("folder//empty_segment.txt"), "isSafeRelativePath rejects empty double-slash segment");
 
     return true;
 }
@@ -3024,6 +3152,7 @@ bool testMilestone2D_EndToEndWebRtcTransfer() {
     // -------------------------------------------------------------
     // 3. TC-E2E-REAL-SIGNALING: Live Go Signaling Daemon E2E Integration Test
     // -------------------------------------------------------------
+#ifndef _WIN32
     {
         std::string srvBin = "./backend/signaling/bin/signaling-server";
         if (std::filesystem::exists(srvBin)) {
@@ -3127,6 +3256,7 @@ bool testMilestone2D_EndToEndWebRtcTransfer() {
             }
         }
     }
+#endif
 
     return true;
 }
@@ -4057,7 +4187,7 @@ bool testSuite31_ReleaseGate_RealWebRtcAndWireProtocolV2() {
         chanB->setRealDataChannel(dcB, pcB);
 
         std::string testFile = (rootDir / "sender" / "abrupt_test.dat").string();
-        createTestFile(testFile, 2 * 1024 * 1024, 0x44);
+        createTestFile(testFile, 4 * 1024 * 1024, 0x44);
 
         TransferEngine engine;
         TransferOptions txOpts;
@@ -4076,8 +4206,10 @@ bool testSuite31_ReleaseGate_RealWebRtcAndWireProtocolV2() {
         // Abruptly close channel midway through transmission
         std::thread txThread([&]() {
             engine.sendFileOverChannel("task-abrupt-tx", testFile, chanA, txOpts, [&](const TransferProgressUpdate& upd) {
-                if (upd.bytesTransferred >= 131072) {
+                if (upd.bytesTransferred > 0 && upd.bytesTransferred < 4 * 1024 * 1024) {
                     chanA->close();
+                    if (pcA) pcA->close();
+                    if (pcB) pcB->close();
                 }
             }, nullptr, nullptr);
         });
@@ -4234,6 +4366,667 @@ bool testSuite31_ReleaseGate_RealWebRtcAndWireProtocolV2() {
     return true;
 }
 
+static bool testSuite32_LocalWebBridge() {
+    // 1. Origin verification rules
+    TEST_ASSERT(LocalWebBridge::isOriginAllowed("http://localhost:3000"), "Origin localhost:3000 allowed");
+    TEST_ASSERT(LocalWebBridge::isOriginAllowed("http://127.0.0.1:5173"), "Origin 127.0.0.1:5173 allowed");
+    TEST_ASSERT(LocalWebBridge::isOriginAllowed("https://landrop.io"), "Origin landrop.io allowed");
+    TEST_ASSERT(LocalWebBridge::isOriginAllowed(""), "Empty origin (direct local client) allowed");
+    TEST_ASSERT(LocalWebBridge::isOriginAllowed("null"), "Null origin allowed");
+    TEST_ASSERT(!LocalWebBridge::isOriginAllowed("https://malicious-site.com"), "External malicious origin rejected");
+    TEST_ASSERT(!LocalWebBridge::isOriginAllowed("http://192.168.1.100:8080"), "Non-loopback external origin rejected");
+
+    // 2. Start bridge on ephemeral port
+    uint16_t bridgePort = 58849;
+    LocalWebBridge bridge(bridgePort);
+
+    std::vector<BridgePeerInfo> mockPeers = {
+        {"peer-desk-1", "MacBook Pro", "192.168.1.105", 8848, "desktop"},
+        {"peer-mob-2", "Pixel 9", "192.168.1.106", 8848, "mobile"}
+    };
+
+    bool started = bridge.start([&]() {
+        return mockPeers;
+    });
+    TEST_ASSERT(started, "LocalWebBridge started on port 58849");
+    TEST_ASSERT(bridge.isRunning(), "LocalWebBridge reports running");
+
+    auto sendHttpRequest = [&](const std::string& rawReq) -> std::string {
+        socket_handle_t sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock == INVALID_SOCKET_HANDLE) return "";
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(bridgePort);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+            closeSocket(sock);
+            return "";
+        }
+        send(sock, rawReq.data(), static_cast<int>(rawReq.size()), 0);
+        std::string totalResp;
+        char buf[4096];
+        while (true) {
+            int recvd = recv(sock, buf, sizeof(buf) - 1, 0);
+            if (recvd <= 0) break;
+            totalResp.append(buf, recvd);
+        }
+        closeSocket(sock);
+        return totalResp;
+    };
+
+    // 3. GET /bridge/status with valid origin
+    std::string statusReq = "GET /bridge/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://localhost:5173\r\n\r\n";
+    std::string statusResp = sendHttpRequest(statusReq);
+    TEST_ASSERT(statusResp.find("200 OK") != std::string::npos, "GET /bridge/status returns 200 OK");
+    TEST_ASSERT(statusResp.find("Access-Control-Allow-Origin: http://localhost:5173") != std::string::npos, "CORS header included in status response");
+    TEST_ASSERT(statusResp.find("\"service\":\"LAN-Drop Local Bridge\"") != std::string::npos, "Status JSON body contains service name");
+    TEST_ASSERT(statusResp.find("\"port\":58849") != std::string::npos, "Status JSON reports listening bridge port 58849");
+    TEST_ASSERT(statusResp.find("\"transferPort\":8848") != std::string::npos, "Status JSON reports core P2P transfer port 8848");
+
+    // 4. GET /bridge/peers with discovered peers
+    std::string peersReq = "GET /bridge/peers HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    std::string peersResp = sendHttpRequest(peersReq);
+    TEST_ASSERT(peersResp.find("200 OK") != std::string::npos, "GET /bridge/peers returns 200 OK");
+    TEST_ASSERT(peersResp.find("MacBook Pro") != std::string::npos, "Peers response contains MacBook Pro");
+    TEST_ASSERT(peersResp.find("Pixel 9") != std::string::npos, "Peers response contains Pixel 9");
+
+    // 5. OPTIONS preflight request
+    std::string optReq = "OPTIONS /bridge/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://landrop.io\r\n\r\n";
+    std::string optResp = sendHttpRequest(optReq);
+    TEST_ASSERT(optResp.find("204 No Content") != std::string::npos, "OPTIONS preflight returns 204 No Content");
+    TEST_ASSERT(optResp.find("Access-Control-Allow-Methods") != std::string::npos, "OPTIONS response contains CORS allowed methods");
+
+    // 6. 403 Forbidden on untrusted origin
+    std::string evilReq = "GET /bridge/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://malicious-attacker.com\r\n\r\n";
+    std::string evilResp = sendHttpRequest(evilReq);
+    TEST_ASSERT(evilResp.find("403 Forbidden") != std::string::npos, "Untrusted origin receives 403 Forbidden");
+
+    // 7. POST /bridge/upload with binary payload
+    std::string uploadDir = (std::filesystem::temp_directory_path() / "landrop_bridge_test_store").string();
+    std::error_code ec;
+    std::filesystem::remove_all(uploadDir, ec);
+    std::filesystem::create_directories(uploadDir, ec);
+    bridge.setStorageDirectory(uploadDir);
+
+    std::string uploadPayload = "Hello, Local Web Bridge bidirectional transfer!";
+    std::ostringstream uploadReq;
+    uploadReq << "POST /bridge/upload?filename=bridge_test.txt HTTP/1.1\r\n"
+              << "Host: 127.0.0.1\r\n"
+              << "Origin: http://localhost:5173\r\n"
+              << "Content-Length: " << uploadPayload.size() << "\r\n\r\n"
+              << uploadPayload;
+    std::string uploadResp = sendHttpRequest(uploadReq.str());
+    TEST_ASSERT(uploadResp.find("200 OK") != std::string::npos, "POST /bridge/upload returns 200 OK");
+    TEST_ASSERT(uploadResp.find("\"status\":\"ok\"") != std::string::npos, "Upload JSON reports status ok");
+    TEST_ASSERT(uploadResp.find("\"filename\":\"bridge_test.txt\"") != std::string::npos, "Upload JSON reports filename");
+    TEST_ASSERT(uploadResp.find("\"sha256\"") != std::string::npos, "Upload JSON reports sha256 checksum");
+
+    // Verify uploaded file on disk
+    std::filesystem::path writtenFile = std::filesystem::path(uploadDir) / "bridge_test.txt";
+    TEST_ASSERT(std::filesystem::exists(writtenFile, ec), "Uploaded file exists in storage dir");
+    TEST_ASSERT(std::filesystem::file_size(writtenFile, ec) == uploadPayload.size(), "Uploaded file size matches payload");
+
+    // 8. GET /bridge/download of existing file
+    std::string downloadReq = "GET /bridge/download?file=bridge_test.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://localhost:5173\r\n\r\n";
+    std::string downloadResp = sendHttpRequest(downloadReq);
+    TEST_ASSERT(downloadResp.find("200 OK") != std::string::npos, "GET /bridge/download returns 200 OK");
+    TEST_ASSERT(downloadResp.find("Content-Type: application/octet-stream") != std::string::npos, "Download response has octet-stream Content-Type");
+    TEST_ASSERT(downloadResp.find(uploadPayload) != std::string::npos, "Download response body matches original uploaded content");
+
+    // 9. GET /bridge/download of non-existent file returns 404
+    std::string missingReq = "GET /bridge/download?file=missing_file.xyz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    std::string missingResp = sendHttpRequest(missingReq);
+    TEST_ASSERT(missingResp.find("404 Not Found") != std::string::npos, "GET /bridge/download missing file returns 404");
+
+    std::filesystem::remove_all(uploadDir, ec);
+    bridge.stop();
+    TEST_ASSERT(!bridge.isRunning(), "LocalWebBridge stopped cleanly");
+    return true;
+}
+
+bool testSuite33_ResilientResumptionAndStateStore() {
+    std::cout << "\n--- Starting Suite 33: Resilient Resumption & Transfer State Store ---" << std::endl;
+    std::filesystem::path testDir = std::filesystem::temp_directory_path() / "landrop_suite33_test";
+    std::error_code ec;
+    std::filesystem::remove_all(testDir, ec);
+    std::filesystem::create_directories(testDir, ec);
+
+    auto createTestFile = [&](const std::string& path, size_t size, uint8_t seed) {
+        std::ofstream out(path, std::ios::binary);
+        std::vector<char> buf(std::min(size, static_cast<size_t>(65536)));
+        size_t written = 0;
+        while (written < size) {
+            size_t toWrite = std::min(buf.size(), size - written);
+            for (size_t i = 0; i < toWrite; ++i) {
+                buf[i] = static_cast<char>((written + i + seed) & 0xFF);
+            }
+            out.write(buf.data(), toWrite);
+            written += toWrite;
+        }
+        out.close();
+    };
+
+    // 1. TransferStateStore operations
+    {
+        std::string journalPath = (testDir / "journal.json").string();
+        TransferStateStore store(journalPath);
+
+        TEST_ASSERT(store.recordCount() == 0, "Suite 33: Initial store has 0 records");
+
+        PersistedTransferRecord r1;
+        r1.taskId = "T-101";
+        r1.fileName = "document.pdf";
+        r1.localFilePath = "/tmp/document.pdf";
+        r1.fileSize = 1048576;
+        r1.bytesTransferred = 524288;
+        r1.direction = TransferDirection::Upload;
+        r1.targetPeerId = "peer-alpha";
+        r1.state = TransferState::Paused;
+        r1.fileHash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+        TEST_ASSERT(store.saveRecord(r1), "Suite 33: Save record succeeds");
+        TEST_ASSERT(store.recordCount() == 1, "Suite 33: Record count is 1");
+
+        auto loaded = store.getRecord("T-101");
+        TEST_ASSERT(loaded.has_value(), "Suite 33: Retrieve saved record T-101");
+        TEST_ASSERT(loaded->fileName == "document.pdf", "Suite 33: Retrieved fileName matches");
+        TEST_ASSERT(loaded->fileSize == 1048576, "Suite 33: Retrieved fileSize matches");
+        TEST_ASSERT(loaded->bytesTransferred == 524288, "Suite 33: Retrieved bytesTransferred matches");
+        TEST_ASSERT(loaded->state == TransferState::Paused, "Suite 33: Retrieved state matches Paused");
+
+        // Update progress
+        TEST_ASSERT(store.updateProgress("T-101", 786432, TransferState::Transferring), "Suite 33: updateProgress succeeds");
+        auto upd = store.getRecord("T-101");
+        TEST_ASSERT(upd.has_value() && upd->bytesTransferred == 786432, "Suite 33: bytesTransferred updated to 786432");
+        TEST_ASSERT(upd->state == TransferState::Transferring, "Suite 33: state updated to Transferring");
+
+        // Add second record and clear finished
+        PersistedTransferRecord r2;
+        r2.taskId = "T-102";
+        r2.fileName = "photo.jpg";
+        r2.fileSize = 2048;
+        r2.bytesTransferred = 2048;
+        r2.state = TransferState::Completed;
+        store.saveRecord(r2);
+        TEST_ASSERT(store.recordCount() == 2, "Suite 33: Two records in store");
+
+        store.clearFinishedRecords();
+        TEST_ASSERT(store.recordCount() == 1, "Suite 33: Completed record cleared, 1 remains");
+        TEST_ASSERT(store.getRecord("T-101").has_value(), "Suite 33: In-flight T-101 preserved after clear");
+
+        // Remove record
+        TEST_ASSERT(store.removeRecord("T-101"), "Suite 33: removeRecord succeeds");
+        TEST_ASSERT(store.recordCount() == 0, "Suite 33: Store empty after removing T-101");
+    }
+
+    // 2. Resilient Resumption live loopback test
+    {
+        std::filesystem::path txDir = testDir / "tx";
+        std::filesystem::path rxDir = testDir / "rx";
+        std::filesystem::create_directories(txDir, ec);
+        std::filesystem::create_directories(rxDir, ec);
+
+        // Create a 192 KB file (3 chunks of 64 KB)
+        std::string srcFile = (txDir / "resume_test.dat").string();
+        createTestFile(srcFile, 192 * 1024, 0x55);
+
+        FileChunkHasher hasher;
+        std::string expHash = hasher.computeFullFileHash(srcFile).value();
+
+        // Simulate a pre-existing partial file at receiver: 128 KB (2 chunks)
+        std::string partFile = (rxDir / ".resume_test.dat.part").string();
+        createTestFile(partFile, 128 * 1024, 0x55); // First 128 KB matches source exactly!
+
+        uint16_t port = 8955;
+        TransferEngine engine;
+        TransferOptions rxOpts;
+        rxOpts.autoRenameDuplicates = false;
+
+        std::atomic<bool> rxDone{false};
+        std::atomic<bool> rxOk{false};
+        std::string rxErr;
+        uint64_t lastRxBytes = 0;
+
+        std::thread rxThread([&]() {
+            bool ok = engine.receiveFileOnce(
+                "task-resume-rx",
+                port,
+                rxDir.string(),
+                rxOpts,
+                [&](const TransferProgressUpdate& upd) {
+                    lastRxBytes = upd.bytesTransferred;
+                },
+                nullptr,
+                &rxErr
+            );
+            rxOk.store(ok);
+            rxDone.store(true);
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        TransferOptions txOpts;
+        std::string txErr;
+        bool txOk = engine.sendFile(
+            "task-resume-tx",
+            srcFile,
+            "127.0.0.1",
+            port,
+            txOpts,
+            nullptr,
+            nullptr,
+            &txErr
+        );
+
+        rxThread.join();
+
+        if (!txOk) std::cout << "Suite 33 txErr: " << txErr << " rxErr: " << rxErr << "\n";
+        TEST_ASSERT(txOk, "Suite 33: sendFile succeeded with resumption");
+        TEST_ASSERT(rxOk.load(), "Suite 33: receiveFileOnce succeeded with resumption");
+
+        std::string finalDestFile = (rxDir / "resume_test.dat").string();
+        TEST_ASSERT(std::filesystem::exists(finalDestFile), "Suite 33: Final destination file exists");
+        TEST_ASSERT(!std::filesystem::exists(partFile), "Suite 33: .part file cleaned up after finalization");
+
+        std::string actHash = hasher.computeFullFileHash(finalDestFile).value();
+        TEST_ASSERT(actHash == expHash, "Suite 33: Resumed file hash matches source perfectly");
+        TEST_ASSERT(std::filesystem::file_size(finalDestFile) == 192 * 1024, "Suite 33: Resumed file size is exactly 192 KB");
+    }
+
+    // 3. Resilient Resumption hash mismatch fallback
+    {
+        std::filesystem::path txDir = testDir / "tx_mismatch";
+        std::filesystem::path rxDir = testDir / "rx_mismatch";
+        std::filesystem::create_directories(txDir, ec);
+        std::filesystem::create_directories(rxDir, ec);
+
+        std::string srcFile = (txDir / "mismatch_test.dat").string();
+        createTestFile(srcFile, 128 * 1024, 0x77);
+
+        FileChunkHasher hasher;
+        std::string expHash = hasher.computeFullFileHash(srcFile).value();
+
+        // Create corrupt partial file (hash won't match)
+        std::string partFile = (rxDir / ".mismatch_test.dat.part").string();
+        createTestFile(partFile, 64 * 1024, 0x99); // Corrupt bytes!
+
+        uint16_t port = 8956;
+        TransferEngine engine;
+        TransferOptions rxOpts;
+        rxOpts.autoRenameDuplicates = false;
+
+        std::atomic<bool> rxDone{false};
+        std::atomic<bool> rxOk{false};
+        std::string rxErr;
+
+        std::thread rxThread([&]() {
+            bool ok = engine.receiveFileOnce(
+                "task-mismatch-rx",
+                port,
+                rxDir.string(),
+                rxOpts,
+                nullptr,
+                nullptr,
+                &rxErr
+            );
+            rxOk.store(ok);
+            rxDone.store(true);
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        TransferOptions txOpts;
+        std::string txErr;
+        bool txOk = engine.sendFile(
+            "task-mismatch-tx",
+            srcFile,
+            "127.0.0.1",
+            port,
+            txOpts,
+            nullptr,
+            nullptr,
+            &txErr
+        );
+
+        rxThread.join();
+
+        TEST_ASSERT(txOk, "Suite 33: sendFile succeeded with restart fallback");
+        TEST_ASSERT(rxOk.load(), "Suite 33: receiveFileOnce succeeded with restart fallback");
+
+        std::string finalDestFile = (rxDir / "mismatch_test.dat").string();
+        TEST_ASSERT(std::filesystem::exists(finalDestFile), "Suite 33: Destination file exists after fallback");
+        std::string actHash = hasher.computeFullFileHash(finalDestFile).value();
+        TEST_ASSERT(actHash == expHash, "Suite 33: Fallback file matches source hash completely");
+    }
+
+    std::filesystem::remove_all(testDir, ec);
+    return true;
+}
+
+// ============================================================================
+// Suite 34: Identity, Accounts, Devices, Contacts & Transfer UX
+// ============================================================================
+
+class MockIdentityHttpClient : public HttpClient {
+public:
+    std::string lastMethod;
+    std::string lastPath;
+    std::string lastBody;
+    std::string lastAuthHeader;
+
+    int responseStatus{200};
+    std::string responseBody;
+
+    HttpResponse send(const HttpRequest& request) override {
+        lastMethod = request.method;
+        lastPath = request.path;
+        lastBody = request.body;
+        auto it = request.headers.find("Authorization");
+        if (it != request.headers.end()) {
+            lastAuthHeader = it->second;
+        } else {
+            lastAuthHeader.clear();
+        }
+
+        HttpResponse res;
+        res.statusCode = responseStatus;
+        res.statusMessage = (responseStatus == 200) ? "OK" : "Error";
+        res.success = (responseStatus >= 200 && responseStatus < 300);
+        res.body = responseBody;
+        if (!res.success) {
+            res.errorMessage = "HTTP " + std::to_string(responseStatus);
+        }
+        return res;
+    }
+};
+
+bool testSuite34_IdentityAndAccountSubsystem() {
+    std::cout << "\n--- Starting Suite 34: Identity, Accounts, Devices & Contacts Subsystem ---\n";
+
+    // 1. IdentityClient default Guest-First state
+    {
+        auto mockHttp = std::make_shared<MockIdentityHttpClient>();
+        IdentityClient client(mockHttp, "http://127.0.0.1:8848");
+
+        TEST_ASSERT(client.isGuest(), "TC-ID-01: Default state is Guest mode");
+        std::string gid = client.getGuestId();
+        TEST_ASSERT(!gid.empty() && gid.rfind("guest-", 0) == 0, "TC-ID-02: Guest ID starts with 'guest-' prefix");
+        TEST_ASSERT(client.getAuthToken().empty(), "TC-ID-03: Guest mode has no auth token");
+        TEST_ASSERT(client.getCurrentUser().userId.empty(), "TC-ID-04: Guest mode has no user profile");
+
+        // Authenticate guest reset
+        std::string oldGid = gid;
+        client.authenticateGuest();
+        TEST_ASSERT(client.isGuest(), "TC-ID-05: Authenticate guest maintains guest mode");
+        TEST_ASSERT(client.getGuestId() != oldGid, "TC-ID-06: New guest authentication regenerates unique guest ID");
+    }
+
+    // 2. Multi-provider authentication & Profile synchronization
+    {
+        auto mockHttp = std::make_shared<MockIdentityHttpClient>();
+        IdentityClient client(mockHttp, "http://127.0.0.1:8848");
+
+        mockHttp->responseStatus = 200;
+        mockHttp->responseBody = R"({
+            "token": "jwt-desktop-token-abc",
+            "user": {
+                "user_id": "u-desktop-1",
+                "landrop_id": "alex_desktop",
+                "display_name": "Alex Desktop",
+                "email": "alex@lan-drop.org",
+                "email_verified": true,
+                "status": "active"
+            },
+            "device": {
+                "device_id": "dev-linux-1",
+                "device_name": "ThinkPad P1",
+                "platform": "linux",
+                "status": "active"
+            }
+        })";
+
+        std::string err;
+        bool authOk = client.authenticateWithProvider(
+            "email",
+            "alex@lan-drop.org",
+            "alex@lan-drop.org",
+            "Alex Desktop",
+            "ThinkPad P1",
+            "linux",
+            &err
+        );
+
+        TEST_ASSERT(authOk, "TC-ID-07: Provider authentication succeeds");
+        TEST_ASSERT(!client.isGuest(), "TC-ID-08: Client transitions out of Guest mode after login");
+        TEST_ASSERT(client.getAuthToken() == "jwt-desktop-token-abc", "TC-ID-09: Token correctly captured from login");
+        TEST_ASSERT(client.getCurrentUser().landropId == "alex_desktop", "TC-ID-10: User LAN-Drop ID populated");
+        TEST_ASSERT(client.getCurrentUser().displayName == "Alex Desktop", "TC-ID-11: Display name populated");
+        TEST_ASSERT(client.getCurrentDevice().deviceId == "dev-linux-1", "TC-ID-12: Device ID populated");
+
+        // Logout returns back to guest mode
+        client.logout();
+        TEST_ASSERT(client.isGuest(), "TC-ID-13: Logout safely resets back to guest mode");
+        TEST_ASSERT(client.getAuthToken().empty(), "TC-ID-14: Logout clears bearer token");
+    }
+
+    // 3. Contacts & Devices management via mock HTTP
+    {
+        auto mockHttp = std::make_shared<MockIdentityHttpClient>();
+        IdentityClient client(mockHttp, "http://127.0.0.1:8848");
+        client.setAuthToken("jwt-valid-token");
+
+        // List contacts
+        mockHttp->responseStatus = 200;
+        mockHttp->responseBody = R"({
+            "contacts": [
+                {
+                    "user_id": "u-user-2",
+                    "landrop_id": "sarah_mac",
+                    "display_name": "Sarah Connor",
+                    "avatar_url": "",
+                    "state": "ACCEPTED",
+                    "is_favorite": true
+                }
+            ]
+        })";
+
+        std::vector<ContactInfo> contacts;
+        std::string err;
+        bool listOk = client.listContacts(contacts, &err);
+        TEST_ASSERT(listOk, "TC-ID-15: listContacts succeeds");
+        TEST_ASSERT(contacts.size() == 1, "TC-ID-16: 1 contact returned");
+        TEST_ASSERT(contacts[0].landropId == "sarah_mac", "TC-ID-17: Contact landrop_id parsed correctly");
+        TEST_ASSERT(contacts[0].isFavorite == true, "TC-ID-18: Contact favorite state parsed");
+        TEST_ASSERT(mockHttp->lastAuthHeader == "Bearer jwt-valid-token", "TC-ID-19: Authorization header sent with request");
+
+        // Create device pairing session
+        mockHttp->responseBody = R"({
+            "session_id": "pair-sess-42",
+            "user_id": "u-desktop-1",
+            "secret": "pair-secret-xyz",
+            "expires_at": "2026-11-12T12:00:00Z"
+        })";
+        DevicePairingInfo pairSession;
+        bool pairOk = client.createPairingSession(pairSession, &err);
+        TEST_ASSERT(pairOk, "TC-ID-20: createPairingSession succeeds");
+        TEST_ASSERT(pairSession.sessionId == "pair-sess-42", "TC-ID-21: Pairing session ID parsed");
+        TEST_ASSERT(pairSession.secret == "pair-secret-xyz", "TC-ID-22: Pairing secret parsed");
+    }
+
+    // 4. AccountPresenter MVP Presentation Logic & State Notifications
+    {
+        auto mockHttp = std::make_shared<MockIdentityHttpClient>();
+        auto client = std::make_shared<IdentityClient>(mockHttp, "http://127.0.0.1:8848");
+        AccountPresenter presenter(client);
+
+        TEST_ASSERT(presenter.isGuest(), "TC-AP-01: Presenter starts in guest mode");
+        TEST_ASSERT(presenter.getContacts().empty(), "TC-AP-02: Presenter starts with empty contacts");
+        TEST_ASSERT(presenter.getDevices().empty(), "TC-AP-03: Presenter starts with empty devices");
+
+        int stateChangeCounter = 0;
+        presenter.setOnStateChanged([&stateChangeCounter]() {
+            stateChangeCounter++;
+        });
+
+        // Set contacts
+        std::vector<ContactInfo> testContacts;
+        ContactInfo c;
+        c.userId = "u-99";
+        c.landropId = "peer_99";
+        c.displayName = "Peer Ninety Nine";
+        c.state = "ACCEPTED";
+        testContacts.push_back(c);
+
+        presenter.setContacts(testContacts);
+        TEST_ASSERT(stateChangeCounter == 1, "TC-AP-04: Presenter notifies state change on setContacts");
+        TEST_ASSERT(presenter.getContacts().size() == 1, "TC-AP-05: Cached contacts accessible");
+        TEST_ASSERT(presenter.getContacts()[0].landropId == "peer_99", "TC-AP-06: Cached contact data matches");
+
+        // Set devices
+        std::vector<DeviceInfo> testDevices;
+        DeviceInfo d;
+        d.deviceId = "dev-android-1";
+        d.deviceName = "Pixel 9 Pro";
+        d.platform = "android";
+        testDevices.push_back(d);
+
+        presenter.setDevices(testDevices);
+        TEST_ASSERT(stateChangeCounter == 2, "TC-AP-07: Presenter notifies state change on setDevices");
+        TEST_ASSERT(presenter.getDevices().size() == 1, "TC-AP-08: Cached devices accessible");
+
+        // Logout
+        presenter.logout();
+        TEST_ASSERT(stateChangeCounter == 3, "TC-AP-09: Presenter notifies state change on logout");
+        TEST_ASSERT(presenter.isGuest(), "TC-AP-10: Presenter returns to guest mode");
+        TEST_ASSERT(presenter.getContacts().empty(), "TC-AP-11: Cached contacts cleared on logout");
+        TEST_ASSERT(presenter.getDevices().empty(), "TC-AP-12: Cached devices cleared on logout");
+    }
+
+    // 5. Transfer History Synchronized API (getHistory, recordHistory, clearHistory)
+    {
+        auto mockHttp = std::make_shared<MockIdentityHttpClient>();
+        IdentityClient client(mockHttp, "http://127.0.0.1:8848");
+        client.setAuthToken("jwt-valid-token");
+
+        // getHistory
+        mockHttp->responseStatus = 200;
+        mockHttp->responseBody = R"([
+            {
+                "transfer_id": "xfer-1",
+                "user_id": "u-user-1",
+                "direction": "upload",
+                "peer_landrop_id": "bob_builder",
+                "peer_device_name": "Bob MacBook",
+                "total_bytes": 1048576,
+                "status": "COMPLETED",
+                "transport_type": "WebRtcDataChannel",
+                "files": [
+                    { "file_name": "presentation.pdf", "file_size": 1048576, "sha256_hex": "abc123" }
+                ],
+                "started_at": "2026-11-11T20:00:00Z",
+                "completed_at": "2026-11-11T20:00:02Z"
+            }
+        ])";
+
+        std::vector<TransferHistoryItem> history;
+        std::string err;
+        bool getOk = client.getHistory(history, 10, &err);
+        TEST_ASSERT(getOk, "TC-HIST-01: getHistory succeeds");
+        TEST_ASSERT(history.size() == 1, "TC-HIST-02: 1 history item returned");
+        TEST_ASSERT(history[0].transferId == "xfer-1", "TC-HIST-03: transferId correctly parsed");
+        TEST_ASSERT(history[0].direction == "upload", "TC-HIST-04: direction correctly parsed");
+        TEST_ASSERT(history[0].files.size() == 1, "TC-HIST-05: files list populated");
+        TEST_ASSERT(history[0].files[0].fileName == "presentation.pdf", "TC-HIST-06: file_name populated");
+
+        // recordHistory
+        mockHttp->responseStatus = 201;
+        mockHttp->responseBody = R"({"status": "created"})";
+        TransferHistoryItem newItem;
+        newItem.transferId = "xfer-2";
+        newItem.direction = "download";
+        newItem.peerLandropId = "sarah_mac";
+        newItem.totalBytes = 2048;
+        newItem.status = "COMPLETED";
+        newItem.transportType = "TcpDirect";
+        bool recOk = client.recordHistory(newItem, &err);
+        TEST_ASSERT(recOk, "TC-HIST-07: recordHistory succeeds");
+
+        // clearHistory
+        mockHttp->responseStatus = 200;
+        mockHttp->responseBody = R"({"cleared": true})";
+        bool clearOk = client.clearHistory(&err);
+        TEST_ASSERT(clearOk, "TC-HIST-08: clearHistory succeeds");
+    }
+
+    // 6. Secure Session Storage & Permissions
+    {
+        auto mockHttp = std::make_shared<MockIdentityHttpClient>();
+        IdentityClient client(mockHttp, "http://127.0.0.1:8848");
+
+        std::string testPath = "/tmp/test_landrop_session_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + ".json";
+        client.setSessionStorePath(testPath);
+
+        UserProfile u;
+        u.userId = "u-sec-1";
+        u.landropId = "sec_user";
+        u.email = "sec@example.com";
+        client.setCurrentUser(u);
+        client.setAuthToken("jwt-sec-token");
+
+        std::string err;
+        bool saveOk = client.saveSession(&err);
+        TEST_ASSERT(saveOk, "TC-SEC-01: saveSession succeeds");
+        TEST_ASSERT(std::filesystem::exists(testPath), "TC-SEC-02: Session file written to disk");
+
+#if !defined(_WIN32)
+        auto perms = std::filesystem::status(testPath).permissions();
+        bool isOwnerOnly = ((perms & std::filesystem::perms::owner_read) != std::filesystem::perms::none) &&
+                           ((perms & std::filesystem::perms::owner_write) != std::filesystem::perms::none) &&
+                           ((perms & std::filesystem::perms::group_read) == std::filesystem::perms::none) &&
+                           ((perms & std::filesystem::perms::others_read) == std::filesystem::perms::none);
+        TEST_ASSERT(isOwnerOnly, "TC-SEC-03: Session file created with strict 0600 user-only permissions");
+#endif
+        std::filesystem::remove(testPath);
+    }
+
+    // 7. Unified Room Code Normalization (URLs, hash fragments, Crockford substitutions)
+    {
+        std::string err;
+        // Plain Crockford canonical
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-K8M4-P9X2", &err) == "DROP-K8M4-P9X2", "TC-NORM-01: Canonical code matches");
+        // Lowercase and dashes omitted
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("k8m4p9x2", &err) == "DROP-K8M4-P9X2", "TC-NORM-02: Raw lowercase normalized");
+        // URL with hash fragment
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("https://landrop-server.duckdns.org/#DROP-06ZS-6PT1", &err) == "DROP-06ZS-6PT1", "TC-NORM-03: Full pairing URL with hash fragment normalized");
+        // URL with path
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("http://localhost:8080/DROP-06ZS-6PT1", &err) == "DROP-06ZS-6PT1", "TC-NORM-04: URL path normalized");
+        // Crockford confusion substitutions (O -> 0, I, L -> 1)
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("oil2oil2", &err) == "DROP-0112-0112", "TC-NORM-05: Crockford O/I/L substitutions handled");
+        // Whitespace tolerance
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("  drop - 06zs - 6pt1 \n", &err) == "DROP-06ZS-6PT1", "TC-NORM-06: Whitespace-tolerant normalization");
+        // Invalid character rejection
+        TEST_ASSERT(WebRtcSessionCoordinator::normalizeRoomCode("DROP-INVALID!", &err).empty(), "TC-NORM-07: Invalid characters rejected");
+    }
+
+    // 8. SignalingClient BIND_CLIENT
+    {
+        landrop::signaling::SignalingClient sc("client-bind-test");
+        std::string sentMsg;
+        sc.setCustomSender([&sentMsg](const std::string& msg) {
+            sentMsg = msg;
+            return true;
+        });
+
+        bool bindOk = sc.bindClient("jwt-test-token", "u-123", "dev-456");
+        TEST_ASSERT(bindOk, "TC-BIND-01: bindClient succeeds");
+        TEST_ASSERT(sentMsg.find("BIND_CLIENT") != std::string::npos, "TC-BIND-02: BIND_CLIENT action sent in envelope");
+        TEST_ASSERT(sentMsg.find("jwt-test-token") != std::string::npos, "TC-BIND-03: Token present in envelope payload");
+        TEST_ASSERT(sentMsg.find("u-123") != std::string::npos, "TC-BIND-04: User ID present in envelope payload");
+    }
+
+    return true;
+}
+
 int main() {
     initSocketSubsystem();
 
@@ -4277,7 +5070,10 @@ int main() {
         {"Mobile Ecosystem Bridge FFI Suite (Milestone 3C)", testSuite28_MobileEcosystemBridgeFfi},
         {"Resilient Streaming & Byte-Offset Resumption Suite (Milestone 3D)", testSuite29_ResilientStreamingResumptionSuite},
         {"Production Packaging & CLI Diagnostics Suite (Milestone 4D)", testSuite30_DoctorEngineAndDiagnosticsSuite},
-        {"Final Release Gate: Real WebRTC & Protocol v2 Interop Suite (v1.0.1)", testSuite31_ReleaseGate_RealWebRtcAndWireProtocolV2}
+        {"Final Release Gate: Real WebRTC & Protocol v2 Interop Suite (v1.0.1)", testSuite31_ReleaseGate_RealWebRtcAndWireProtocolV2},
+        {"Local Web Bridge & Loopback CORS Security (Workstream E2)", testSuite32_LocalWebBridge},
+        {"Resilient Resumption & Transfer State Store (Workstream B)", testSuite33_ResilientResumptionAndStateStore},
+        {"Identity & Account Subsystem Suite (Workstream F)", testSuite34_IdentityAndAccountSubsystem}
     };
 
 

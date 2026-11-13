@@ -58,6 +58,16 @@ public:
     ) = 0;
 
     /**
+     * @brief Waits up to @p timeoutMs for at least one byte of data to become readable on the channel.
+     * Returns true if data is ready to be read, or false on timeout/cancellation/disconnection.
+     */
+    virtual bool waitForReadable(int timeoutMs, std::atomic<bool>* cancelToken = nullptr) {
+        (void)timeoutMs;
+        (void)cancelToken;
+        return false;
+    }
+
+    /**
      * @brief Returns queued unacknowledged bytes in transport buffer for backpressure flow control.
      * Critical for WebRTC DataChannel SCTP buffering and kernel send queues.
      */

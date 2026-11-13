@@ -27,9 +27,18 @@ struct TransferProgressUpdate {
     double speedBytesPerSec{0.0};
     TransferState state{TransferState::Idle};
     std::string message;
+    uint32_t currentFileIndex{1};
+    uint32_t totalFiles{1};
 };
 
 using TransferProgressCallback = std::function<void(const TransferProgressUpdate&)>;
+
+struct BatchFileItem {
+    std::string localFilePath; // Local path on sender's filesystem
+    std::string relativePath;  // Safe relative destination path (e.g., "docs/report.pdf")
+    uint64_t fileSize{0};
+    std::string sha256Hex;     // Precomputed hash (computed automatically if empty)
+};
 
 struct TransferOptions {
     bool useTls{false};
@@ -42,6 +51,8 @@ struct TransferOptions {
     bool requireProtocolV2{false};     // When true, strictly aborts if incoming connection does not negotiate Protocol v2
     bool closeChannelOnCompletion{true}; // When false, channel remains open after transfer completion/failure
     uint32_t headerTimeoutMs{10000};     // Timeout for initial header (0 = indefinite wait until cancel/disconnect)
+    bool enableResume{true};             // Whether to negotiate byte-offset resumption (Milestone 3D)
+    uint32_t resumeTimeoutMs{150};       // Negotiation timeout window waiting for ResumeRequest (ms)
 };
 
 class TransferEngine {
@@ -52,6 +63,9 @@ public:
     // Prevent copying
     TransferEngine(const TransferEngine&) = delete;
     TransferEngine& operator=(const TransferEngine&) = delete;
+
+    // Scan a local directory recursively into a list of safe BatchFileItem
+    static std::vector<BatchFileItem> scanDirectory(const std::string& directoryPath, std::string* outError = nullptr);
 
     // Send a single file to a remote peer (client mode)
     bool sendFile(
@@ -69,6 +83,31 @@ public:
     bool sendFileOverChannel(
         const std::string& taskId,
         const std::string& filePath,
+        std::shared_ptr<ITransportChannel> channel,
+        const TransferOptions& options,
+        TransferProgressCallback progressCb,
+        std::atomic<bool>* cancelFlag = nullptr,
+        std::string* outError = nullptr
+    );
+
+    // Send multiple files or a directory batch to a remote peer (client mode)
+    bool sendBatch(
+        const std::string& taskId,
+        const std::vector<BatchFileItem>& items,
+        const std::string& batchName,
+        const std::string& remoteIp,
+        uint16_t remotePort,
+        const TransferOptions& options,
+        TransferProgressCallback progressCb,
+        std::atomic<bool>* cancelFlag = nullptr,
+        std::string* outError = nullptr
+    );
+
+    // Send multiple files or a directory batch over an arbitrary transport channel
+    bool sendBatchOverChannel(
+        const std::string& taskId,
+        const std::vector<BatchFileItem>& items,
+        const std::string& batchName,
         std::shared_ptr<ITransportChannel> channel,
         const TransferOptions& options,
         TransferProgressCallback progressCb,

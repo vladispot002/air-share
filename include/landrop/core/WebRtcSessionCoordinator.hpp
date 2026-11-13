@@ -75,6 +75,9 @@ struct CoordinatorOptions {
     std::string signalingHttpUrl;
     std::string dataChannelLabel{"lan-drop-data"};
     bool mockLoopbackMode{false};
+    std::string authToken;
+    std::string userId;
+    std::string deviceId;
 };
 
 /**

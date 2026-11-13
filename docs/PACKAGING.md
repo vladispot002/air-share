@@ -44,11 +44,15 @@ cd build
 cpack -G DEB
 ```
 
-### Installation
+### Installation & Dependency Considerations
 ```bash
-sudo dpkg -i lan_drop_*.deb
-sudo apt-get install -f # resolve any missing dependencies if needed
+sudo dpkg -i dist/release-v1.0.2/landrop_1.0.2_amd64.deb
+sudo apt-get install -f
 ```
+
+> [!NOTE]
+> **Dynamic Library Dependencies on Ubuntu**:
+> When compiled with WebRTC enabled (`-DLANDROP_ENABLE_WEBRTC=ON`), the resulting binary links dynamically against `libdatachannel.so.0.22`. Because `libdatachannel` is not currently distributed in the standard Ubuntu 24.04 `main` or `universe` repositories, Ubuntu and Debian users are strongly recommended to run the **Universal AppImage**, which self-contains all required Qt 6, OpenSSL, and libdatachannel shared libraries.
 
 ---
 
@@ -69,16 +73,31 @@ chmod +x scripts/package-fedora.sh
 ```
 
 The script performs:
-1. Source tarball preparation (`landrop-<version>.tar.gz`).
+1. Source tarball preparation (`landrop-1.0.2.tar.gz`).
 2. Release build and full automated test suite execution under offscreen Qt.
 3. RPM build via `rpmbuild -ba packaging/fedora/landrop.spec`.
-4. Generation of a portable self-contained archive (`landrop-<version>-linux-x86_64.tar.gz`).
+4. Generation of a portable self-contained archive (`landrop-1.0.2-linux-x86_64.tar.gz`).
+
+### Verified Installation & Verification (Fedora 40+)
+```bash
+# Install local RPM
+sudo dnf install -y ./dist/rpm/landrop-1.0.2-1.fc44.x86_64.rpm
+
+# Verify installation integrity
+rpm -V landrop
+
+# Run built-in self-test diagnostics
+/usr/bin/lan_drop doctor --json
+
+# Uninstall cleanly
+sudo dnf remove -y landrop
+```
 
 ---
 
 ## 4. Universal Linux AppImage
 
-The AppImage bundle contains the native Qt 6 application, standard desktop metadata, high-resolution icons, and an unprivileged launcher script.
+The AppImage bundle contains the native Qt 6 application, standard desktop metadata, high-resolution icons, bundled `libdatachannel.so.0.22`, and an unprivileged launcher script.
 
 ### Build Command
 ```bash
@@ -88,9 +107,26 @@ chmod +x scripts/build-appimage.sh
 
 ### Output:
 - Staged AppDir: `dist/LAN-Drop.AppDir`
-- AppImage bundle: `dist/LAN-Drop-1.0.1-x86_64.AppImage`
+- AppImage bundle: `dist/LAN-Drop-1.0.2-x86_64.AppImage`
 
 If `appimagetool` is not installed on your system, the script stages the complete `LAN-Drop.AppDir` directory and downloads or invokes `appimagetool` automatically.
+
+### Running the AppImage (FUSE 2 Note)
+Modern distributions (Fedora 40+, Ubuntu 24.04+) ship with FUSE 3 (`libfuse.so.3`) by default, whereas legacy AppImage runtimes depend on FUSE 2 (`libfuse.so.2`).
+
+To run the AppImage without installing extra packages:
+```bash
+./dist/LAN-Drop-1.0.2-x86_64.AppImage --appimage-extract-and-run
+```
+
+Or install legacy FUSE 2 support:
+```bash
+# Fedora / RHEL
+sudo dnf install -y fuse-libs
+
+# Ubuntu / Debian
+sudo apt-get install -y libfuse2
+```
 
 ---
 
@@ -108,6 +144,7 @@ LAN-Drop provides FreeDesktop AppStream 1.0 metadata conforming to modern softwa
 ### Validating Metadata:
 ```bash
 appstreamcli validate resources/io.landrop.LAN-Drop.metainfo.xml
+desktop-file-validate packaging/fedora/lan-drop.desktop
 ```
 
 ---
@@ -126,7 +163,7 @@ Windows builds produce a signed, single-file Inno Setup installer.
 ```powershell
 pwsh scripts/package-windows.ps1 -RunTests
 ```
-The resulting installer will be located at `dist\windows\LAN-Drop-Setup-1.0.1.exe`.
+The resulting installer will be located at `dist\windows\LAN-Drop-Setup-1.0.2.exe`.
 
 ---
 
@@ -137,3 +174,4 @@ Users can verify their package authenticity via:
 ```bash
 sha256sum -c SHA256SUMS.txt --ignore-missing
 ```
+

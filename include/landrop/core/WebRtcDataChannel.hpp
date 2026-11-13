@@ -62,6 +62,8 @@ public:
         std::atomic<bool>* cancelToken = nullptr
     ) override;
 
+    bool waitForReadable(int timeoutMs, std::atomic<bool>* cancelToken = nullptr) override;
+
     size_t getBufferedAmount() const override;
     uint64_t getBytesSent() const override;
     uint64_t getBytesReceived() const override;

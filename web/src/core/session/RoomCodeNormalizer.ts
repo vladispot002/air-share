@@ -9,9 +9,29 @@ export function normalizeRoomCode(input: string): string {
     throw new Error('Room code cannot be empty');
   }
 
+  let str = input.trim();
+  // Support URLs with hash fragments or paths (e.g. https://landrop-server.duckdns.org/#DROP-XXXX-XXXX)
+  if (str.includes('#')) {
+    str = str.substring(str.indexOf('#') + 1);
+  } else if (str.startsWith('http://') || str.startsWith('https://')) {
+    try {
+      const u = new URL(str);
+      if (u.hash) {
+        str = u.hash.replace(/^#/, '');
+      } else {
+        const parts = u.pathname.split('/').filter(Boolean);
+        if (parts.length > 0) {
+          str = parts[parts.length - 1];
+        }
+      }
+    } catch {
+      // Keep str as is
+    }
+  }
+
   let raw = '';
-  for (let i = 0; i < input.length; i++) {
-    const ch = input[i];
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
     if (ch !== '-' && ch !== ' ' && ch !== '\t' && ch !== '\r' && ch !== '\n') {
       raw += ch.toUpperCase();
     }

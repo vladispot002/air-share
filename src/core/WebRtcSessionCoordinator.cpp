@@ -111,6 +111,12 @@ void WebRtcSessionCoordinator::close() {
 }
 
 void WebRtcSessionCoordinator::setupSignalingBindings() {
+    m_signaling->onConnected = [this]() {
+        if (!m_options.authToken.empty()) {
+            m_signaling->bindClient(m_options.authToken, m_options.userId, m_options.deviceId);
+        }
+    };
+
     m_signaling->onRoomCreated = [this](const signaling::RoomCreatedInfo& info) {
         setState(CoordinatorState::WaitingForPeer);
         if (onRoomReady) {
@@ -241,9 +247,13 @@ void WebRtcSessionCoordinator::setupPeerConnection() {
 
     pc->onLocalDescription([this](rtc::Description desc) {
         if (desc.type() == rtc::Description::Type::Offer) {
-            m_signaling->sendSdpOffer(std::string(desc));
+            if (m_role == SessionRole::Initiator) {
+                m_signaling->sendSdpOffer(std::string(desc));
+            }
         } else if (desc.type() == rtc::Description::Type::Answer) {
-            m_signaling->sendSdpAnswer(std::string(desc));
+            if (m_role == SessionRole::Joiner) {
+                m_signaling->sendSdpAnswer(std::string(desc));
+            }
         }
     });
 
@@ -316,9 +326,35 @@ bool WebRtcSessionCoordinator::startAsInitiator(const std::string& signalingWsUr
 }
 
 std::string WebRtcSessionCoordinator::normalizeRoomCode(const std::string& input, std::string* outError) {
+    if (input.empty()) {
+        if (outError) *outError = "Room code cannot be empty";
+        return "";
+    }
+
+    std::string str = input;
+    // Trim leading whitespace
+    while (!str.empty() && (str.front() == ' ' || str.front() == '\t' || str.front() == '\r' || str.front() == '\n')) {
+        str.erase(str.begin());
+    }
+    // Trim trailing whitespace
+    while (!str.empty() && (str.back() == ' ' || str.back() == '\t' || str.back() == '\r' || str.back() == '\n')) {
+        str.pop_back();
+    }
+
+    // Support URLs with hash fragments or paths (e.g. https://landrop-server.duckdns.org/#DROP-06ZS-6PT1)
+    size_t hashPos = str.find('#');
+    if (hashPos != std::string::npos) {
+        str = str.substr(hashPos + 1);
+    } else if (str.rfind("http://", 0) == 0 || str.rfind("https://", 0) == 0) {
+        size_t lastSlash = str.find_last_of('/');
+        if (lastSlash != std::string::npos && lastSlash + 1 < str.length()) {
+            str = str.substr(lastSlash + 1);
+        }
+    }
+
     std::string raw;
-    raw.reserve(input.size());
-    for (char c : input) {
+    raw.reserve(str.size());
+    for (char c : str) {
         if (c != '-' && c != ' ' && c != '\t' && c != '\r' && c != '\n') {
             raw.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
         }

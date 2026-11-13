@@ -20,6 +20,15 @@ const (
 	ActionLeaveRoom     = "LEAVE_ROOM"
 	ActionError         = "ERROR"
 
+	// Identity & Transfer Actions
+	ActionBindClient        = "BIND_CLIENT"
+	ActionClientBound       = "CLIENT_BOUND"
+	ActionTransferRequested = "TRANSFER_REQUESTED"
+	ActionTransferClaimed   = "TRANSFER_CLAIMED"
+	ActionTransferAccepted  = "TRANSFER_ACCEPTED"
+	ActionTransferDeclined  = "TRANSFER_DECLINED"
+	ActionTransferComplete  = "TRANSFER_COMPLETE"
+
 	// Roles
 	RoleInitiator = "initiator"
 	RoleJoiner    = "joiner"
